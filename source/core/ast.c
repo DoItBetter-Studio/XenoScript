@@ -593,13 +593,15 @@ Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line) {
 }
 
 Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line) {
-    Stmt *s                      = arena_alloc(a, sizeof(Stmt));
-    s->kind                      = STMT_INTERFACE_DECL;
-    s->line                      = line;
-    s->interface_decl.name       = name;
-    s->interface_decl.length     = len;
-    s->interface_decl.methods    = NULL;
-    s->interface_decl.method_count = 0;
+    Stmt *s                          = arena_alloc(a, sizeof(Stmt));
+    s->kind                          = STMT_INTERFACE_DECL;
+    s->line                          = line;
+    s->interface_decl.name           = name;
+    s->interface_decl.length         = len;
+    s->interface_decl.parent_name    = NULL;
+    s->interface_decl.parent_length  = 0;
+    s->interface_decl.methods        = NULL;
+    s->interface_decl.method_count   = 0;
     return s;
 }
 

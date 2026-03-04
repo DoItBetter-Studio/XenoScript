@@ -308,6 +308,12 @@ typedef enum {
     OP_LOAD_THIS,         /* (no operands)                       ( -- obj )        */
     OP_CALL_METHOD,       /* [uint16_t fn_idx][uint8_t argc]     ( obj args -- ret ) */
     OP_CALL_SUPER,        /* [uint16_t fn_idx][uint8_t argc]     ( args -- )       */
+    OP_CALL_IFACE,        /* [uint16_t name_const_idx][uint8_t argc]
+                           * Virtual dispatch through an interface-typed reference.
+                           * name_const_idx: index of a string constant holding the
+                           * method name. At runtime, looks up the method on the
+                           * actual concrete class_def of the object.
+                           * Stack: ( obj args -- ret ) */
 
     /* ── Static field access ─────────────────────────────────────────────
      * Reads/writes a static field — belongs to the class, not an instance.

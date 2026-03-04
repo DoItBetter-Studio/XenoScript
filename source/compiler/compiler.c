@@ -1136,6 +1136,24 @@ static void compile_expr(Compiler *c, const Expr *expr) {
                 compile_expr(c, arg->expr);
 
             const char *class_name = expr->method_call.object->resolved_type.class_name;
+            int ci = module_find_class(c->module, class_name);
+
+            if (ci < 0) {
+                /* class_name is an interface — emit a virtual dispatch.
+                 * Store the method name as a string constant; the VM
+                 * looks up the concrete fn_index on the actual object. */
+                char mname_buf[256];
+                int mlen = expr->method_call.method_name_len < 255
+                         ? expr->method_call.method_name_len : 255;
+                memcpy(mname_buf, expr->method_call.method_name, mlen);
+                mname_buf[mlen] = '\0';
+                int name_idx = add_const_str(c, mname_buf);
+                emit_op(c, OP_CALL_IFACE, line);
+                emit_u16(c, (uint16_t)name_idx, line);
+                emit_byte(c, (uint8_t)expr->method_call.arg_count, line);
+                break;
+            }
+
             int fn_idx = find_method_fn_index(c, class_name,
                              expr->method_call.method_name,
                              expr->method_call.method_name_len);

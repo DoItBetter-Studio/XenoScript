@@ -242,3 +242,43 @@ clean:
 tree:
 	@find . -not -path './build/*' -not -path './bin/*' -not -name '*.o' \
 	        -not -name '*.a' | sort | sed 's|[^/]*/|  |g'
+
+# =============================================================================
+# XenoScript language tests (auto-generating expected outputs)
+# =============================================================================
+
+XENO_TEST_DIR := test
+XENO_TESTS := $(wildcard $(XENO_TEST_DIR)/*.xeno)
+
+.PHONY: xeno_tests
+xeno_tests: $(XENOC) $(XENOVM)
+	@echo ""
+	@echo "=========================================="
+	@echo "  Running XenoScript language tests"
+	@echo "=========================================="
+	@for testfile in $(XENO_TESTS); do \
+		base=$${testfile%.xeno}; \
+		outfile="$${base}.out"; \
+		errfile="$${base}.err"; \
+		echo "Running $$testfile"; \
+		$(XENOC) $$testfile > "$${base}.compile.out" 2> "$${base}.compile.err"; \
+		if [ -f "$${base}.xbc" ]; then \
+			$(XENOVM) "$${base}.xbc" > "$${base}.run.out" 2> "$${base}.run.err"; \
+		else \
+			: > "$${base}.run.out"; \
+			: > "$${base}.run.err"; \
+		fi; \
+		if [ ! -f "$$outfile" ]; then \
+			echo "  [GEN] $$outfile"; \
+			cp "$${base}.run.out" "$$outfile"; \
+		fi; \
+		if [ ! -f "$$errfile" ]; then \
+			echo "  [GEN] $$errfile"; \
+			cat "$${base}.compile.err" "$${base}.run.err" > "$$errfile"; \
+		fi; \
+		cat "$${base}.run.out" | diff -u "$$outfile" - || exit 1; \
+		cat "$${base}.compile.err" "$${base}.run.err" | diff -u "$$errfile" - || exit 1; \
+		echo "  [PASS] $$testfile"; \
+		echo ""; \
+	done
+	@echo "All XenoScript tests passed."

@@ -1,0 +1,24 @@
+class List<T>
+{
+    public:
+        List<T>() {}
+
+        function add(T value): void
+        {
+            ...
+        }
+
+        function get(int index): T
+        {
+            ...
+        }
+
+        function size(): int
+        {
+            return count;
+        }
+
+    private:
+        T[] items;
+        int count;
+}

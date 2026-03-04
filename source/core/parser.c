@@ -1092,6 +1092,14 @@ static Stmt *parse_interface_decl(Parser *p, int line) {
                                       iface_name.start, iface_name.length,
                                       line);
 
+    /* Optional parent interface: interface IChild : IBase */
+    if (match(p, TOK_COLON)) {
+        Token parent = p->current;
+        consume(p, TOK_IDENT, "Expected parent interface name after ':'");
+        iface->interface_decl.parent_name   = parent.start;
+        iface->interface_decl.parent_length = parent.length;
+    }
+
     consume(p, TOK_LBRACE, "Expected '{' to begin interface body");
 
     typedef struct IfaceMethodNode IMNode;
@@ -1473,9 +1481,15 @@ static Stmt *parse_stmt(Parser *p) {
             Type type = parse_type(p);
             return parse_var_decl(p, type, line);
         }
-        /* Class-typed variable: ClassName varName = ... */
+        /* Class-typed variable: ClassName varName = ...
+         * Also handles array types: ClassName[] varName = ... */
         if (ct == TOK_IDENT && p->next.type == TOK_IDENT) {
             Type type = parse_type(p);   /* consumes the class name */
+            return parse_var_decl(p, type, line);
+        }
+        /* Class/interface array: ClassName[] varName = ... */
+        if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET) {
+            Type type = parse_type(p);   /* consumes ClassName[] */
             return parse_var_decl(p, type, line);
         }
     }

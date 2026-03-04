@@ -882,6 +882,74 @@ static XenoResult xeno_execute(XenoVM *vm) {
                 break;
             }
 
+            case OP_CALL_IFACE: {
+                /* Virtual dispatch through an interface-typed reference.
+                 * name_const_idx holds the method name as a string constant.
+                 * We look up the method on the ACTUAL runtime class_def. */
+                uint16_t name_const_idx = READ_U16();
+                uint8_t  argc           = READ_BYTE();
+
+                if (argc > 32) RUNTIME_ERROR("Too many method arguments");
+                Value args[32];
+                for (int i = argc - 1; i >= 0; i--)
+                    args[i] = POP();
+                Value obj_val = POP();
+
+                if (!obj_val.obj)
+                    RUNTIME_ERROR("Null reference in interface method call");
+
+                /* Fetch the method name from the constant pool */
+                if (name_const_idx >= (uint16_t)frame->chunk->constants.count)
+                    RUNTIME_ERROR("Invalid interface method name constant index");
+                Value name_val = frame->chunk->constants.values[name_const_idx];
+                if (!name_val.s)
+                    RUNTIME_ERROR("Interface method name constant is not a string");
+                const char *mname = name_val.s;
+
+                /* Walk the object's class_def (and parent chain) for the method */
+                ClassDef *search_cls = obj_val.obj->class_def;
+                int iface_fn_idx = -1;
+                int safety = 64;
+                while (search_cls && safety-- > 0) {
+                    for (int i = 0; i < search_cls->method_count; i++) {
+                        if (strcmp(search_cls->methods[i].name, mname) == 0 &&
+                            !search_cls->methods[i].is_static) {
+                            iface_fn_idx = search_cls->methods[i].fn_index;
+                            break;
+                        }
+                    }
+                    if (iface_fn_idx >= 0) break;
+                    /* Move to parent class */
+                    if (search_cls->parent_index >= 0 &&
+                        search_cls->parent_index < vm->module->class_count)
+                        search_cls = &vm->module->classes[search_cls->parent_index];
+                    else
+                        break;
+                }
+
+                if (iface_fn_idx < 0)
+                    RUNTIME_ERROR("Interface dispatch: method '%s' not found on class '%s'",
+                                  mname, obj_val.obj->class_def->name);
+
+                if (iface_fn_idx >= vm->module->count)
+                    RUNTIME_ERROR("Invalid method function index %d (interface dispatch)", iface_fn_idx);
+
+                if (vm->frame_count >= XENO_FRAME_MAX)
+                    RUNTIME_ERROR("Stack overflow in interface method call");
+
+                Chunk *method_chunk = &vm->module->chunks[iface_fn_idx];
+                CallFrame *method_frame = &vm->frames[vm->frame_count++];
+                method_frame->chunk = method_chunk;
+                method_frame->ip    = method_chunk->code;
+
+                method_frame->slots[0] = obj_val;
+                for (int i = 0; i < argc; i++)
+                    method_frame->slots[i + 1] = args[i];
+
+                frame = &vm->frames[vm->frame_count - 1];
+                break;
+            }
+
             case OP_CALL_METHOD: {
                 uint16_t fn_idx = READ_U16();
                 uint8_t  argc   = READ_BYTE();

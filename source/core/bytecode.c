@@ -371,6 +371,8 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_call("CALL_METHOD", chunk, offset);
     case OP_CALL_SUPER:
         return dis_call("CALL_SUPER", chunk, offset);
+    case OP_CALL_IFACE:
+        return dis_call("CALL_IFACE", chunk, offset);
     case OP_LOAD_STATIC:
     {
         uint8_t class_idx = chunk->code[offset + 1];
@@ -561,6 +563,8 @@ const char *opcode_name(OpCode op)
         return "CALL_METHOD";
     case OP_CALL_SUPER:
         return "CALL_SUPER";
+    case OP_CALL_IFACE:
+        return "CALL_IFACE";
     case OP_LOAD_STATIC:
         return "LOAD_STATIC";
     case OP_STORE_STATIC:

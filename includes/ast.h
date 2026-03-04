@@ -714,6 +714,10 @@ struct Stmt {
             const char *name;
             int         length;
 
+            /* Optional parent interface: interface IChild : IBase { ... } */
+            const char *parent_name;
+            int         parent_length;
+
             /* Method signatures — stored as fn_decl stmts (body is NULL) */
             struct IfaceMethodNode {
                 const char         *name;

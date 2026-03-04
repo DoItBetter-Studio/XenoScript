@@ -289,7 +289,122 @@ static bool is_subtype(Checker *c, const char *child_name, const char *parent_na
 }
 
 /*
- * same_class_or_subclass — used by access checks.
+ * class_implements_interface — returns true if class `class_name` directly
+ * or through its ancestor chain implements interface `iface_name`.
+ *
+ * We walk:
+ *   1. The interfaces list of the class itself.
+ *   2. The parent class (recursively), so a child class that doesn't
+ *      re-list an interface but inherits from one that does still satisfies it.
+ *   3. Interface inheritance: if IChild : IBase, then implementing IChild
+ *      also satisfies IBase.
+ */
+static bool iface_extends(Checker *c, const char *child_iface, const char *parent_iface);
+
+static bool class_implements_interface(Checker *c,
+                                       const char *class_name,
+                                       const char *iface_name) {
+    if (!class_name || !iface_name) return false;
+    char buf[64];
+    const char *cur = class_name;
+    int safety = 64;
+    while (cur && safety-- > 0) {
+        Symbol *csym = lookup_symbol(c, cur, (int)strlen(cur));
+        if (!csym || csym->kind != SYM_CLASS || !csym->class_decl) return false;
+        Stmt *cls = csym->class_decl;
+        /* Check every listed interface (and their parents) */
+        typedef struct IfaceNameNode IFNode;
+        for (IFNode *in = cls->class_decl.interfaces; in; in = in->next) {
+            Symbol *isym = lookup_symbol(c, in->name, in->length);
+            if (!isym || isym->kind != SYM_INTERFACE) continue;
+            /* Direct match or the interface extends the target */
+            if (strcmp(isym->iface_name_buf, iface_name) == 0) return true;
+            if (iface_extends(c, isym->iface_name_buf, iface_name)) return true;
+        }
+        /* Walk up to parent class */
+        if (!cls->class_decl.parent_name || cls->class_decl.parent_length == 0)
+            return false;
+        int plen = cls->class_decl.parent_length < 63
+                 ? cls->class_decl.parent_length : 63;
+        memcpy(buf, cls->class_decl.parent_name, plen);
+        buf[plen] = '\0';
+        cur = buf;
+    }
+    return false;
+}
+
+/*
+ * iface_extends — returns true if interface `child_iface` inherits from
+ * (or IS) `parent_iface`, walking the parent chain.
+ */
+static bool iface_extends(Checker *c, const char *child_iface, const char *parent_iface) {
+    if (!child_iface || !parent_iface) return false;
+    if (strcmp(child_iface, parent_iface) == 0) return true;
+    char buf[64];
+    const char *cur = child_iface;
+    int safety = 32;
+    while (cur && safety-- > 0) {
+        Symbol *isym = lookup_symbol(c, cur, (int)strlen(cur));
+        if (!isym || isym->kind != SYM_INTERFACE || !isym->interface_decl) return false;
+        Stmt *iface = isym->interface_decl;
+        if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+            return false;
+        int plen = iface->interface_decl.parent_length < 63
+                 ? iface->interface_decl.parent_length : 63;
+        memcpy(buf, iface->interface_decl.parent_name, plen);
+        buf[plen] = '\0';
+        if (strcmp(buf, parent_iface) == 0) return true;
+        cur = buf;
+    }
+    return false;
+}
+
+/*
+ * type_is_assignable_to_interface — returns true when a TYPE_OBJECT value
+ * (concrete class) can be stored in an interface-typed slot.
+ */
+static bool type_is_assignable_to_interface(Checker *c,
+                                             const Type rhs,
+                                             const char *iface_name) {
+    if (rhs.kind != TYPE_OBJECT || !rhs.class_name) return false;
+    return class_implements_interface(c, rhs.class_name, iface_name);
+}
+
+/*
+ * iface_lookup_method — find a method signature in an interface (and its
+ * parent chain). Returns a pointer to the IfaceMethodNode if found, NULL
+ * if not. `iface_name` must be null-terminated.
+ */
+typedef struct IfaceMethodNode IMNodeT;
+static IMNodeT *iface_lookup_method(Checker *c,
+                                    const char *iface_name,
+                                    const char *method_name,
+                                    int         method_len) {
+    char buf[64];
+    const char *cur = iface_name;
+    int safety = 32;
+    while (cur && safety-- > 0) {
+        Symbol *isym = lookup_symbol(c, cur, (int)strlen(cur));
+        if (!isym || isym->kind != SYM_INTERFACE || !isym->interface_decl) return NULL;
+        Stmt *iface = isym->interface_decl;
+        for (IMNodeT *m = iface->interface_decl.methods; m; m = m->next) {
+            if (m->length == method_len &&
+                memcmp(m->name, method_name, method_len) == 0)
+                return m;
+        }
+        if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+            return NULL;
+        int plen = iface->interface_decl.parent_length < 63
+                 ? iface->interface_decl.parent_length : 63;
+        memcpy(buf, iface->interface_decl.parent_name, plen);
+        buf[plen] = '\0';
+        cur = buf;
+    }
+    return NULL;
+}
+
+/*
+ * same_class_check — used by access checks.
  * Returns true if the checker is currently inside a class that is the same
  * as or a subclass of `target_class_name`.
  * For private: only same class. For protected: same class or subclass.
@@ -760,15 +875,26 @@ static Type check_expr(Checker *c, Expr *expr) {
             if (is_unknown(rhs)) return resolve(expr, sym->type);
 
             /* Types must be compatible — int-family types can mix (with wrap) */
-            if (!types_assignable(sym->type, rhs) &&
-                !(sym->type.kind == TYPE_OBJECT && rhs.kind == TYPE_OBJECT &&
-                  sym->type.class_name && rhs.class_name &&
-                  is_subtype(c, rhs.class_name, sym->type.class_name))) {
-                return error_type(c, expr, expr->line,
-                    "Cannot assign %s to variable '%.*s' of type %s",
-                    type_kind_name(rhs.kind),
-                    expr->assign.length, expr->assign.name,
-                    type_kind_name(sym->type.kind));
+            {
+                bool is_iface_var = false;
+                if (sym->type.kind == TYPE_OBJECT && sym->type.class_name) {
+                    Symbol *dsym = lookup_symbol(c,
+                        sym->type.class_name, (int)strlen(sym->type.class_name));
+                    is_iface_var = (dsym && dsym->kind == SYM_INTERFACE);
+                }
+                bool ok = types_assignable(sym->type, rhs) ||
+                    (sym->type.kind == TYPE_OBJECT && rhs.kind == TYPE_OBJECT &&
+                     sym->type.class_name && rhs.class_name &&
+                     is_subtype(c, rhs.class_name, sym->type.class_name)) ||
+                    (is_iface_var && sym->type.class_name &&
+                     type_is_assignable_to_interface(c, rhs, sym->type.class_name));
+                if (!ok) {
+                    return error_type(c, expr, expr->line,
+                        "Cannot assign %s to variable '%.*s' of type %s",
+                        type_kind_name(rhs.kind),
+                        expr->assign.length, expr->assign.name,
+                        type_kind_name(sym->type.kind));
+                }
             }
 
             /* Warn on narrowing (e.g. assigning int to byte).
@@ -966,22 +1092,48 @@ static Type check_expr(Checker *c, Expr *expr) {
         }
 
         case EXPR_ARRAY_LIT: {
-            /* {e0, e1, e2} — all elements must have same type */
+            /* {e0, e1, e2} — all elements must have compatible types.
+             * For object types, different concrete classes are allowed as
+             * long as they share a common ancestor or will be assigned to
+             * an interface-typed array (checked in var_decl).
+             * When types differ but are all TYPE_OBJECT, use a generic
+             * TYPE_OBJECT (no class_name) so the declared type in var_decl
+             * can impose the interface constraint. */
             if (expr->array_lit.count == 0) {
                 return error_type(c, expr, expr->line,
                     "Cannot infer type of empty array literal — use new Type[0] instead");
             }
             Type elem_type = (Type){.kind=TYPE_UNKNOWN};
+            bool all_objects = true;
             for (struct ArgNode *arg = expr->array_lit.elements; arg; arg = arg->next) {
                 Type t = check_expr(c, arg->expr);
+                if (t.kind != TYPE_OBJECT) all_objects = false;
                 if (elem_type.kind == TYPE_UNKNOWN) {
                     elem_type = t;
                 } else if (!types_assignable(elem_type, t) && !is_unknown(t)) {
-                    return error_type(c, expr, expr->line,
-                        "Array literal elements have inconsistent types: %s and %s",
-                        type_kind_name(elem_type.kind), type_kind_name(t.kind));
+                    /* If all elements are objects with different class names,
+                     * use a generic TYPE_OBJECT — the declared type will
+                     * impose the compatibility constraint in var_decl. */
+                    if (elem_type.kind == TYPE_OBJECT && t.kind == TYPE_OBJECT) {
+                        /* Check if t is a subtype of elem_type or vice versa */
+                        if (elem_type.class_name && t.class_name) {
+                            if (is_subtype(c, t.class_name, elem_type.class_name)) {
+                                /* keep elem_type — it's the wider type */
+                            } else if (is_subtype(c, elem_type.class_name, t.class_name)) {
+                                elem_type = t; /* t is wider */
+                            } else {
+                                /* No class relationship — erase to generic object */
+                                elem_type = (Type){.kind = TYPE_OBJECT, .class_name = NULL};
+                            }
+                        }
+                    } else {
+                        return error_type(c, expr, expr->line,
+                            "Array literal elements have inconsistent types: %s and %s",
+                            type_kind_name(elem_type.kind), type_kind_name(t.kind));
+                    }
                 }
             }
+            (void)all_objects;
             Type *elem_ptr = arena_alloc(c->arena, sizeof(Type));
             *elem_ptr = elem_type;
             return resolve(expr, type_array(elem_ptr));
@@ -1407,6 +1559,49 @@ if (obj_type.kind == TYPE_ARRAY) {
                     type_kind_name(obj_type.kind));
             }
 
+            /* ── Interface-typed variable: obj is IFoo, call its method ──
+             * Look up the method in the interface's signature table and
+             * return the declared return type. The concrete class's method
+             * is resolved at runtime; the checker only verifies the call
+             * is valid according to the interface contract. */
+            {
+                Symbol *maybe_iface = lookup_symbol(c,
+                    obj_type.class_name, (int)strlen(obj_type.class_name));
+                if (maybe_iface && maybe_iface->kind == SYM_INTERFACE) {
+                    const char *mname = expr->method_call.method_name;
+                    int         mlen  = expr->method_call.method_name_len;
+                    IMNodeT *sig = iface_lookup_method(c,
+                        maybe_iface->iface_name_buf, mname, mlen);
+                    if (!sig) {
+                        return error_type(c, expr, expr->line,
+                            "Interface '%s' has no method '%.*s'",
+                            maybe_iface->iface_name_buf, mlen, mname);
+                    }
+                    /* Type-check arguments against the interface signature */
+                    ArgNode   *arg   = expr->method_call.args;
+                    ParamNode *param = sig->params;
+                    int idx = 0;
+                    while (arg && param) {
+                        Type at = check_expr(c, arg->expr);
+                        if (!is_unknown(at) && !types_assignable(param->type, at)) {
+                            type_error(c, expr->line,
+                                "Method '%.*s' argument %d: expected %s, got %s",
+                                mlen, mname, idx + 1,
+                                type_kind_name(param->type.kind),
+                                type_kind_name(at.kind));
+                        }
+                        arg = arg->next; param = param->next; idx++;
+                    }
+                    if (expr->method_call.arg_count != sig->param_count) {
+                        type_error(c, expr->line,
+                            "Method '%.*s' expects %d argument(s), got %d",
+                            mlen, mname, sig->param_count,
+                            expr->method_call.arg_count);
+                    }
+                    return resolve(expr, sig->return_type);
+                }
+            }
+
             Symbol *cls_sym = lookup_symbol(c,
                 obj_type.class_name, (int)strlen(obj_type.class_name));
             if (!cls_sym || cls_sym->kind != SYM_CLASS) {
@@ -1567,11 +1762,15 @@ static void check_stmt(Checker *c, Stmt *stmt) {
             /* If the declared type looks like a class name (TYPE_OBJECT) but
              * resolves to an enum in the symbol table, patch it to TYPE_ENUM. */
             if (declared.kind == TYPE_OBJECT && declared.class_name) {
-                Symbol *maybe_enum = lookup_symbol(c,
+                Symbol *maybe_sym = lookup_symbol(c,
                     declared.class_name, (int)strlen(declared.class_name));
-                if (maybe_enum && maybe_enum->kind == SYM_ENUM) {
-                    declared = type_enum(maybe_enum->enum_name_buf);
+                if (maybe_sym && maybe_sym->kind == SYM_ENUM) {
+                    declared = type_enum(maybe_sym->enum_name_buf);
                     stmt->var_decl.type = declared;
+                }
+                /* Interface type: keep as TYPE_OBJECT but validate it exists */
+                else if (maybe_sym && maybe_sym->kind == SYM_INTERFACE) {
+                    /* already TYPE_OBJECT with class_name = interface name — fine */
                 }
             }
 
@@ -1586,11 +1785,34 @@ static void check_stmt(Checker *c, Stmt *stmt) {
             /* Type-check the initializer if present */
             if (stmt->var_decl.init) {
                 Type init_type = check_expr(c, stmt->var_decl.init);
-                /* Allow subtype: Dog can be assigned to Animal */
+                /* Allow: exact match, int-family mix, subclass, OR
+                 *        concrete class that implements the declared interface */
+                bool is_iface_var = false;
+                if (declared.kind == TYPE_OBJECT && declared.class_name) {
+                    Symbol *dsym = lookup_symbol(c,
+                        declared.class_name, (int)strlen(declared.class_name));
+                    is_iface_var = (dsym && dsym->kind == SYM_INTERFACE);
+                }
+                /* Check if declared is IThing[] and init is a generic object array */
+                bool iface_array_ok = false;
+                if (declared.kind == TYPE_ARRAY && init_type.kind == TYPE_ARRAY &&
+                    declared.element_type && init_type.element_type &&
+                    declared.element_type->kind == TYPE_OBJECT &&
+                    declared.element_type->class_name &&
+                    init_type.element_type->kind == TYPE_OBJECT &&
+                    init_type.element_type->class_name == NULL) {
+                    Symbol *esym = lookup_symbol(c,
+                        declared.element_type->class_name,
+                        (int)strlen(declared.element_type->class_name));
+                    iface_array_ok = (esym && esym->kind == SYM_INTERFACE);
+                }
                 bool compatible = types_assignable(declared, init_type) ||
                     (declared.kind == TYPE_OBJECT && init_type.kind == TYPE_OBJECT &&
                      declared.class_name && init_type.class_name &&
-                     is_subtype(c, init_type.class_name, declared.class_name));
+                     is_subtype(c, init_type.class_name, declared.class_name)) ||
+                    (is_iface_var && declared.class_name &&
+                     type_is_assignable_to_interface(c, init_type, declared.class_name)) ||
+                    iface_array_ok;
                 if (!is_unknown(init_type) && !compatible)
                 {
                     type_error(c, stmt->line,
@@ -1598,9 +1820,6 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                         stmt->var_decl.length, stmt->var_decl.name,
                         type_kind_name(declared.kind),
                         type_kind_name(init_type.kind));
-                    /* Still define the variable so we can continue checking.
-                     * This prevents a cascade of "undefined variable" errors
-                     * on every subsequent use of the variable. */
                 }
             }
 
@@ -1707,13 +1926,38 @@ static void check_stmt(Checker *c, Stmt *stmt) {
         }
 
         case STMT_FOREACH: {
+            /* Patch elem_type: interface name parses as TYPE_OBJECT — keep it,
+             * but also check for enum (same pattern as var_decl). */
+            if (stmt->foreach_stmt.elem_type.kind == TYPE_OBJECT &&
+                stmt->foreach_stmt.elem_type.class_name) {
+                Symbol *maybe_sym = lookup_symbol(c,
+                    stmt->foreach_stmt.elem_type.class_name,
+                    (int)strlen(stmt->foreach_stmt.elem_type.class_name));
+                if (maybe_sym && maybe_sym->kind == SYM_ENUM) {
+                    stmt->foreach_stmt.elem_type = type_enum(maybe_sym->enum_name_buf);
+                }
+            }
             Type arr_type = check_expr(c, stmt->foreach_stmt.array);
             if (!is_unknown(arr_type) && arr_type.kind != TYPE_ARRAY) {
                 type_error(c, stmt->line, "foreach requires an array, got %s", type_kind_name(arr_type.kind)); break;
             }
             if (arr_type.kind == TYPE_ARRAY && arr_type.element_type) {
-                Type decl = stmt->foreach_stmt.elem_type, elem = *arr_type.element_type;
-                if (!is_unknown(elem) && !types_assignable(decl, elem)) {
+                Type decl = stmt->foreach_stmt.elem_type;
+                Type elem = *arr_type.element_type;
+                /* Check if decl is an interface type */
+                bool is_iface_decl = false;
+                if (decl.kind == TYPE_OBJECT && decl.class_name) {
+                    Symbol *dsym = lookup_symbol(c, decl.class_name, (int)strlen(decl.class_name));
+                    is_iface_decl = (dsym && dsym->kind == SYM_INTERFACE);
+                }
+                bool ok = is_unknown(elem) ||
+                    types_assignable(decl, elem) ||
+                    (decl.kind == TYPE_OBJECT && elem.kind == TYPE_OBJECT &&
+                     decl.class_name && elem.class_name &&
+                     is_subtype(c, elem.class_name, decl.class_name)) ||
+                    (is_iface_decl && decl.class_name &&
+                     type_is_assignable_to_interface(c, elem, decl.class_name));
+                if (!ok) {
                     type_error(c, stmt->line, "foreach element type %s does not match array element type %s",
                         type_kind_name(decl.kind), type_kind_name(elem.kind)); break;
                 }
@@ -2054,13 +2298,8 @@ bool checker_check(Checker *c, Program *program) {
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
         if (s->kind != STMT_CLASS_DECL) continue;
-        if (!s->class_decl.interfaces) continue;   /* no colon list at all */
+        if (!s->class_decl.interfaces) continue;
 
-        /* Walk the raw names collected by the parser.
-         * - If the name resolves to SYM_CLASS     → it's the parent class.
-         * - If the name resolves to SYM_INTERFACE → it's an interface.
-         * - Anything else → error.
-         * At most ONE parent class is allowed. */
         typedef struct IfaceNameNode IFNode;
         int parent_count = 0;
 
@@ -2080,12 +2319,11 @@ bool checker_check(Checker *c, Program *program) {
                         "Class '%.*s': cannot inherit from more than one class",
                         s->class_decl.length, s->class_decl.name);
                 } else {
-                    /* Wire up the parent_name pointer used by is_subtype() */
                     s->class_decl.parent_name   = in->name;
                     s->class_decl.parent_length = in->length;
                 }
             } else if (sym->kind == SYM_INTERFACE) {
-                /* Accepted — already stored in the interfaces list */
+                /* Accepted */
             } else {
                 type_error(c, s->line,
                     "Class '%.*s': '%.*s' is neither a class nor an interface",
@@ -2095,14 +2333,31 @@ bool checker_check(Checker *c, Program *program) {
         }
     }
 
-    /* ── PASS 1b2: Interface compliance check ────────────────────────────
+    /* ── PASS 1b_iface: Validate interface parent names ─────────────────── */
+    for (StmtNode *n = program->stmts; n; n = n->next) {
+        Stmt *s = n->stmt;
+        if (s->kind != STMT_INTERFACE_DECL) continue;
+        if (!s->interface_decl.parent_name || s->interface_decl.parent_length == 0) continue;
+        Symbol *psym = lookup_symbol(c,
+            s->interface_decl.parent_name, s->interface_decl.parent_length);
+        if (!psym || psym->kind != SYM_INTERFACE) {
+            type_error(c, s->line,
+                "Interface '%.*s': parent '%.*s' is not a declared interface",
+                s->interface_decl.length, s->interface_decl.name,
+                s->interface_decl.parent_length, s->interface_decl.parent_name);
+        }
+    }
+
+    /* ── PASS 1b2: Interface compliance check ─────────────────────────────
      * For every class that lists interfaces, verify all required methods
-     * are implemented (with matching signatures). */
+     * are implemented (with matching signatures).
+     * We collect required methods from the FULL interface hierarchy
+     * (interface + all its parent interfaces). */
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
         if (s->kind != STMT_CLASS_DECL) continue;
 
-        typedef struct IfaceNameNode IFNode;
+        typedef struct IfaceNameNode  IFNode;
         typedef struct IfaceMethodNode IMNode;
         typedef struct ClassMethodNode CMNode;
 
@@ -2110,94 +2365,107 @@ bool checker_check(Checker *c, Program *program) {
             Symbol *isym = lookup_symbol(c, in->name, in->length);
             if (!isym || isym->kind != SYM_INTERFACE) continue;
 
-            Stmt *iface = isym->interface_decl;
+            /* Walk the interface hierarchy collecting every required method */
+            char iface_walk[64];
+            int  iwlen = in->length < 63 ? in->length : 63;
+            memcpy(iface_walk, in->name, iwlen);
+            iface_walk[iwlen] = '\0';
+            int iface_safety = 32;
 
-            for (IMNode *req = iface->interface_decl.methods; req; req = req->next) {
-                /* Search this class (and its ancestor chain) for an
-                 * instance method matching the required name + signature. */
-                bool found = false;
+            while (iface_walk[0] && iface_safety-- > 0) {
+                Symbol *cur_isym = lookup_symbol(c, iface_walk, (int)strlen(iface_walk));
+                if (!cur_isym || cur_isym->kind != SYM_INTERFACE || !cur_isym->interface_decl)
+                    break;
+                Stmt *iface = cur_isym->interface_decl;
 
-                /* Walk class + parents */
-                char search_buf[64];
-                int  slen = s->class_decl.length < 63 ? s->class_decl.length : 63;
-                memcpy(search_buf, s->class_decl.name, slen);
-                search_buf[slen] = '\0';
+                for (IMNode *req = iface->interface_decl.methods; req; req = req->next) {
+                    bool found = false;
+                    char search_buf[64];
+                    int  slen = s->class_decl.length < 63 ? s->class_decl.length : 63;
+                    memcpy(search_buf, s->class_decl.name, slen);
+                    search_buf[slen] = '\0';
 
-                while (!found) {
-                    Symbol *csym = lookup_symbol(c, search_buf, (int)strlen(search_buf));
-                    if (!csym || csym->kind != SYM_CLASS || !csym->class_decl) break;
-                    Stmt *cls = csym->class_decl;
+                    /* Walk class + class ancestors for implementation */
+                    while (!found) {
+                        Symbol *csym = lookup_symbol(c, search_buf, (int)strlen(search_buf));
+                        if (!csym || csym->kind != SYM_CLASS || !csym->class_decl) break;
+                        Stmt *cls = csym->class_decl;
 
-                    for (CMNode *m = cls->class_decl.methods; m; m = m->next) {
-                        if (m->is_static || m->is_constructor) continue;
-                        Stmt *fn = m->fn;
-                        if (fn->fn_decl.length != req->length) continue;
-                        if (memcmp(fn->fn_decl.name, req->name, req->length) != 0) continue;
-                        /* Name matches — check return type and param count */
-                        if (!type_equals(fn->fn_decl.return_type, req->return_type)) {
-                            type_error(c, s->line,
-                                "Class '%.*s' implements '%.*s': method '%.*s' "
-                                "has wrong return type (expected %s, got %s)",
-                                s->class_decl.length, s->class_decl.name,
-                                in->length, in->name,
-                                req->length, req->name,
-                                type_kind_name(req->return_type.kind),
-                                type_kind_name(fn->fn_decl.return_type.kind));
-                        }
-                        if (fn->fn_decl.param_count != req->param_count) {
-                            type_error(c, s->line,
-                                "Class '%.*s' implements '%.*s': method '%.*s' "
-                                "has wrong parameter count (expected %d, got %d)",
-                                s->class_decl.length, s->class_decl.name,
-                                in->length, in->name,
-                                req->length, req->name,
-                                req->param_count, fn->fn_decl.param_count);
-                        } else {
-                            /* Check param types */
-                            ParamNode *cp = fn->fn_decl.params;
-                            ParamNode *rp = req->params;
-                            int pidx = 0;
-                            while (cp && rp) {
-                                if (!type_equals(cp->type, rp->type)) {
-                                    type_error(c, s->line,
-                                        "Class '%.*s' implements '%.*s': "
-                                        "method '%.*s' parameter %d type mismatch "
-                                        "(expected %s, got %s)",
-                                        s->class_decl.length, s->class_decl.name,
-                                        in->length, in->name,
-                                        req->length, req->name, pidx + 1,
-                                        type_kind_name(rp->type.kind),
-                                        type_kind_name(cp->type.kind));
-                                }
-                                cp = cp->next; rp = rp->next; pidx++;
+                        for (CMNode *m = cls->class_decl.methods; m; m = m->next) {
+                            if (m->is_static || m->is_constructor) continue;
+                            Stmt *fn = m->fn;
+                            if (fn->fn_decl.length != req->length) continue;
+                            if (memcmp(fn->fn_decl.name, req->name, req->length) != 0) continue;
+                            /* Name matches — check return type */
+                            if (!type_equals(fn->fn_decl.return_type, req->return_type)) {
+                                type_error(c, s->line,
+                                    "Class '%.*s' implements '%.*s': method '%.*s' "
+                                    "has wrong return type (expected %s, got %s)",
+                                    s->class_decl.length, s->class_decl.name,
+                                    in->length, in->name,
+                                    req->length, req->name,
+                                    type_kind_name(req->return_type.kind),
+                                    type_kind_name(fn->fn_decl.return_type.kind));
                             }
+                            if (fn->fn_decl.param_count != req->param_count) {
+                                type_error(c, s->line,
+                                    "Class '%.*s' implements '%.*s': method '%.*s' "
+                                    "has wrong parameter count (expected %d, got %d)",
+                                    s->class_decl.length, s->class_decl.name,
+                                    in->length, in->name,
+                                    req->length, req->name,
+                                    req->param_count, fn->fn_decl.param_count);
+                            } else {
+                                ParamNode *cp = fn->fn_decl.params;
+                                ParamNode *rp = req->params;
+                                int pidx = 0;
+                                while (cp && rp) {
+                                    if (!type_equals(cp->type, rp->type)) {
+                                        type_error(c, s->line,
+                                            "Class '%.*s' implements '%.*s': "
+                                            "method '%.*s' parameter %d type mismatch "
+                                            "(expected %s, got %s)",
+                                            s->class_decl.length, s->class_decl.name,
+                                            in->length, in->name,
+                                            req->length, req->name, pidx + 1,
+                                            type_kind_name(rp->type.kind),
+                                            type_kind_name(cp->type.kind));
+                                    }
+                                    cp = cp->next; rp = rp->next; pidx++;
+                                }
+                            }
+                            found = true;
+                            break;
                         }
-                        found = true;
-                        break;
+                        if (found) break;
+                        if (!cls->class_decl.parent_name || cls->class_decl.parent_length == 0)
+                            break;
+                        int plen = cls->class_decl.parent_length < 63
+                                 ? cls->class_decl.parent_length : 63;
+                        memcpy(search_buf, cls->class_decl.parent_name, plen);
+                        search_buf[plen] = '\0';
                     }
 
-                    if (found) break;
-                    /* Walk up to parent class */
-                    if (!cls->class_decl.parent_name || cls->class_decl.parent_length == 0)
-                        break;
-                    int plen = cls->class_decl.parent_length < 63
-                             ? cls->class_decl.parent_length : 63;
-                    memcpy(search_buf, cls->class_decl.parent_name, plen);
-                    search_buf[plen] = '\0';
+                    if (!found) {
+                        type_error(c, s->line,
+                            "Class '%.*s' claims to implement '%.*s' but is missing "
+                            "method '%.*s'",
+                            s->class_decl.length, s->class_decl.name,
+                            in->length, in->name,
+                            req->length, req->name);
+                    }
                 }
 
-                if (!found) {
-                    type_error(c, s->line,
-                        "Class '%.*s' claims to implement '%.*s' but is missing "
-                        "method '%.*s'",
-                        s->class_decl.length, s->class_decl.name,
-                        in->length, in->name,
-                        req->length, req->name);
-                }
+                /* Advance to parent interface */
+                if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+                    break;
+                int plen = iface->interface_decl.parent_length < 63
+                         ? iface->interface_decl.parent_length : 63;
+                memcpy(iface_walk, iface->interface_decl.parent_name, plen);
+                iface_walk[plen] = '\0';
             }
         }
     }
-
     /* ── PASS 1c: Validate annotations ──────────────────────────────────── */
     {
         int mod_count = 0;  /* ensure at most one @Mod */

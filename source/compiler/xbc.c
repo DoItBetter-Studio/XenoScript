@@ -284,6 +284,15 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                 case OP_CALL_METHOD:
                     pc += 3; break;
 
+                case OP_CALL_IFACE:
+                    /* uint16 name_const_idx (a CONST_STR) + uint8 argc */
+                    if (pc+1 < chunk->count) {
+                        uint16_t idx = (chunk->code[pc]<<8)|chunk->code[pc+1];
+                        if (idx < chunk->constants.count)
+                            const_kinds[idx] = CONST_STR;
+                    }
+                    pc += 3; break;
+
                 /* OP_NEW: uint16 class_idx + uint8 argc = 3 bytes */
                 case OP_NEW:
                     pc += 3; break;
