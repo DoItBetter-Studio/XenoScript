@@ -33,12 +33,14 @@ typedef struct {
     /* Input */
     Lexer  *lexer;
 
-    /* Lookahead — we keep the current and next token buffered.
+    /* Lookahead — we keep the current, next, and peek token buffered.
      * current is what we're looking at, next is one token ahead,
-     * previous is what we just consumed. The 2-token lookahead is
-     * needed to distinguish constructor calls from field declarations. */
+     * peek is two tokens ahead. The 3-token lookahead is
+     * needed to disambiguate generic type args from comparison operators:
+     * foo<Bar>(x) vs a < b  — we check that after the type name comes > or , */
     Token   current;
     Token   next;
+    Token   peek;
     Token   previous;
 
     /* Memory — all AST nodes come from here */

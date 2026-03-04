@@ -1,1 +1,2 @@
 xenoc: type errors in 'test/07_interface_missing_method_error.xeno':
+[line 5] Type error: Class 'Bad' claims to implement 'IFoo' but is missing method 'bar'

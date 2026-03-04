@@ -64,6 +64,10 @@ typedef struct {
     Type        param_types[MAX_PARAMS];
     int         param_count;
 
+    /* For SYM_FN only — pointer back to the STMT_FN_DECL AST node.
+     * Used to look up generic type params on the function declaration. */
+    struct Stmt *fn_decl_node;
+
     /* For SYM_CLASS only — pointer back to the STMT_CLASS_DECL AST node.
      * Used by field/method lookup in the type checker.
      * NULL for non-class symbols. */
@@ -121,6 +125,7 @@ typedef struct {
     /* The return type of the function currently being type-checked. */
     Type  current_fn_return_type;
     bool  inside_function;
+    struct Stmt *current_fn_stmt;  /* The STMT_FN_DECL being type-checked (for type param access) */
 
     /* When type-checking a class method or constructor, this points to
      * the class declaration AST node so we can resolve 'this', fields,

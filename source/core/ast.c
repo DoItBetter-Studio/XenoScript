@@ -41,21 +41,23 @@ const char *type_kind_name(TypeKind kind) {
         case TYPE_CHAR:      return "char";
         case TYPE_ANY:       return "any";
         case TYPE_ARRAY:     return "array";
+        case TYPE_PARAM:     return "<type-param>";
         default:             return "<invalid>";
     }
 }
 
-Type type_void(void)   { Type t; t.kind = TYPE_VOID;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_bool(void)   { Type t; t.kind = TYPE_BOOL;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_int(void)    { Type t; t.kind = TYPE_INT;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_float(void)  { Type t; t.kind = TYPE_FLOAT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_string(void) { Type t; t.kind = TYPE_STRING; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
+Type type_void(void)   { Type t; t.kind = TYPE_VOID;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_bool(void)   { Type t; t.kind = TYPE_BOOL;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_int(void)    { Type t; t.kind = TYPE_INT;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_float(void)  { Type t; t.kind = TYPE_FLOAT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_string(void) { Type t; t.kind = TYPE_STRING; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
 Type type_object(const char *class_name) {
     Type t;
     t.kind       = TYPE_OBJECT;
     t.class_name = class_name;
     t.enum_name  = NULL;
     t.element_type = NULL;
+    t.param_name = NULL;
     return t;
 }
 Type type_enum(const char *enum_name) {
@@ -64,24 +66,26 @@ Type type_enum(const char *enum_name) {
     t.class_name = NULL;
     t.enum_name  = enum_name;
     t.element_type = NULL;
+    t.param_name = NULL;
     return t;
 }
-Type type_sbyte(void)  { Type t; t.kind = TYPE_SBYTE;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_byte(void)   { Type t; t.kind = TYPE_BYTE;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_short(void)  { Type t; t.kind = TYPE_SHORT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_ushort(void) { Type t; t.kind = TYPE_USHORT; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_uint(void)   { Type t; t.kind = TYPE_UINT;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_long(void)   { Type t; t.kind = TYPE_LONG;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_ulong(void)  { Type t; t.kind = TYPE_ULONG;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_double(void) { Type t; t.kind = TYPE_DOUBLE; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_char(void)   { Type t; t.kind = TYPE_CHAR;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
-Type type_any(void)    { Type t; t.kind = TYPE_ANY;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; return t; }
+Type type_sbyte(void)  { Type t; t.kind = TYPE_SBYTE;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_byte(void)   { Type t; t.kind = TYPE_BYTE;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_short(void)  { Type t; t.kind = TYPE_SHORT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_ushort(void) { Type t; t.kind = TYPE_USHORT; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_uint(void)   { Type t; t.kind = TYPE_UINT;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_long(void)   { Type t; t.kind = TYPE_LONG;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_ulong(void)  { Type t; t.kind = TYPE_ULONG;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_double(void) { Type t; t.kind = TYPE_DOUBLE; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_char(void)   { Type t; t.kind = TYPE_CHAR;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_any(void)    { Type t; t.kind = TYPE_ANY;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
 Type type_array(Type *element_type) {
     Type t;
     t.kind         = TYPE_ARRAY;
     t.class_name   = NULL;
     t.enum_name    = NULL;
     t.element_type = element_type;
+    t.param_name   = NULL;
     return t;
 }
 
@@ -91,6 +95,17 @@ Type type_class_ref(const char *class_name) {
     t.class_name = class_name;
     t.enum_name  = NULL;
     t.element_type = NULL;
+    t.param_name = NULL;
+    return t;
+}
+
+Type type_param(const char *param_name) {
+    Type t;
+    t.kind       = TYPE_PARAM;
+    t.class_name = NULL;
+    t.enum_name  = NULL;
+    t.element_type = NULL;
+    t.param_name = param_name;
     return t;
 }
 
@@ -113,6 +128,10 @@ bool type_equals(Type a, Type b) {
         while (a.class_name[i] && b.class_name[i] &&
                a.class_name[i] == b.class_name[i]) i++;
         return a.class_name[i] == b.class_name[i];
+    }
+    if (a.kind == TYPE_PARAM) {
+        if (!a.param_name || !b.param_name) return false;
+        return strcmp(a.param_name, b.param_name) == 0;
     }
     if (a.kind == TYPE_ENUM) {
         if (!a.enum_name || !b.enum_name) return false;

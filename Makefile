@@ -274,10 +274,11 @@ xeno_tests: $(XENOC) $(XENOVM)
 		fi; \
 		if [ ! -f "$$errfile" ]; then \
 			echo "  [GEN] $$errfile"; \
-			cat "$${base}.compile.err" "$${base}.run.err" > "$$errfile"; \
+			cat "$${base}.compile.err" "$${base}.compile.out" "$${base}.run.err" > "$$errfile"; \
 		fi; \
 		cat "$${base}.run.out" | diff -u "$$outfile" - || exit 1; \
-		cat "$${base}.compile.err" "$${base}.run.err" | diff -u "$$errfile" - || exit 1; \
+		cat "$${base}.compile.err" "$${base}.compile.out" "$${base}.run.err" | diff -u "$$errfile" - || exit 1; \
+		rm -f "$${base}.compile.out" "$${base}.compile.err" "$${base}.run.out" "$${base}.run.err" "$${base}.xbc" \
 		echo "  [PASS] $$testfile"; \
 		echo ""; \
 	done

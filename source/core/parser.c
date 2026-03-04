@@ -20,22 +20,24 @@
  * ───────────────────────────────────────────────────────────────────────────*/
 
 /* Consume the current token and fetch the next one.
- * The consumed token becomes `previous`, the new one becomes `current`. */
+ * The consumed token becomes `previous`, the new one becomes `current`.
+ * We maintain current, next, and peek (3-token lookahead). */
 static void advance(Parser *p) {
     p->previous = p->current;
     p->current  = p->next;
+    p->next     = p->peek;
 
-    /* Fill next — keep fetching until we get a non-error token */
+    /* Fill peek — keep fetching until we get a non-error token */
     for (;;) {
-        p->next = lexer_next_token(p->lexer);
-        if (p->next.type != TOK_ERROR) break;
+        p->peek = lexer_next_token(p->lexer);
+        if (p->peek.type != TOK_ERROR) break;
 
         /* Report the lexer error but don't set panic_mode */
         if (p->error_count < PARSER_MAX_ERRORS) {
             ParseError *e = &p->errors[p->error_count++];
             snprintf(e->message, sizeof(e->message),
-                     "Lexer error: %.*s", p->next.length, p->next.start);
-            e->line = p->next.line;
+                     "Lexer error: %.*s", p->peek.length, p->peek.start);
+            e->line = p->peek.line;
             p->had_error = true;
         }
     }
@@ -121,6 +123,61 @@ static void synchronize(Parser *p) {
  * Called wherever the grammar requires an explicit type annotation.
  * ───────────────────────────────────────────────────────────────────────────*/
 static Type parse_base_type(Parser *p);
+static TypeParamNode *parse_type_param_list(Parser *p, int *out_count);
+static TypeArgNode   *parse_type_arg_list  (Parser *p, int *out_count);
+
+#define MAX_TYPE_ARGS 8   /* Must match checker.c */
+
+/* is_generic_type_name — returns true if the name contains '<' */
+static bool is_generic_type_name(const char *name) {
+    return name && strchr(name, '<') != NULL;
+}
+
+/* generic_base_name — extract "Stack" from "Stack<int>" into buf. */
+static bool generic_base_name(const char *full_name, char *buf, int buf_size) {
+    if (!full_name) return false;
+    const char *lt = strchr(full_name, '<');
+    if (!lt) return false;
+    int len = (int)(lt - full_name);
+    if (len <= 0 || len >= buf_size) return false;
+    memcpy(buf, full_name, len);
+    buf[len] = '\0';
+    return true;
+}
+
+/* parse_canonical_type_args — extract type args from "Stack<int>" canonical name.
+ * Mirrors the checker version for use in the parser. */
+static int parse_canonical_type_args(const char *full_name,
+                                     Type *out_args, int max_args)
+{
+    const char *lt = strchr(full_name, '<');
+    if (!lt) return 0;
+    const char *p = lt + 1;
+    int count = 0;
+    while (*p && *p != '>' && count < max_args) {
+        while (*p == ' ') p++;
+        if (*p == '>') break;
+        const char *start = p;
+        while (*p && *p != ',' && *p != '>' && *p != ' ') p++;
+        int len = (int)(p - start);
+        Type t;
+        if      (len == 3 && strncmp(start, "int",    3) == 0) t = type_int();
+        else if (len == 5 && strncmp(start, "float",  5) == 0) t = type_float();
+        else if (len == 4 && strncmp(start, "bool",   4) == 0) t = type_bool();
+        else if (len == 6 && strncmp(start, "string", 6) == 0) t = type_string();
+        else if (len == 4 && strncmp(start, "void",   4) == 0) t = type_void();
+        else if (len == 4 && strncmp(start, "char",   4) == 0) t = type_char();
+        else {
+            static char nbuf[64]; int nlen = len < 63 ? len : 63;
+            memcpy(nbuf, start, nlen); nbuf[nlen] = '\0';
+            t = type_object(nbuf);
+        }
+        out_args[count++] = t;
+        while (*p == ' ') p++;
+        if (*p == ',') p++;
+    }
+    return count;
+}
 
 static Type parse_type(Parser *p) {
     Type base = parse_base_type(p);
@@ -156,12 +213,77 @@ parse_base_type(Parser *p) {
         case TOK_CHAR:   advance(p); return type_char();
         case TOK_IDENT: {
             /* A bare identifier as a type means a class name, e.g. Greeter x.
+             * It might also be a generic instantiation: Stack<int> x.
              * We allocate a null-terminated copy in the arena so type_equals
              * and strlen() on class_name work correctly everywhere. */
             advance(p);
             char *name = arena_alloc(&p->arena, t.length + 1);
             memcpy(name, t.start, t.length);
             name[t.length] = '\0';
+
+            /* Check for generic type args: Stack<int>, Pair<string, int>, etc.
+             * We detect this by looking for '<' after the identifier.
+             * To disambiguate from comparison operators, we only do this when
+             * the token after '<' looks like a type (keyword or ident) and
+             * the token after that is '>' or ','. We use a simple lookahead:
+             * peek two tokens ahead. If p->next is a type-start, parse as type args.
+             * We encode the type args into the class_name as "ClassName<arg1,arg2>"
+             * so the checker can decode it. Actually simpler: store in class_name
+             * as a canonical string that the checker recognizes. */
+            if (p->current.type == TOK_LT) {
+                /* Build a canonical name like "Stack<int>" or "Pair<int,string>"
+                 * by parsing the type args and serializing them into a name buffer.
+                 * The checker will use this canonical name to look up the generic. */
+                int type_arg_count = 0;
+                TypeArgNode *type_args = parse_type_arg_list(p, &type_arg_count);
+
+                /* Build canonical name: ClassName<arg1,arg2,...> */
+                /* First compute total length needed */
+                int base_len = t.length;
+                int total = base_len + 1; /* '<' */
+                TypeArgNode *ta = type_args;
+                int i = 0;
+                while (ta) {
+                    if (i++ > 0) total += 1; /* ',' */
+                    /* type name length — approximate using type_kind_name */
+                    if (ta->type.kind == TYPE_OBJECT && ta->type.class_name)
+                        total += (int)strlen(ta->type.class_name);
+                    else
+                        total += (int)strlen(type_kind_name(ta->type.kind));
+                    ta = ta->next;
+                }
+                total += 2; /* '>' and '\0' */
+
+                char *full_name = arena_alloc(&p->arena, total);
+                int pos = 0;
+                memcpy(full_name + pos, t.start, base_len); pos += base_len;
+                full_name[pos++] = '<';
+                ta = type_args; i = 0;
+                while (ta) {
+                    if (i++ > 0) full_name[pos++] = ',';
+                    const char *tname;
+                    if (ta->type.kind == TYPE_OBJECT && ta->type.class_name)
+                        tname = ta->type.class_name;
+                    else
+                        tname = type_kind_name(ta->type.kind);
+                    int tlen = (int)strlen(tname);
+                    memcpy(full_name + pos, tname, tlen); pos += tlen;
+                    ta = ta->next;
+                }
+                full_name[pos++] = '>';
+                full_name[pos]   = '\0';
+
+                /* Store as TYPE_OBJECT with the canonical generic name.
+                 * Also store the type args for the checker to use. */
+                Type result = type_object(full_name);
+                /* We embed the type_args into the type via a side channel:
+                 * since Type has no TypeArgNode field, we use a naming convention
+                 * and rely on the checker to parse the canonical name back.
+                 * This keeps Type as a plain value type. */
+                (void)type_args; /* checker reconstructs from the canonical name */
+                return result;
+            }
+
             return type_object(name);
         }
         default:
@@ -338,7 +460,49 @@ static Expr *parse_prefix(Parser *p) {
         /* ── Identifier or function call ───────────────────────────────── */
         case TOK_IDENT: {
             /* Peek at the NEXT token (current, since we already advanced).
-             * If it's '(' this is a function call, otherwise a variable ref. */
+             * Check for generic call: foo<int>(x)  or  foo<Tag>(x).
+             *
+             * Disambiguation: foo<int>(x)  vs  a < b
+             * In the Pratt parser, comparison '<' is an INFIX operator
+             * handled by parse_infix, NOT parse_prefix. parse_prefix only
+             * sees '<' here when it immediately follows the callee identifier
+             * (the left side is just the ident we just consumed).
+             * Therefore it is safe to attempt type-arg parsing here: if the
+             * '<' is a comparison, parse_expr's infix loop will have consumed
+             * this ident and returned already before we get here.
+             *
+             * We check that after '<' the token looks like a type start to
+             * avoid false positives from operators like '<=' or weird tokens. */
+            TypeArgNode *call_type_args      = NULL;
+            int          call_type_arg_count = 0;
+
+            if (check(p, TOK_LT)) {
+                TokenType after_lt   = p->next.type;
+                TokenType after_type = p->peek.type;
+                /* A type keyword or identifier after '<' is necessary but not
+                 * sufficient — we also require that after the type comes:
+                 *   '>'   — closes single-arg list: foo<int>(x)
+                 *   ','   — separates multi-arg list: foo<int,string>(x)
+                 * This prevents `a < b` from being parsed as a generic call
+                 * when 'b' is followed by an operator or ';'. */
+                bool looks_like_type =
+                    after_lt == TOK_INT    || after_lt == TOK_FLOAT  ||
+                    after_lt == TOK_BOOL   || after_lt == TOK_STRING ||
+                    after_lt == TOK_VOID   || after_lt == TOK_SBYTE  ||
+                    after_lt == TOK_BYTE   || after_lt == TOK_SHORT  ||
+                    after_lt == TOK_USHORT || after_lt == TOK_UINT   ||
+                    after_lt == TOK_LONG   || after_lt == TOK_ULONG  ||
+                    after_lt == TOK_DOUBLE || after_lt == TOK_CHAR   ||
+                    after_lt == TOK_IDENT;
+                bool after_type_closes =
+                    after_type == TOK_GT      ||  /* foo<T>( */
+                    after_type == TOK_COMMA   ||  /* foo<T,U>( */
+                    after_type == TOK_LBRACKET;   /* foo<T[]>( — array type arg */
+                if (looks_like_type && after_type_closes) {
+                    call_type_args = parse_type_arg_list(p, &call_type_arg_count);
+                }
+            }
+
             if (check(p, TOK_LPAREN)) {
                 advance(p);  /* consume '(' */
 
@@ -364,10 +528,24 @@ static Expr *parse_prefix(Parser *p) {
                 }
                 consume(p, TOK_RPAREN, "Expected ')' after arguments");
 
-                return expr_call(&p->arena,
+                Expr *call_e = expr_call(&p->arena,
                                  t.start, t.length,
                                  args, arg_count,
                                  t.line);
+                call_e->call.type_args      = call_type_args;
+                call_e->call.type_arg_count = call_type_arg_count;
+                return call_e;
+            }
+
+            /* If we parsed type args but no '(' follows, that's an error */
+            if (call_type_arg_count > 0) {
+                if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                    ParseError *e = &p->errors[p->error_count++];
+                    snprintf(e->message, sizeof(e->message),
+                             "Expected '(' after generic type arguments");
+                    e->line      = p->current.line;
+                    p->had_error = true;
+                }
             }
 
             /* Plain variable reference */
@@ -506,8 +684,17 @@ static Expr *parse_prefix(Parser *p) {
                 return expr_new_array(&p->arena, elem, len, t.line);
             }
             /* new ClassName(...) — object construction */
+            /* new ClassName<T>(...) — generic object construction */
             Token class_tok = p->current;
             consume(p, TOK_IDENT, "Expected class name after 'new'");
+
+            /* Optional type argument list: new Stack<int>() */
+            TypeArgNode *type_args      = NULL;
+            int          type_arg_count = 0;
+            if (check(p, TOK_LT)) {
+                type_args = parse_type_arg_list(p, &type_arg_count);
+            }
+
             consume(p, TOK_LPAREN, "Expected '(' after class name");
 
             ArgNode *args      = NULL;
@@ -525,10 +712,13 @@ static Expr *parse_prefix(Parser *p) {
             }
             consume(p, TOK_RPAREN, "Expected ')' after constructor arguments");
 
-            return expr_new(&p->arena,
+            Expr *new_e = expr_new(&p->arena,
                             class_tok.start, class_tok.length,
                             args, arg_count,
                             t.line);
+            new_e->new_expr.type_args      = type_args;
+            new_e->new_expr.type_arg_count = type_arg_count;
+            return new_e;
         }
 
         /* Array literal: {e0, e1, e2} */
@@ -798,6 +988,86 @@ static Stmt *parse_var_decl(Parser *p, Type type, int line) {
 }
 
 /*
+ * parse_type_param_list — parses a generic type parameter list:
+ *   <T>
+ *   <T, K>
+ *   <T where T : IFoo>
+ *   <K, V where V : IComparable>
+ *
+ * Precondition: current token is '<'.
+ * Returns a linked list of TypeParamNode, sets *out_count.
+ */
+static TypeParamNode *parse_type_param_list(Parser *p, int *out_count) {
+    advance(p); /* consume '<' */
+
+    TypeParamNode *head = NULL, *tail = NULL;
+    int count = 0;
+
+    do {
+        Token name_tok = p->current;
+        consume(p, TOK_IDENT, "Expected type parameter name");
+
+        TypeParamNode *tp = arena_alloc(&p->arena, sizeof(TypeParamNode));
+        tp->name           = name_tok.start;
+        tp->length         = name_tok.length;
+        tp->constraint     = NULL;
+        tp->constraint_len = 0;
+        tp->next           = NULL;
+
+        /* Optional constraint: where T : IFoo
+         * We check for 'where' keyword after the parameter name. */
+        if (p->current.type == TOK_WHERE) {
+            advance(p); /* consume 'where' */
+            /* Expect: T : IFoo — the param name again, then ':', then constraint */
+            consume(p, TOK_IDENT, "Expected type parameter name after 'where'");
+            consume(p, TOK_COLON, "Expected ':' after type parameter name in 'where' clause");
+            Token constraint_tok = p->current;
+            consume(p, TOK_IDENT, "Expected constraint type name after ':'");
+            tp->constraint     = constraint_tok.start;
+            tp->constraint_len = constraint_tok.length;
+        }
+
+        if (!head) { head = tail = tp; }
+        else       { tail->next = tp; tail = tp; }
+        count++;
+    } while (match(p, TOK_COMMA));
+
+    consume(p, TOK_GT, "Expected '>' to close type parameter list");
+    *out_count = count;
+    return head;
+}
+
+/*
+ * parse_type_arg_list — parses a generic type argument list at an instantiation site:
+ *   <int>
+ *   <string, int>
+ *   <MyClass>
+ *
+ * Precondition: current token is '<'.
+ * Returns a linked list of TypeArgNode, sets *out_count.
+ */
+static TypeArgNode *parse_type_arg_list(Parser *p, int *out_count) {
+    advance(p); /* consume '<' */
+
+    TypeArgNode *head = NULL, *tail = NULL;
+    int count = 0;
+
+    do {
+        Type arg_type = parse_type(p);
+        TypeArgNode *ta = arena_alloc(&p->arena, sizeof(TypeArgNode));
+        ta->type = arg_type;
+        ta->next = NULL;
+        if (!head) { head = tail = ta; }
+        else       { tail->next = ta; tail = ta; }
+        count++;
+    } while (match(p, TOK_COMMA));
+
+    consume(p, TOK_GT, "Expected '>' to close type argument list");
+    *out_count = count;
+    return head;
+}
+
+/*
  * parse_fn_decl — parses:  fn TYPE IDENT ( params ) block
  *
  * Examples:
@@ -810,6 +1080,13 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
     /* Function name */
     Token name = p->current;
     consume(p, TOK_IDENT, "Expected function name");
+
+    /* Optional generic type parameter list: function foo<T>(T x): T { } */
+    TypeParamNode *type_params      = NULL;
+    int            type_param_count = 0;
+    if (check(p, TOK_LT)) {
+        type_params = parse_type_param_list(p, &type_param_count);
+    }
 
     /* Parameter list */
     consume(p, TOK_LPAREN, "Expected '(' after function name");
@@ -844,11 +1121,14 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
     /* Body */
     Stmt *body = parse_block(p);
 
-    return stmt_fn_decl(&p->arena,
+    Stmt *fn = stmt_fn_decl(&p->arena,
                         ret_type,
                         name.start, name.length,
                         params, param_count,
                         body, line);
+    fn->fn_decl.type_params      = type_params;
+    fn->fn_decl.type_param_count = type_param_count;
+    return fn;
 }
 
 /*
@@ -871,6 +1151,13 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
 static Stmt *parse_class_decl(Parser *p, int line) {
     Token class_name = p->current;
     consume(p, TOK_IDENT, "Expected class name after 'class'");
+
+    /* Optional generic type parameter list: class Stack<T> { } */
+    TypeParamNode *type_params      = NULL;
+    int            type_param_count = 0;
+    if (check(p, TOK_LT)) {
+        type_params = parse_type_param_list(p, &type_param_count);
+    }
 
     /* Optional parent class and/or interfaces:
      *   class Dog : Animal
@@ -910,8 +1197,10 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                                 line);
     /* Stash the raw name list; checker_check() will classify each as
      * parent class or interface and validate accordingly. */
-    cls->class_decl.interfaces     = ifaces;
+    cls->class_decl.interfaces      = ifaces;
     cls->class_decl.interface_count = iface_count;
+    cls->class_decl.type_params      = type_params;
+    cls->class_decl.type_param_count = type_param_count;
 
     consume(p, TOK_LBRACE, "Expected '{' to begin class body");
 
@@ -1091,6 +1380,14 @@ static Stmt *parse_interface_decl(Parser *p, int line) {
     Stmt *iface = stmt_interface_decl(&p->arena,
                                       iface_name.start, iface_name.length,
                                       line);
+
+    /* Optional generic type parameter list: interface IContainer<T> { } */
+    if (check(p, TOK_LT)) {
+        int type_param_count = 0;
+        TypeParamNode *type_params = parse_type_param_list(p, &type_param_count);
+        iface->interface_decl.type_params      = type_params;
+        iface->interface_decl.type_param_count = type_param_count;
+    }
 
     /* Optional parent interface: interface IChild : IBase */
     if (match(p, TOK_COLON)) {
@@ -1482,10 +1779,100 @@ static Stmt *parse_stmt(Parser *p) {
             return parse_var_decl(p, type, line);
         }
         /* Class-typed variable: ClassName varName = ...
-         * Also handles array types: ClassName[] varName = ... */
+         * Also handles array types: ClassName[] varName = ...
+         * Also handles generic types: ClassName<T> varName = ... */
         if (ct == TOK_IDENT && p->next.type == TOK_IDENT) {
             Type type = parse_type(p);   /* consumes the class name */
             return parse_var_decl(p, type, line);
+        }
+        /* Generic type variable: ClassName<TypeArg> varName = ...
+         * OR generic function call: foo<TypeArg>(args);
+         * We consume the type/call, then decide based on what follows. */
+        if (ct == TOK_IDENT && p->next.type == TOK_LT) {
+            /* Save the function/type name before consuming */
+            Token saved_name = p->current;
+
+            /* Try parsing as a type: consumes IDENT and <TypeArgs> */
+            Type type = parse_type(p);
+
+            /* After parsing, if current is IDENT → variable declaration */
+            if (check(p, TOK_IDENT)) {
+                return parse_var_decl(p, type, line);
+            }
+
+            /* If current is '(' → this was a generic function CALL, not a type.
+             * Build the call expression from the saved name and type args. */
+            if (check(p, TOK_LPAREN)) {
+                advance(p); /* consume '(' */
+
+                ArgNode *args      = NULL;
+                ArgNode *args_tail = NULL;
+                int      arg_count = 0;
+                if (!check(p, TOK_RPAREN)) {
+                    do {
+                        Expr    *arg  = parse_expr(p, BP_NONE);
+                        ArgNode *node = arg_node(&p->arena, arg, NULL);
+                        if (!args) { args = args_tail = node; }
+                        else       { args_tail->next = node; args_tail = node; }
+                        arg_count++;
+                    } while (match(p, TOK_COMMA));
+                }
+                consume(p, TOK_RPAREN, "Expected ')' after arguments");
+
+                /* Reconstruct the type args from the canonical type name */
+                TypeArgNode *targs      = NULL;
+                TypeArgNode *targs_tail = NULL;
+                int          targ_count = 0;
+                if (type.kind == TYPE_OBJECT && type.class_name &&
+                    is_generic_type_name(type.class_name))
+                {
+                    /* The "type" was actually parsed as "foo<TypeArg>" — we need
+                     * to extract the base name (fn name) and the type args. */
+                    char base[64];
+                    if (generic_base_name(type.class_name, base, sizeof(base))) {
+                        /* Re-parse type args from canonical name */
+                        Type targ_types[MAX_TYPE_ARGS];
+                        int  tc = parse_canonical_type_args(type.class_name,
+                                                           targ_types, MAX_TYPE_ARGS);
+                        for (int i = 0; i < tc; i++) {
+                            TypeArgNode *ta = arena_alloc(&p->arena, sizeof(TypeArgNode));
+                            ta->type = targ_types[i];
+                            ta->next = NULL;
+                            if (!targs) { targs = targs_tail = ta; }
+                            else        { targs_tail->next = ta; targs_tail = ta; }
+                            targ_count++;
+                        }
+                        /* Build the call expression using the base name */
+                        char *fn_name = arena_alloc(&p->arena, strlen(base) + 1);
+                        memcpy(fn_name, base, strlen(base) + 1);
+                        Expr *call_e = expr_call(&p->arena,
+                                                  fn_name, (int)strlen(fn_name),
+                                                  args, arg_count, line);
+                        call_e->call.type_args      = targs;
+                        call_e->call.type_arg_count = targ_count;
+                        consume(p, TOK_SEMICOLON, "Expected ';' after expression");
+                        return stmt_expr(&p->arena, call_e, line);
+                    }
+                }
+
+                /* Fallback: treat as non-generic call with the type's class name */
+                Expr *call_e = expr_call(&p->arena,
+                                          saved_name.start, saved_name.length,
+                                          args, arg_count, line);
+                consume(p, TOK_SEMICOLON, "Expected ';' after expression");
+                return stmt_expr(&p->arena, call_e, line);
+            }
+
+            /* Neither IDENT nor '(' after type — parse error */
+            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                ParseError *e = &p->errors[p->error_count++];
+                snprintf(e->message, sizeof(e->message),
+                         "Expected variable name or '(' after generic type");
+                e->line      = p->current.line;
+                p->had_error = true;
+                p->panic_mode = true;
+            }
+            return NULL;
         }
         /* Class/interface array: ClassName[] varName = ... */
         if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET) {
@@ -1568,11 +1955,13 @@ void parser_init(Parser *p, Lexer *lexer) {
 
     arena_init(&p->arena, ARENA_DEFAULT_SIZE);
 
-    /* Prime the 2-token lookahead */
+    /* Prime the 3-token lookahead */
     p->previous.type = TOK_EOF;
     p->current.type  = TOK_EOF;
     p->next.type     = TOK_EOF;
-    /* Call advance twice: first fills current, second fills next */
+    p->peek.type     = TOK_EOF;
+    /* Call advance three times: fills current, next, and peek */
+    advance(p);
     advance(p);
     advance(p);
 }

@@ -71,6 +71,7 @@ typedef enum {
     TYPE_CHAR,          /* uint32_t -- Unicode codepoint */
     TYPE_ANY,           /* Wildcard -- used only for host fn param declarations */
     TYPE_ARRAY,         /* Homogeneous array — element_type holds the elem type */
+    TYPE_PARAM,         /* Generic type parameter — e.g. T, K, V              */
 } TypeKind;
 
 /* Human-readable type names for error messages */
@@ -93,7 +94,31 @@ typedef struct Type {
     const char    *class_name;    /* Non-null only when kind == TYPE_OBJECT.  */
     const char    *enum_name;     /* Non-null only when kind == TYPE_ENUM.    */
     struct Type   *element_type;  /* Non-null only when kind == TYPE_ARRAY.   */
+    const char    *param_name;    /* Non-null only when kind == TYPE_PARAM.   */
 } Type;
+
+/*
+ * TypeParamNode — one generic type parameter declaration, e.g. <T> or <T where T : IFoo>
+ * Used in class, interface, and function declarations.
+ * Linked list, arena-allocated.
+ */
+typedef struct TypeParamNode {
+    const char          *name;          /* Parameter name, e.g. "T"             */
+    int                  length;
+    /* Optional constraint: where T : IFoo */
+    const char          *constraint;    /* Interface/class name, or NULL        */
+    int                  constraint_len;
+    struct TypeParamNode *next;
+} TypeParamNode;
+
+/*
+ * TypeArgNode — one concrete type argument at an instantiation site,
+ * e.g. the "int" in Stack<int> or the "string" in Pair<int, string>.
+ */
+typedef struct TypeArgNode {
+    Type                 type;
+    struct TypeArgNode  *next;
+} TypeArgNode;
 
 /* Convenience constructors — these live in ast.c */
 Type type_void(void);
@@ -114,6 +139,7 @@ Type type_double(void);
 Type type_char(void);
 Type type_any(void);
 Type type_array(struct Type *element_type);
+Type type_param(const char *param_name);   /* kind=TYPE_PARAM, param_name set */
 bool type_is_int_family(Type t);
 bool type_is_unsigned(Type t);
 struct ArgNode;  /* forward decl for expr_array_lit */
@@ -318,14 +344,18 @@ struct Expr {
             int         length;     /* Name length             */
             ArgNode    *args;       /* Linked list of arguments */
             int         arg_count;  /* How many arguments       */
+            TypeArgNode *type_args;     /* NULL if non-generic call */
+            int          type_arg_count;
         } call;
 
-        /* EXPR_NEW — new ClassName(args) */
+        /* EXPR_NEW — new ClassName(args) or new ClassName<T>(args) */
         struct {
             const char *class_name;
             int         class_name_len;
             ArgNode    *args;
             int         arg_count;
+            TypeArgNode *type_args;     /* NULL if not generic instantiation */
+            int          type_arg_count;
         } new_expr;
 
         /* EXPR_SUPER_CALL — super(args)
@@ -645,6 +675,8 @@ struct Stmt {
             ParamNode  *params;        /* Linked list of parameters     */
             int         param_count;   /* How many parameters           */
             Stmt       *body;          /* Always a STMT_BLOCK           */
+            TypeParamNode *type_params;    /* NULL if not generic          */
+            int            type_param_count;
         } fn_decl;
 
         /* STMT_CLASS_DECL */
@@ -658,6 +690,10 @@ struct Stmt {
             /* Parent class — NULL if none */
             const char *parent_name;
             int         parent_length;
+
+            /* Generic type parameters — NULL if not a generic class */
+            TypeParamNode *type_params;
+            int            type_param_count;
 
             /* Fields: stored as a simple array (arena-allocated) */
             struct ClassFieldNode {
@@ -717,6 +753,10 @@ struct Stmt {
             /* Optional parent interface: interface IChild : IBase { ... } */
             const char *parent_name;
             int         parent_length;
+
+            /* Generic type parameters — NULL if not a generic interface */
+            TypeParamNode *type_params;
+            int            type_param_count;
 
             /* Method signatures — stored as fn_decl stmts (body is NULL) */
             struct IfaceMethodNode {

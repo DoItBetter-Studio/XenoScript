@@ -18,6 +18,8 @@
 #include <string.h>
 #include <stdarg.h>
 
+#define MAX_TYPE_ARGS 8   /* Maximum generic type arguments per instantiation */
+
 /* ─────────────────────────────────────────────────────────────────────────────
  * INTERNAL: ERROR REPORTING
  * ───────────────────────────────────────────────────────────────────────────*/
@@ -234,6 +236,178 @@ static bool may_overflow(TypeKind to, TypeKind from) {
  *  - double <-> float: compatible (same storage).
  *  - Object subtype: Dog assignable to Animal.
  * Returns false for everything else (int->float, char->string, etc.). */
+/* ─────────────────────────────────────────────────────────────────────────────
+ * GENERICS HELPERS
+ *
+ * Forward declarations needed by generic helpers:
+ */
+static bool is_subtype(Checker *c, const char *child_name, const char *parent_name);
+static bool class_implements_interface(Checker *c, const char *class_name, const char *iface_name);
+
+/*
+ * substitute_type    - Replace TYPE_PARAM occurrences with concrete types.
+ * generic_base_name  - Extract "Stack" from "Stack<int>".
+ * parse_canonical_type_args - Parse type args out of "Stack<int,string>".
+ * check_type_args_against_params - Validate arg count and constraints.
+ */
+
+/*
+ * substitute_type — given a type (which may be TYPE_PARAM "T"), a list of
+ * TypeParamNodes, and a parallel array of concrete types, return the
+ * substituted type.  Non-param types are returned as-is.
+ */
+static Type substitute_type(Type t,
+                             TypeParamNode *params, Type *args, int arg_count)
+{
+    if (t.kind == TYPE_PARAM && t.param_name) {
+        TypeParamNode *p = params;
+        int i = 0;
+        while (p && i < arg_count) {
+            if (strncmp(t.param_name, p->name, p->length) == 0 &&
+                t.param_name[p->length] == '\0')
+            {
+                return args[i];
+            }
+            p = p->next; i++;
+        }
+    }
+    /* Also handle TYPE_OBJECT whose class_name matches a type param name.
+     * This happens when the parser sees "T" as an identifier and creates
+     * type_object("T") — the checker hasn't resolved it to TYPE_PARAM yet. */
+    if (t.kind == TYPE_OBJECT && t.class_name) {
+        TypeParamNode *p = params;
+        int i = 0;
+        while (p && i < arg_count) {
+            if (strncmp(t.class_name, p->name, p->length) == 0 &&
+                t.class_name[p->length] == '\0')
+            {
+                return args[i];
+            }
+            p = p->next; i++;
+        }
+    }
+    if (t.kind == TYPE_ARRAY && t.element_type) {
+        Type subst = substitute_type(*t.element_type, params, args, arg_count);
+        if (subst.kind != t.element_type->kind ||
+            subst.class_name != t.element_type->class_name)
+        {
+            /* Need a heap-allocated element_type — use a static scratchpad.
+             * Fine because this only happens at check time, not runtime. */
+            static Type scratch;
+            scratch = subst;
+            Type arr = type_array(&scratch);
+            return arr;
+        }
+    }
+    return t;
+}
+
+/*
+ * generic_base_name — Given a canonical generic type name like "Stack<int>"
+ * or "Pair<int,string>", extract just "Stack" into buf (max buf_size bytes,
+ * null-terminated).  Returns true on success, false if not a generic name.
+ */
+static bool generic_base_name(const char *full_name, char *buf, int buf_size) {
+    if (!full_name) return false;
+    const char *lt = strchr(full_name, '<');
+    if (!lt) return false;
+    int len = (int)(lt - full_name);
+    if (len <= 0 || len >= buf_size) return false;
+    memcpy(buf, full_name, len);
+    buf[len] = '\0';
+    return true;
+}
+
+/*
+ * is_generic_type_name — returns true if the class_name looks like a
+ * canonical generic instantiation (contains '<').
+ */
+static bool is_generic_type_name(const char *name) {
+    return name && strchr(name, '<') != NULL;
+}
+
+/*
+ * parse_canonical_type_args — Given "Stack<int>" or "Pair<int,string>",
+ * fill out_args[] (max max_args entries) with the concrete Type values.
+ * Returns the number of type args found.
+ *
+ * Type names recognised: int, float, bool, string, void, and bare identifiers
+ * (treated as TYPE_OBJECT). This mirrors parse_base_type's capabilities.
+ */
+static int parse_canonical_type_args(const char *full_name,
+                                     Type *out_args, int max_args)
+{
+    const char *lt = strchr(full_name, '<');
+    if (!lt) return 0;
+    const char *p = lt + 1;
+    int count = 0;
+
+    while (*p && *p != '>' && count < max_args) {
+        /* Skip whitespace */
+        while (*p == ' ') p++;
+        if (*p == '>') break;
+
+        /* Read a type name token (letters/digits/underscore) */
+        const char *start = p;
+        while (*p && *p != ',' && *p != '>' && *p != ' ') p++;
+        int len = (int)(p - start);
+
+        Type t;
+        if      (len == 3 && strncmp(start, "int",    3) == 0) t = type_int();
+        else if (len == 5 && strncmp(start, "float",  5) == 0) t = type_float();
+        else if (len == 4 && strncmp(start, "bool",   4) == 0) t = type_bool();
+        else if (len == 6 && strncmp(start, "string", 6) == 0) t = type_string();
+        else if (len == 4 && strncmp(start, "void",   4) == 0) t = type_void();
+        else if (len == 5 && strncmp(start, "sbyte",  5) == 0) t = type_sbyte();
+        else if (len == 4 && strncmp(start, "byte",   4) == 0) t = type_byte();
+        else if (len == 5 && strncmp(start, "short",  5) == 0) t = type_short();
+        else if (len == 6 && strncmp(start, "ushort", 6) == 0) t = type_ushort();
+        else if (len == 4 && strncmp(start, "uint",   4) == 0) t = type_uint();
+        else if (len == 4 && strncmp(start, "long",   4) == 0) t = type_long();
+        else if (len == 5 && strncmp(start, "ulong",  5) == 0) t = type_ulong();
+        else if (len == 6 && strncmp(start, "double", 6) == 0) t = type_double();
+        else if (len == 4 && strncmp(start, "char",   4) == 0) t = type_char();
+        else {
+            /* Identifier — treat as TYPE_OBJECT.  Build a stable string. */
+            static char name_bufs[8][64]; /* small pool, enough for typical usage */
+            static int  pool_idx = 0;
+            char *nbuf = name_bufs[pool_idx++ % 8];
+            int   nlen = len < 63 ? len : 63;
+            memcpy(nbuf, start, nlen);
+            nbuf[nlen] = '\0';
+            t = type_object(nbuf);
+        }
+        out_args[count++] = t;
+
+        while (*p == ' ') p++;
+        if (*p == ',') p++;
+    }
+    return count;
+}
+
+/*
+ * check_type_constraint — returns true if `concrete` satisfies the
+ * constraint named `constraint` (either same class/interface or implements it).
+ */
+static bool check_type_constraint(Checker *c, Type concrete,
+                                  const char *constraint, int constraint_len)
+{
+    if (!constraint || constraint_len == 0) return true;
+
+    char cbuf[64];
+    int clen = constraint_len < 63 ? constraint_len : 63;
+    memcpy(cbuf, constraint, clen);
+    cbuf[clen] = '\0';
+
+    /* TYPE_OBJECT: check if it IS the constraint, is a subclass, or implements it */
+    if (concrete.kind == TYPE_OBJECT && concrete.class_name) {
+        if (strcmp(concrete.class_name, cbuf) == 0) return true;
+        if (is_subtype(c, concrete.class_name, cbuf)) return true;
+        if (class_implements_interface(c, concrete.class_name, cbuf)) return true;
+    }
+    return false;
+}
+
 static bool types_assignable(const Type lhs, const Type rhs) {
     if (type_equals(lhs, rhs)) return true;
     /* Array: element types must be assignable */
@@ -980,21 +1154,76 @@ static Type check_expr(Checker *c, Expr *expr) {
                     sym->param_count, expr->call.arg_count);
             }
 
-            /* Check each argument's type against the parameter type */
+            /* ── Generic function call: identity<int>(x) ────────────────
+             * If the called function is generic (has type params in its
+             * fn_decl), collect the concrete type args and substitute them
+             * when checking parameter types and determining the return type. */
+            TypeParamNode *fn_type_params = NULL;
+            Type fn_concrete_args[MAX_TYPE_ARGS];
+            int  fn_concrete_count = 0;
+
+            if (sym->fn_decl_node) {
+                fn_type_params = sym->fn_decl_node->fn_decl.type_params;
+                int fn_tp_count = sym->fn_decl_node->fn_decl.type_param_count;
+
+                if (fn_tp_count > 0) {
+                    if (expr->call.type_arg_count == 0) {
+                        type_error(c, expr->line,
+                            "Generic function '%.*s' requires explicit type arguments",
+                            expr->call.length, expr->call.name);
+                    } else if (expr->call.type_arg_count != fn_tp_count) {
+                        type_error(c, expr->line,
+                            "Function '%.*s' expects %d type argument(s), got %d",
+                            expr->call.length, expr->call.name,
+                            fn_tp_count, expr->call.type_arg_count);
+                    } else {
+                        TypeArgNode *ta = expr->call.type_args;
+                        while (ta && fn_concrete_count < MAX_TYPE_ARGS) {
+                            fn_concrete_args[fn_concrete_count++] = ta->type;
+                            ta = ta->next;
+                        }
+                        /* Check constraints */
+                        TypeParamNode *tp = fn_type_params;
+                        for (int i = 0; i < fn_concrete_count && tp; i++, tp = tp->next) {
+                            if (!check_type_constraint(c, fn_concrete_args[i],
+                                                       tp->constraint, tp->constraint_len))
+                            {
+                                type_error(c, expr->line,
+                                    "Type argument %d for '%.*s': does not satisfy constraint '%.*s'",
+                                    i + 1, expr->call.length, expr->call.name,
+                                    tp->constraint_len, tp->constraint);
+                            }
+                        }
+                    }
+                } else if (expr->call.type_arg_count > 0) {
+                    type_error(c, expr->line,
+                        "Function '%.*s' is not generic but was given type arguments",
+                        expr->call.length, expr->call.name);
+                }
+            }
+
+            /* Check each argument's type against the parameter type,
+             * substituting type params if this is a generic function call. */
             ArgNode *arg  = expr->call.args;
             int      idx  = 0;
             bool     args_ok = true;
             while (arg) {
                 Type arg_type = check_expr(c, arg->expr);
+                Type expected = sym->param_types[idx];
+                /* Substitute type params → concrete types if generic */
+                if (fn_type_params && fn_concrete_count > 0) {
+                    expected = substitute_type(expected, fn_type_params,
+                                               fn_concrete_args, fn_concrete_count);
+                }
                 if (!is_unknown(arg_type) &&
-                    sym->param_types[idx].kind != TYPE_ANY &&
-                    !types_assignable(sym->param_types[idx], arg_type))
+                    expected.kind != TYPE_ANY && expected.kind != TYPE_PARAM &&
+                    !types_assignable(expected, arg_type))
                 {
                     type_error(c, expr->line,
                         "Argument %d to '%.*s': expected %s, got %s",
                         idx + 1,
                         expr->call.length, expr->call.name,
-                        type_kind_name(sym->param_types[idx].kind),
+                        type_kind_name(expected.kind),
                         type_kind_name(arg_type.kind));
                     args_ok = false;
                 }
@@ -1007,22 +1236,115 @@ static Type check_expr(Checker *c, Expr *expr) {
                 return expr->resolved_type;
             }
 
-            /* Call expression's type is the function's return type */
-            return resolve(expr, sym->type);
+            /* Return type: substitute type params if generic */
+            Type ret_type = sym->type;
+            if (fn_type_params && fn_concrete_count > 0) {
+                ret_type = substitute_type(ret_type, fn_type_params,
+                                           fn_concrete_args, fn_concrete_count);
+            }
+            return resolve(expr, ret_type);
         }
 
-        /* ── new ClassName(args) ────────────────────────────────────────── */
+        /* ── new ClassName(args) / new ClassName<T>(args) ──────────────── */
         case EXPR_NEW: {
-            const char *cname = expr->new_expr.class_name;
-            int         clen  = expr->new_expr.class_name_len;
+            /* class_name is a raw source pointer (not null-terminated).
+             * Copy to a stable null-terminated buffer before any string ops. */
+            char cname_buf[128];
+            int  clen = expr->new_expr.class_name_len;
+            int  clen_safe = clen < 127 ? clen : 127;
+            memcpy(cname_buf, expr->new_expr.class_name, clen_safe);
+            cname_buf[clen_safe] = '\0';
+            const char *cname = cname_buf;
 
-            Symbol *cls_sym = lookup_symbol(c, cname, clen);
-            if (!cls_sym || cls_sym->kind != SYM_CLASS) {
-                return error_type(c, expr, expr->line,
-                    "Unknown class '%.*s'", clen, cname);
+            /* Handle generic instantiation: new Stack<int>()
+             * The class name may be "Stack" (with type_args set) or
+             * the canonical "Stack<int>" form from var decl parsing.
+             * Normalise: if type_args present, look up base name only. */
+            const char *lookup_name = cname;
+            int         lookup_len  = clen;
+
+            /* If class name itself contains '<' (came from EXPR_NEW with inline type args
+             * parsed into name), extract base. Otherwise use type_args if present. */
+            char base_buf[64];
+            bool is_generic_new = (expr->new_expr.type_arg_count > 0) ||
+                                   is_generic_type_name(cname);
+            if (is_generic_new) {
+                if (generic_base_name(cname, base_buf, sizeof(base_buf))) {
+                    lookup_name = base_buf;
+                    lookup_len  = (int)strlen(base_buf);
+                } else if (expr->new_expr.type_arg_count > 0) {
+                    /* cname is already the bare name */
+                    int l = clen < 63 ? clen : 63;
+                    memcpy(base_buf, cname, l);
+                    base_buf[l] = '\0';
+                    lookup_name = base_buf;
+                    lookup_len  = l;
+                }
             }
 
-            /* Use the null-terminated class_name_buf so type_equals works */
+            Symbol *cls_sym = lookup_symbol(c, lookup_name, lookup_len);
+            if (!cls_sym || cls_sym->kind != SYM_CLASS) {
+                return error_type(c, expr, expr->line,
+                    "Unknown class '%.*s'", lookup_len, lookup_name);
+            }
+
+            Stmt *cls_decl = cls_sym->class_decl;
+
+            /* ── Generic validation ─────────────────────────────────────
+             * If the class has type params, we must have matching type args. */
+            Type concrete_args[MAX_TYPE_ARGS];
+            int  concrete_count = 0;
+
+            if (cls_decl->class_decl.type_param_count > 0) {
+                if (!is_generic_new) {
+                    type_error(c, expr->line,
+                        "Class '%s' is generic and requires type arguments",
+                        cls_sym->class_name_buf);
+                } else {
+                    /* Collect concrete args from either type_args list or canonical name */
+                    if (expr->new_expr.type_arg_count > 0) {
+                        TypeArgNode *ta = expr->new_expr.type_args;
+                        while (ta && concrete_count < MAX_TYPE_ARGS) {
+                            concrete_args[concrete_count++] = ta->type;
+                            ta = ta->next;
+                        }
+                    } else {
+                        /* Parse from canonical name "Stack<int>" */
+                        concrete_count = parse_canonical_type_args(cname,
+                                            concrete_args, MAX_TYPE_ARGS);
+                    }
+
+                    if (concrete_count != cls_decl->class_decl.type_param_count) {
+                        type_error(c, expr->line,
+                            "Class '%s' expects %d type argument(s), got %d",
+                            cls_sym->class_name_buf,
+                            cls_decl->class_decl.type_param_count,
+                            concrete_count);
+                    } else {
+                        /* Check constraints */
+                        TypeParamNode *tp = cls_decl->class_decl.type_params;
+                        for (int i = 0; i < concrete_count && tp; i++, tp = tp->next) {
+                            if (!check_type_constraint(c, concrete_args[i],
+                                                       tp->constraint, tp->constraint_len))
+                            {
+                                type_error(c, expr->line,
+                                    "Type argument %d for '%s': '%s' does not satisfy constraint '%.*s'",
+                                    i + 1, cls_sym->class_name_buf,
+                                    type_kind_name(concrete_args[i].kind),
+                                    tp->constraint_len, tp->constraint);
+                            }
+                        }
+                    }
+                }
+            } else if (is_generic_new && expr->new_expr.type_arg_count > 0) {
+                type_error(c, expr->line,
+                    "Class '%s' is not generic but was given type arguments",
+                    cls_sym->class_name_buf);
+            }
+
+            /* Use the null-terminated class_name_buf so type_equals works.
+             * For generic types, the resolved type is still the base class
+             * (erasure: Stack<int> and Stack<string> are both "Stack" at runtime). */
             return resolve(expr, type_object(cls_sym->class_name_buf));
         }
 
@@ -1312,26 +1634,42 @@ if (obj_type.kind == TYPE_ARRAY) {
                     type_kind_name(obj_type.kind));
             }
 
+            /* Generic class: resolve base name and collect concrete type args */
+            const char *fg_lookup_name = obj_type.class_name;
+            char        fg_base_buf[64];
+            Type        fg_concrete_args[MAX_TYPE_ARGS];
+            int         fg_concrete_count = 0;
+            TypeParamNode *fg_type_params = NULL;
+            if (is_generic_type_name(obj_type.class_name)) {
+                if (generic_base_name(obj_type.class_name, fg_base_buf, sizeof(fg_base_buf))) {
+                    fg_lookup_name = fg_base_buf;
+                    fg_concrete_count = parse_canonical_type_args(
+                        obj_type.class_name, fg_concrete_args, MAX_TYPE_ARGS);
+                }
+            }
+
             Symbol *cls_sym = lookup_symbol(c,
-                obj_type.class_name, (int)strlen(obj_type.class_name));
+                fg_lookup_name, (int)strlen(fg_lookup_name));
             if (!cls_sym || cls_sym->kind != SYM_CLASS) {
                 return error_type(c, expr, expr->line,
-                    "Unknown class '%s'", obj_type.class_name);
+                    "Unknown class '%s'", fg_lookup_name);
             }
+            if (fg_concrete_count > 0 && cls_sym->class_decl)
+                fg_type_params = cls_sym->class_decl->class_decl.type_params;
 
             Stmt *cls = cls_sym->class_decl;
             if (!cls) {
                 return error_type(c, expr, expr->line,
-                    "Internal: class '%s' has no declaration", obj_type.class_name);
+                    "Internal: class '%s' has no declaration", fg_lookup_name);
             }
 
             typedef struct ClassFieldNode CFNode;
             /* Walk the inheritance chain looking for the field */
             Stmt *search_cls = cls;
             char  search_name[CLASS_NAME_MAX];
-            int   search_len = (int)strlen(obj_type.class_name) < CLASS_NAME_MAX - 1
-                             ? (int)strlen(obj_type.class_name) : CLASS_NAME_MAX - 1;
-            memcpy(search_name, obj_type.class_name, search_len);
+            int   search_len = (int)strlen(fg_lookup_name) < CLASS_NAME_MAX - 1
+                             ? (int)strlen(fg_lookup_name) : CLASS_NAME_MAX - 1;
+            memcpy(search_name, fg_lookup_name, search_len);
             search_name[search_len] = '\0';
 
             while (search_cls) {
@@ -1351,7 +1689,11 @@ if (obj_type.kind == TYPE_ARRAY) {
                                     search_name);
                             }
                         }
-                        return resolve(expr, f->type);
+                        Type fg_ftype = (fg_type_params && fg_concrete_count > 0)
+                            ? substitute_type(f->type, fg_type_params,
+                                              fg_concrete_args, fg_concrete_count)
+                            : f->type;
+                        return resolve(expr, fg_ftype);
                     }
                 }
                 /* Move to parent class */
@@ -1368,7 +1710,7 @@ if (obj_type.kind == TYPE_ARRAY) {
             }
             return error_type(c, expr, expr->line,
                 "Class '%s' has no field '%.*s'",
-                obj_type.class_name,
+                fg_lookup_name,
                 expr->field_get.field_name_len, expr->field_get.field_name);
         }
 
@@ -1424,26 +1766,42 @@ if (obj_type.kind == TYPE_ARRAY) {
                     type_kind_name(obj_type.kind));
             }
 
+            /* Generic class: resolve base name */
+            const char *fs_lookup_name = obj_type.class_name;
+            char        fs_base_buf[64];
+            Type        fs_concrete_args[MAX_TYPE_ARGS];
+            int         fs_concrete_count = 0;
+            TypeParamNode *fs_type_params = NULL;
+            if (is_generic_type_name(obj_type.class_name)) {
+                if (generic_base_name(obj_type.class_name, fs_base_buf, sizeof(fs_base_buf))) {
+                    fs_lookup_name = fs_base_buf;
+                    fs_concrete_count = parse_canonical_type_args(
+                        obj_type.class_name, fs_concrete_args, MAX_TYPE_ARGS);
+                }
+            }
+
             Symbol *cls_sym = lookup_symbol(c,
-                obj_type.class_name, (int)strlen(obj_type.class_name));
+                fs_lookup_name, (int)strlen(fs_lookup_name));
             if (!cls_sym || cls_sym->kind != SYM_CLASS) {
                 return error_type(c, expr, expr->line,
-                    "Unknown class '%s'", obj_type.class_name);
+                    "Unknown class '%s'", fs_lookup_name);
             }
+            if (fs_concrete_count > 0 && cls_sym->class_decl)
+                fs_type_params = cls_sym->class_decl->class_decl.type_params;
 
             Stmt *cls = cls_sym->class_decl;
             if (!cls) {
                 return error_type(c, expr, expr->line,
-                    "Internal: class '%s' has no declaration", obj_type.class_name);
+                    "Internal: class '%s' has no declaration", fs_lookup_name);
             }
 
             typedef struct ClassFieldNode CFNode;
             /* Walk the inheritance chain looking for the field */
             Stmt *search_cls = cls;
             char  search_name[CLASS_NAME_MAX];
-            int   search_len = (int)strlen(obj_type.class_name) < CLASS_NAME_MAX - 1
-                             ? (int)strlen(obj_type.class_name) : CLASS_NAME_MAX - 1;
-            memcpy(search_name, obj_type.class_name, search_len);
+            int   search_len = (int)strlen(fs_lookup_name) < CLASS_NAME_MAX - 1
+                             ? (int)strlen(fs_lookup_name) : CLASS_NAME_MAX - 1;
+            memcpy(search_name, fs_lookup_name, search_len);
             search_name[search_len] = '\0';
 
             while (search_cls) {
@@ -1462,14 +1820,22 @@ if (obj_type.kind == TYPE_ARRAY) {
                                     search_name);
                             }
                         }
-                        if (!type_equals(f->type, val_type) && !is_unknown(val_type)) {
+                        Type fs_field_type = (fs_type_params && fs_concrete_count > 0)
+                            ? substitute_type(f->type, fs_type_params,
+                                              fs_concrete_args, fs_concrete_count)
+                            : f->type;
+                        if (!type_equals(fs_field_type, val_type) && !is_unknown(val_type)) {
                             return error_type(c, expr, expr->line,
                                 "Cannot assign %s to field '%.*s' of type %s",
                                 type_kind_name(val_type.kind),
                                 expr->field_set.field_name_len, expr->field_set.field_name,
                                 type_kind_name(f->type.kind));
                         }
-                        return resolve(expr, f->type);
+                        Type fs_ftype = (fs_type_params && fs_concrete_count > 0)
+                            ? substitute_type(f->type, fs_type_params,
+                                              fs_concrete_args, fs_concrete_count)
+                            : f->type;
+                        return resolve(expr, fs_ftype);
                     }
                 }
                 /* Move to parent class */
@@ -1486,7 +1852,7 @@ if (obj_type.kind == TYPE_ARRAY) {
             }
             return error_type(c, expr, expr->line,
                 "Class '%s' has no field '%.*s'",
-                obj_type.class_name,
+                fs_lookup_name,
                 expr->field_set.field_name_len, expr->field_set.field_name);
         }
 
@@ -1559,6 +1925,20 @@ if (obj_type.kind == TYPE_ARRAY) {
                     type_kind_name(obj_type.kind));
             }
 
+            /* Generic class: resolve base name and collect type args for substitution */
+            const char *mc_lookup_name = obj_type.class_name;
+            char        mc_base_buf[64];
+            Type        mc_concrete_args[MAX_TYPE_ARGS];
+            int         mc_concrete_count = 0;
+            TypeParamNode *mc_type_params = NULL;
+            if (obj_type.class_name && is_generic_type_name(obj_type.class_name)) {
+                if (generic_base_name(obj_type.class_name, mc_base_buf, sizeof(mc_base_buf))) {
+                    mc_lookup_name = mc_base_buf;
+                    mc_concrete_count = parse_canonical_type_args(
+                        obj_type.class_name, mc_concrete_args, MAX_TYPE_ARGS);
+                }
+            }
+
             /* ── Interface-typed variable: obj is IFoo, call its method ──
              * Look up the method in the interface's signature table and
              * return the declared return type. The concrete class's method
@@ -1602,26 +1982,109 @@ if (obj_type.kind == TYPE_ARRAY) {
                 }
             }
 
+            /* Set up mc_type_params now that we have the class symbol */
+            /* ── Type parameter: T where T : IFoo — method call via constraint ──
+             * If mc_lookup_name resolves to a SYM_VAR with TYPE_PARAM, the
+             * caller is invoking a method on a generic type-param variable.
+             * Validate the call against the constraint interface if one exists. */
+            {
+                Symbol *tp_sym = lookup_symbol(c, mc_lookup_name,
+                                               (int)strlen(mc_lookup_name));
+                if (tp_sym && tp_sym->kind == SYM_VAR &&
+                    tp_sym->type.kind == TYPE_PARAM)
+                {
+                    /* Find the TypeParamNode for this parameter in current class
+                     * or current function to get the constraint. */
+                    const char *constraint = NULL;
+                    int         constr_len = 0;
+                    /* Check class-level type params */
+                    if (c->current_class) {
+                        for (TypeParamNode *tp = c->current_class->class_decl.type_params;
+                             tp; tp = tp->next) {
+                            if (tp->length == (int)strlen(mc_lookup_name) &&
+                                strncmp(tp->name, mc_lookup_name, tp->length) == 0) {
+                                constraint = tp->constraint;
+                                constr_len = tp->constraint_len;
+                                break;
+                            }
+                        }
+                    }
+                    /* Check function-level type params if not found in class */
+                    if (!constraint && c->current_fn_stmt) {
+                        for (TypeParamNode *tp = c->current_fn_stmt->fn_decl.type_params;
+                             tp; tp = tp->next) {
+                            if (tp->length == (int)strlen(mc_lookup_name) &&
+                                strncmp(tp->name, mc_lookup_name, tp->length) == 0) {
+                                constraint = tp->constraint;
+                                constr_len = tp->constraint_len;
+                                break;
+                            }
+                        }
+                    }
+                    if (!constraint) {
+                        /* No constraint — only built-in methods allowed, error otherwise */
+                        return error_type(c, expr, expr->line,
+                            "Cannot call method '%.*s' on unconstrained type parameter '%s'",
+                            expr->method_call.method_name_len,
+                            expr->method_call.method_name,
+                            mc_lookup_name);
+                    }
+                    /* Look up the constraint interface and validate the method */
+                    char cbuf[64];
+                    int cbl = constr_len < 63 ? constr_len : 63;
+                    memcpy(cbuf, constraint, cbl); cbuf[cbl] = '\0';
+                    IMNodeT *sig = iface_lookup_method(c, cbuf,
+                        expr->method_call.method_name,
+                        expr->method_call.method_name_len);
+                    if (!sig) {
+                        return error_type(c, expr, expr->line,
+                            "Constraint '%s' has no method '%.*s'",
+                            cbuf,
+                            expr->method_call.method_name_len,
+                            expr->method_call.method_name);
+                    }
+                    /* Type-check args */
+                    ArgNode *arg = expr->method_call.args;
+                    ParamNode *param = sig->params;
+                    int idx = 0;
+                    while (arg && param) {
+                        Type at = check_expr(c, arg->expr);
+                        if (!is_unknown(at) && !types_assignable(param->type, at)) {
+                            type_error(c, expr->line,
+                                "Method '%.*s' argument %d: expected %s, got %s",
+                                expr->method_call.method_name_len,
+                                expr->method_call.method_name, idx + 1,
+                                type_kind_name(param->type.kind),
+                                type_kind_name(at.kind));
+                        }
+                        arg = arg->next; param = param->next; idx++;
+                    }
+                    return resolve(expr, sig->return_type);
+                }
+            }
+
             Symbol *cls_sym = lookup_symbol(c,
-                obj_type.class_name, (int)strlen(obj_type.class_name));
+                mc_lookup_name, (int)strlen(mc_lookup_name));
             if (!cls_sym || cls_sym->kind != SYM_CLASS) {
                 return error_type(c, expr, expr->line,
-                    "Unknown class '%s'", obj_type.class_name);
+                    "Unknown class '%s'", mc_lookup_name);
             }
+            if (mc_concrete_count > 0 && cls_sym->class_decl)
+                mc_type_params = cls_sym->class_decl->class_decl.type_params;
 
             Stmt *cls = cls_sym->class_decl;
             if (!cls) {
                 return error_type(c, expr, expr->line,
-                    "Internal: class '%s' has no declaration", obj_type.class_name);
+                    "Internal: class '%s' has no declaration", mc_lookup_name);
             }
 
             typedef struct ClassMethodNode CMNode;
             /* Walk the inheritance chain looking for the method */
             Stmt *search_cls = cls;
             char  search_name[CLASS_NAME_MAX];
-            int   search_len = (int)strlen(obj_type.class_name) < CLASS_NAME_MAX - 1
-                             ? (int)strlen(obj_type.class_name) : CLASS_NAME_MAX - 1;
-            memcpy(search_name, obj_type.class_name, search_len);
+            int   search_len = (int)strlen(mc_lookup_name) < CLASS_NAME_MAX - 1
+                             ? (int)strlen(mc_lookup_name) : CLASS_NAME_MAX - 1;
+            memcpy(search_name, mc_lookup_name, search_len);
             search_name[search_len] = '\0';
 
             while (search_cls) {
@@ -1642,25 +2105,35 @@ if (obj_type.kind == TYPE_ARRAY) {
                                     search_name);
                             }
                         }
-                        /* Type-check arguments */
+                        /* Type-check arguments — substitute T->concrete if generic */
                         ArgNode *arg = expr->method_call.args;
                         ParamNode *param = m->fn->fn_decl.params;
                         int idx = 0;
                         while (arg && param) {
                             Type at = check_expr(c, arg->expr);
-                            if (!type_equals(at, param->type) &&
-                                !is_unknown(at) && !is_unknown(param->type)) {
+                            Type expected_param = (mc_type_params && mc_concrete_count > 0)
+                                ? substitute_type(param->type, mc_type_params,
+                                                  mc_concrete_args, mc_concrete_count)
+                                : param->type;
+                            if (!is_unknown(at) && !is_unknown(expected_param) &&
+                                !type_equals(at, expected_param) &&
+                                !types_assignable(expected_param, at)) {
                                 type_error(c, expr->line,
                                     "Method '%.*s' argument %d: expected %s, got %s",
                                     expr->method_call.method_name_len,
                                     expr->method_call.method_name,
                                     idx + 1,
-                                    type_kind_name(param->type.kind),
+                                    type_kind_name(expected_param.kind),
                                     type_kind_name(at.kind));
                             }
                             arg = arg->next; param = param->next; idx++;
                         }
-                        return resolve(expr, m->fn->fn_decl.return_type);
+                        /* Return type: substitute T->concrete if generic */
+                        Type ret = (mc_type_params && mc_concrete_count > 0)
+                            ? substitute_type(m->fn->fn_decl.return_type, mc_type_params,
+                                              mc_concrete_args, mc_concrete_count)
+                            : m->fn->fn_decl.return_type;
+                        return resolve(expr, ret);
                     }
                 }
                 /* Move to parent class */
@@ -1677,7 +2150,7 @@ if (obj_type.kind == TYPE_ARRAY) {
             }
             return error_type(c, expr, expr->line,
                 "Class '%s' has no method '%.*s'",
-                obj_type.class_name,
+                mc_lookup_name,
                 expr->method_call.method_name_len,
                 expr->method_call.method_name);
         }
@@ -1762,15 +2235,54 @@ static void check_stmt(Checker *c, Stmt *stmt) {
             /* If the declared type looks like a class name (TYPE_OBJECT) but
              * resolves to an enum in the symbol table, patch it to TYPE_ENUM. */
             if (declared.kind == TYPE_OBJECT && declared.class_name) {
-                Symbol *maybe_sym = lookup_symbol(c,
-                    declared.class_name, (int)strlen(declared.class_name));
-                if (maybe_sym && maybe_sym->kind == SYM_ENUM) {
-                    declared = type_enum(maybe_sym->enum_name_buf);
-                    stmt->var_decl.type = declared;
+                const char *dname = declared.class_name;
+
+                /* Generic type: "Stack<int>" — resolve base name and validate */
+                if (is_generic_type_name(dname)) {
+                    char base[64];
+                    if (generic_base_name(dname, base, sizeof(base))) {
+                        Symbol *cls_sym = lookup_symbol(c, base, (int)strlen(base));
+                        if (!cls_sym || cls_sym->kind != SYM_CLASS) {
+                            type_error(c, stmt->line,
+                                "Unknown generic class '%s'", base);
+                        } else {
+                            /* Validate type arg count */
+                            Type targs[MAX_TYPE_ARGS];
+                            int  targ_count = parse_canonical_type_args(dname, targs, MAX_TYPE_ARGS);
+                            int  tp_count   = cls_sym->class_decl->class_decl.type_param_count;
+                            if (targ_count != tp_count) {
+                                type_error(c, stmt->line,
+                                    "Class '%s' expects %d type argument(s), got %d",
+                                    base, tp_count, targ_count);
+                            } else {
+                                /* Check constraints */
+                                TypeParamNode *tp = cls_sym->class_decl->class_decl.type_params;
+                                for (int i = 0; i < targ_count && tp; i++, tp = tp->next) {
+                                    if (!check_type_constraint(c, targs[i],
+                                                               tp->constraint, tp->constraint_len))
+                                    {
+                                        type_error(c, stmt->line,
+                                            "Type argument %d for '%s': does not satisfy constraint '%.*s'",
+                                            i + 1, base, tp->constraint_len, tp->constraint);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    /* The declared type stays as TYPE_OBJECT "Stack<int>" — fine for
+                     * assignment compatibility checking below (erasure model). */
                 }
-                /* Interface type: keep as TYPE_OBJECT but validate it exists */
-                else if (maybe_sym && maybe_sym->kind == SYM_INTERFACE) {
-                    /* already TYPE_OBJECT with class_name = interface name — fine */
+                else {
+                    Symbol *maybe_sym = lookup_symbol(c,
+                        dname, (int)strlen(dname));
+                    if (maybe_sym && maybe_sym->kind == SYM_ENUM) {
+                        declared = type_enum(maybe_sym->enum_name_buf);
+                        stmt->var_decl.type = declared;
+                    }
+                    /* Interface type: keep as TYPE_OBJECT but validate it exists */
+                    else if (maybe_sym && maybe_sym->kind == SYM_INTERFACE) {
+                        /* already TYPE_OBJECT with class_name = interface name — fine */
+                    }
                 }
             }
 
@@ -1806,13 +2318,25 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                         (int)strlen(declared.element_type->class_name));
                     iface_array_ok = (esym && esym->kind == SYM_INTERFACE);
                 }
+                /* Generic type compatibility: Box<int> declared, Box assigned.
+                 * Extract base name from declared and compare to init type. */
+                bool generic_compat = false;
+                if (declared.kind == TYPE_OBJECT && init_type.kind == TYPE_OBJECT &&
+                    declared.class_name && init_type.class_name &&
+                    is_generic_type_name(declared.class_name))
+                {
+                    char base[64];
+                    if (generic_base_name(declared.class_name, base, sizeof(base)))
+                        generic_compat = (strcmp(base, init_type.class_name) == 0);
+                }
                 bool compatible = types_assignable(declared, init_type) ||
                     (declared.kind == TYPE_OBJECT && init_type.kind == TYPE_OBJECT &&
                      declared.class_name && init_type.class_name &&
                      is_subtype(c, init_type.class_name, declared.class_name)) ||
                     (is_iface_var && declared.class_name &&
                      type_is_assignable_to_interface(c, init_type, declared.class_name)) ||
-                    iface_array_ok;
+                    iface_array_ok ||
+                    generic_compat;
                 if (!is_unknown(init_type) && !compatible)
                 {
                     type_error(c, stmt->line,
@@ -2129,6 +2653,22 @@ static void check_fn_body(Checker *c, Stmt *fn_stmt) {
     /* Set the current function context */
     c->inside_function        = true;
     c->current_fn_return_type = fn_stmt->fn_decl.return_type;
+    c->current_fn_stmt        = fn_stmt;
+
+    /* Each function body gets its own scope for parameters */
+    push_scope(c);
+
+    /* ── Generic type params: push T, K, V etc. as TYPE_PARAM symbols ──
+     * This allows the checker to recognise them as types rather than
+     * unknown class names inside the function body. */
+    for (TypeParamNode *tp = fn_stmt->fn_decl.type_params; tp; tp = tp->next) {
+        Symbol tpsym = {0};
+        tpsym.kind   = SYM_VAR;      /* We use SYM_VAR so lookup works */
+        tpsym.name   = tp->name;
+        tpsym.length = tp->length;
+        tpsym.type   = type_param(tp->name);  /* TYPE_PARAM kind */
+        define_symbol(c, tpsym);
+    }
 
     /* Each function body gets its own scope for parameters */
     push_scope(c);
@@ -2176,6 +2716,7 @@ static void check_fn_body(Checker *c, Stmt *fn_stmt) {
 
     pop_scope(c);
     c->inside_function = false;
+    c->current_fn_stmt = NULL;
 }
 
 
@@ -2221,14 +2762,43 @@ bool checker_check(Checker *c, Program *program) {
 
         if (s->kind == STMT_FN_DECL) {
             Symbol sym = {0};
-            sym.kind        = SYM_FN;
-            sym.name        = s->fn_decl.name;
-            sym.length      = s->fn_decl.length;
-            sym.type        = s->fn_decl.return_type;
+            sym.kind          = SYM_FN;
+            sym.name          = s->fn_decl.name;
+            sym.length        = s->fn_decl.length;
+            sym.fn_decl_node  = s;
+
+            /* Patch return type and param types: if a type is TYPE_OBJECT
+             * and its class_name matches a declared type parameter, convert
+             * it to TYPE_PARAM so substitute_type works at call sites. */
+            TypeParamNode *tp_list = s->fn_decl.type_params;
+            Type ret = s->fn_decl.return_type;
+            if (ret.kind == TYPE_OBJECT && ret.class_name && tp_list) {
+                for (TypeParamNode *tp = tp_list; tp; tp = tp->next) {
+                    char tbuf[64]; int tl = tp->length < 63 ? tp->length : 63;
+                    memcpy(tbuf, tp->name, tl); tbuf[tl] = '\0';
+                    if (strcmp(ret.class_name, tbuf) == 0) {
+                        ret = type_param(tbuf); break;
+                    }
+                }
+            }
+            sym.type        = ret;
             sym.param_count = s->fn_decl.param_count;
+
             int i = 0;
-            for (ParamNode *p = s->fn_decl.params; p && i < MAX_PARAMS; p = p->next)
-                sym.param_types[i++] = p->type;
+            for (ParamNode *p = s->fn_decl.params; p && i < MAX_PARAMS; p = p->next) {
+                Type pt = p->type;
+                if (pt.kind == TYPE_OBJECT && pt.class_name && tp_list) {
+                    for (TypeParamNode *tp = tp_list; tp; tp = tp->next) {
+                        char tbuf[64]; int tl = tp->length < 63 ? tp->length : 63;
+                        memcpy(tbuf, tp->name, tl); tbuf[tl] = '\0';
+                        if (strcmp(pt.class_name, tbuf) == 0) {
+                            pt = type_param(tbuf); break;
+                        }
+                    }
+                }
+                sym.param_types[i++] = pt;
+            }
+
             if (!define_symbol(c, sym))
                 type_error(c, s->line, "Function '%.*s' already declared",
                            s->fn_decl.length, s->fn_decl.name);
@@ -2527,6 +3097,21 @@ bool checker_check(Checker *c, Program *program) {
             Stmt *prev_class = c->current_class;
             c->current_class = s;
 
+            /* Push class-level type params into a scope so method bodies can use them.
+             * e.g. class Stack<T> — methods can reference T as a type. */
+            bool has_class_type_params = (s->class_decl.type_param_count > 0);
+            if (has_class_type_params) {
+                push_scope(c);
+                for (TypeParamNode *tp = s->class_decl.type_params; tp; tp = tp->next) {
+                    Symbol tpsym = {0};
+                    tpsym.kind   = SYM_VAR;
+                    tpsym.name   = tp->name;
+                    tpsym.length = tp->length;
+                    tpsym.type   = type_param(tp->name);
+                    define_symbol(c, tpsym);
+                }
+            }
+
             /* Type-check field initializers */
             typedef struct ClassFieldNode CFNode;
             for (CFNode *f = s->class_decl.fields; f; f = f->next) {
@@ -2554,6 +3139,10 @@ bool checker_check(Checker *c, Program *program) {
                 c->in_static_method   = m->is_static;
                 check_fn_body(c, m->fn);
                 c->in_static_method   = prev_static;
+            }
+
+            if (has_class_type_params) {
+                pop_scope(c);
             }
 
             c->current_class = prev_class;

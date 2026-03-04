@@ -1,1 +1,2 @@
 xenoc: type errors in 'test/14_error_undefined_variable.xeno':
+[line 2] Type error: Undefined variable 'x'
