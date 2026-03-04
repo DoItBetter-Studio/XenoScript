@@ -1,0 +1,95 @@
+XenoScript Community & Commercial License (XCCL)
+Version 1.0
+Copyright (c) 2026 DoItBetter Studio
+All Rights Reserved.
+
+1. Ownership
+
+XenoScript, including its compiler, virtual machine, standard libraries,
+and associated tooling (collectively, the "Software"), is the exclusive
+property of DoItBetter Studio.
+
+This license grants limited rights to use the Software under the terms below.
+All rights not expressly granted are reserved.
+
+---
+
+2. Non-Commercial Use
+
+You are granted a non-exclusive, non-transferable, revocable license to:
+
+- Use the Software for personal, educational, hobby, or non-commercial projects.
+- Modify the Software for internal use.
+- Distribute games or applications created using the Software,
+  provided they are not sold or monetized.
+
+No fee is required for non-commercial use.
+
+---
+
+3. Commercial Use
+
+A Commercial License from DoItBetter Studio is required if:
+
+- You sell, license, or otherwise monetize a product that includes or depends
+  on XenoScript.
+- The Software is used in a product that generates revenue.
+
+Commercial terms, pricing, and agreements are provided separately
+by DoItBetter Studio.
+
+---
+
+4. Modding Access Requirement
+
+If you distribute a product using XenoScript:
+
+- You may not require an additional fee, subscription, DLC purchase,
+  or other monetary charge to enable scripting or modding functionality
+  powered by XenoScript.
+- Access to XenoScript-based modding features must not be artificially
+  restricted behind a paywall separate from the base product.
+
+You may charge for your game.
+You may not charge users specifically to unlock XenoScript modding.
+
+---
+
+5. Redistribution
+
+You may not:
+
+- Redistribute the Software source code.
+- Rebrand the Software.
+- Claim authorship of the Software.
+- Sell the Software independently.
+
+Distribution of compiled products that embed the Software is permitted
+under the terms of this license.
+
+---
+
+6. Warranty Disclaimer
+
+The Software is provided "AS IS", without warranty of any kind,
+express or implied, including but not limited to the warranties
+of merchantability, fitness for a particular purpose, and noninfringement.
+
+In no event shall DoItBetter Studio be liable for any claim, damages,
+or other liability arising from the use of the Software.
+
+---
+
+7. Termination
+
+Failure to comply with the terms of this license automatically
+terminates your rights under it.
+
+Upon termination, you must cease use of the Software.
+
+---
+
+8. Contact
+
+For commercial licensing inquiries, contact:
+sportsnut2020@gmail.com

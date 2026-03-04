@@ -1,0 +1,14 @@
+enum Color { Red, Green, Blue }
+
+class Foo {}
+
+function main(): void {
+    Color c = Color.Green;
+    Foo f = new Foo();
+
+    print(typeof(c).name);
+    print(typeof(c).isEnum);
+
+    print(typeof(f).name);
+    print(typeof(f).isClass);
+}

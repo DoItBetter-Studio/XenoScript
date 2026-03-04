@@ -1,0 +1,10 @@
+function main(): void {
+    int x = 10;
+    print(x is int);
+    print(x is float);
+
+    int y = x as int;
+    print(y);
+
+    // float z = x as float; // runtime error test
+}

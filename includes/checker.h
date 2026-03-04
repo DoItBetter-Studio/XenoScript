@@ -40,10 +40,11 @@
 #define CHECKER_MAX_ERRORS 64
 
 typedef enum {
-    SYM_VAR,    /* A variable: has a single type                  */
-    SYM_FN,     /* A function: has a return type and param types   */
-    SYM_CLASS,  /* A class name: type is TYPE_OBJECT               */
-    SYM_ENUM,   /* An enum name: type is TYPE_ENUM                 */
+    SYM_VAR,        /* A variable: has a single type                  */
+    SYM_FN,         /* A function: has a return type and param types   */
+    SYM_CLASS,      /* A class name: type is TYPE_OBJECT               */
+    SYM_ENUM,       /* An enum name: type is TYPE_ENUM                 */
+    SYM_INTERFACE,  /* An interface name: compile-time only            */
 } SymbolKind;
 
 typedef struct {
@@ -78,6 +79,12 @@ typedef struct {
 
     /* For SYM_ENUM only — null-terminated copy of the enum name. */
     char enum_name_buf[64];
+
+    /* For SYM_INTERFACE only — pointer back to the STMT_INTERFACE_DECL node. */
+    struct Stmt *interface_decl;
+
+    /* For SYM_INTERFACE only — null-terminated copy of the interface name. */
+    char iface_name_buf[64];
 } Symbol;
 
 /*

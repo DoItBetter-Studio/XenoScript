@@ -1,0 +1,18 @@
+interface IBase {
+    function a(): void;
+}
+
+interface IChild : IBase {
+    function b(): void;
+}
+
+class Impl : IChild {
+    function a(): void { print("A"); }
+    function b(): void { print("B"); }
+}
+
+function main(): void {
+    Impl c = new Impl();
+    c.a();
+    c.b();
+}

@@ -1,0 +1,18 @@
+interface IThing {
+    function id(): int;
+}
+
+class A : IThing {
+    function id(): int { return 1; }
+}
+
+class B : IThing {
+    function id(): int { return 2; }
+}
+
+function main(): void {
+    IThing[] arr = { new A(), new B() };
+    foreach (IThing t in arr) {
+        print(t.id());
+    }
+}

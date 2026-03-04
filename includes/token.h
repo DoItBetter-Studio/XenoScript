@@ -98,6 +98,7 @@ typedef enum {
     TOK_PRIVATE,      /* private   — access modifier      */
     TOK_PROTECTED,    /* protected — access modifier      */
     TOK_STATIC,       /* static    — static member        */
+    TOK_INTERFACE,    /* interface — interface declaration */
 
     /* ── Arithmetic operators ──────────────────────────────────────────── */
     TOK_PLUS,         /* +  */

@@ -592,6 +592,17 @@ Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line) {
     return s;
 }
 
+Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line) {
+    Stmt *s                      = arena_alloc(a, sizeof(Stmt));
+    s->kind                      = STMT_INTERFACE_DECL;
+    s->line                      = line;
+    s->interface_decl.name       = name;
+    s->interface_decl.length     = len;
+    s->interface_decl.methods    = NULL;
+    s->interface_decl.method_count = 0;
+    return s;
+}
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * LIST NODE HELPERS
@@ -967,6 +978,20 @@ void ast_print_stmt(const Stmt *stmt, int indent) {
             for (EMNode *m = stmt->enum_decl.members; m; m = m->next) {
                 print_indent(indent + 1);
                 printf("MEMBER '%.*s' = %d\n", m->length, m->name, m->value);
+            }
+            break;
+        }
+
+        case STMT_INTERFACE_DECL: {
+            printf("STMT_INTERFACE_DECL '%.*s'\n",
+                   stmt->interface_decl.length, stmt->interface_decl.name);
+            typedef struct IfaceMethodNode IMNode;
+            for (IMNode *m = stmt->interface_decl.methods; m; m = m->next) {
+                print_indent(indent + 1);
+                printf("METHOD '%.*s' -> %s (%d params)\n",
+                       m->length, m->name,
+                       type_kind_name(m->return_type.kind),
+                       m->param_count);
             }
             break;
         }

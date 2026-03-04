@@ -1,0 +1,10 @@
+@Mod(name="testmod")
+class MyMod {
+    MyMod() {
+        print("mod constructor");
+    }
+}
+
+function main(): void {
+    print("main");
+}

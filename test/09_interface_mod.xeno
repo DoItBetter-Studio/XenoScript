@@ -1,0 +1,15 @@
+interface IStartable {
+    function start(): void;
+}
+
+@Mod(name="iface_mod")
+class MyMod : IStartable {
+    MyMod() {
+        print("constructed");
+        start();
+    }
+
+    function start(): void {
+        print("started");
+    }
+}

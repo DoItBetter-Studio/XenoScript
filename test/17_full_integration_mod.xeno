@@ -4,31 +4,27 @@ enum Phase {
     Cleanup = 99
 }
 
+interface IModLifecycle {
+    function onLoad(): void;
+}
+
 @Mod(name="mymod", version="1.0.0", author="Tigga")
-class MyMod {
+class MyMod : IModLifecycle {
     public:
         static string modName = "My Mod";
         int maxTicks = 5;
-        Phase current = Phase.Init;     // enum field with initializer
+        Phase current = Phase.Init;
 
         float[] floatArray = new float[4];
         ushort[] anotherArray = new ushort[] { 10, 33, 65535, 15086 };
 
-        /*
-		 *  This is a multiline comment.
-		 * Does it continue to work properly?
-         */
-
         MyMod() {
-            check_is_alive();
             print($"=== {MyMod.modName} loaded ===");
-
-            is_alive = true;
-
+            onLoad();
             check_is_alive();
-
+            is_alive = true;
+            check_is_alive();
             run();
-
             print($"Type Check: { current }");
 
             foreach (ushort value in anotherArray)
@@ -37,12 +33,16 @@ class MyMod {
             }
         }
 
-        function run(): void {
-            current = Phase.Running;   // assign enum value
+        function onLoad(): void {
+            print("onLoad()");
+        }
 
+        function run(): void {
+            current = Phase.Running;
             check_state();
 
-            if (current == Phase.Running) {  // compare enum values
+            if (current == Phase.Running)
+            {
                 print($"Phase: {current}");
             }
 
@@ -56,36 +56,31 @@ class MyMod {
         int counter = 0;
         bool is_alive = false;
 
-        function check_state(): void
-        {
+        function check_state(): void {
             match (current) {
-                case Phase.Init: {
+                case Phase.Init:
                     counter = 0;
                     print("reset");
                     break;
-                }
+
                 case Phase.Running:
                     print("running");
                     break;
+
                 case Phase.Cleanup:
                     print("finishing");
                     break;
+
                 default:
                     print("unknown");
                     break;
             }
         }
 
-        function check_is_alive(): void
-        {
-            match (is_alive)
-            {
-                case true:
-                    print("I'm alive");
-                    break;
-                case false:
-                    print("I'm dead");
-                    break;
+        function check_is_alive(): void {
+            match (is_alive) {
+                case true:  print("I'm alive"); break;
+                case false: print("I'm dead");  break;
             }
         }
 }

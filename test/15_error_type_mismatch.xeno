@@ -1,0 +1,3 @@
+function main(): void {
+    int x = "hello"; // error
+}

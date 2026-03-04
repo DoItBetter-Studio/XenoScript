@@ -1868,6 +1868,12 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                 "Enum '%.*s' must be declared at the top level",
                 stmt->enum_decl.length, stmt->enum_decl.name);
             break;
+
+        case STMT_INTERFACE_DECL:
+            type_error(c, stmt->line,
+                "Interface '%.*s' must be declared at the top level",
+                stmt->interface_decl.length, stmt->interface_decl.name);
+            break;
     }
 }
 
@@ -2026,21 +2032,169 @@ bool checker_check(Checker *c, Program *program) {
                 if (stored) stored->type.enum_name = stored->enum_name_buf;
             }
         }
+        else if (s->kind == STMT_INTERFACE_DECL) {
+            Symbol sym = {0};
+            sym.kind           = SYM_INTERFACE;
+            sym.name           = s->interface_decl.name;
+            sym.length         = s->interface_decl.length;
+            sym.interface_decl = s;
+
+            int nlen = s->interface_decl.length < 63 ? s->interface_decl.length : 63;
+            memcpy(sym.iface_name_buf, s->interface_decl.name, nlen);
+            sym.iface_name_buf[nlen] = '\0';
+
+            if (!define_symbol(c, sym)) {
+                type_error(c, s->line, "Interface '%.*s' already declared",
+                           s->interface_decl.length, s->interface_decl.name);
+            }
+        }
     }
 
-    /* ── PASS 1b: Validate parent classes exist ─────────────────────────── */
+    /* ── PASS 1b: Resolve parent class and implemented interfaces ───────── */
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
         if (s->kind != STMT_CLASS_DECL) continue;
-        if (!s->class_decl.parent_name || s->class_decl.parent_length == 0) continue;
+        if (!s->class_decl.interfaces) continue;   /* no colon list at all */
 
-        Symbol *psym = lookup_symbol(c,
-            s->class_decl.parent_name, s->class_decl.parent_length);
-        if (!psym || psym->kind != SYM_CLASS) {
-            type_error(c, s->line,
-                "Class '%.*s': parent class '%.*s' not declared",
-                s->class_decl.length, s->class_decl.name,
-                s->class_decl.parent_length, s->class_decl.parent_name);
+        /* Walk the raw names collected by the parser.
+         * - If the name resolves to SYM_CLASS     → it's the parent class.
+         * - If the name resolves to SYM_INTERFACE → it's an interface.
+         * - Anything else → error.
+         * At most ONE parent class is allowed. */
+        typedef struct IfaceNameNode IFNode;
+        int parent_count = 0;
+
+        for (IFNode *in = s->class_decl.interfaces; in; in = in->next) {
+            Symbol *sym = lookup_symbol(c, in->name, in->length);
+            if (!sym) {
+                type_error(c, s->line,
+                    "Class '%.*s': '%.*s' is not declared",
+                    s->class_decl.length, s->class_decl.name,
+                    in->length, in->name);
+                continue;
+            }
+            if (sym->kind == SYM_CLASS) {
+                parent_count++;
+                if (parent_count > 1) {
+                    type_error(c, s->line,
+                        "Class '%.*s': cannot inherit from more than one class",
+                        s->class_decl.length, s->class_decl.name);
+                } else {
+                    /* Wire up the parent_name pointer used by is_subtype() */
+                    s->class_decl.parent_name   = in->name;
+                    s->class_decl.parent_length = in->length;
+                }
+            } else if (sym->kind == SYM_INTERFACE) {
+                /* Accepted — already stored in the interfaces list */
+            } else {
+                type_error(c, s->line,
+                    "Class '%.*s': '%.*s' is neither a class nor an interface",
+                    s->class_decl.length, s->class_decl.name,
+                    in->length, in->name);
+            }
+        }
+    }
+
+    /* ── PASS 1b2: Interface compliance check ────────────────────────────
+     * For every class that lists interfaces, verify all required methods
+     * are implemented (with matching signatures). */
+    for (StmtNode *n = program->stmts; n; n = n->next) {
+        Stmt *s = n->stmt;
+        if (s->kind != STMT_CLASS_DECL) continue;
+
+        typedef struct IfaceNameNode IFNode;
+        typedef struct IfaceMethodNode IMNode;
+        typedef struct ClassMethodNode CMNode;
+
+        for (IFNode *in = s->class_decl.interfaces; in; in = in->next) {
+            Symbol *isym = lookup_symbol(c, in->name, in->length);
+            if (!isym || isym->kind != SYM_INTERFACE) continue;
+
+            Stmt *iface = isym->interface_decl;
+
+            for (IMNode *req = iface->interface_decl.methods; req; req = req->next) {
+                /* Search this class (and its ancestor chain) for an
+                 * instance method matching the required name + signature. */
+                bool found = false;
+
+                /* Walk class + parents */
+                char search_buf[64];
+                int  slen = s->class_decl.length < 63 ? s->class_decl.length : 63;
+                memcpy(search_buf, s->class_decl.name, slen);
+                search_buf[slen] = '\0';
+
+                while (!found) {
+                    Symbol *csym = lookup_symbol(c, search_buf, (int)strlen(search_buf));
+                    if (!csym || csym->kind != SYM_CLASS || !csym->class_decl) break;
+                    Stmt *cls = csym->class_decl;
+
+                    for (CMNode *m = cls->class_decl.methods; m; m = m->next) {
+                        if (m->is_static || m->is_constructor) continue;
+                        Stmt *fn = m->fn;
+                        if (fn->fn_decl.length != req->length) continue;
+                        if (memcmp(fn->fn_decl.name, req->name, req->length) != 0) continue;
+                        /* Name matches — check return type and param count */
+                        if (!type_equals(fn->fn_decl.return_type, req->return_type)) {
+                            type_error(c, s->line,
+                                "Class '%.*s' implements '%.*s': method '%.*s' "
+                                "has wrong return type (expected %s, got %s)",
+                                s->class_decl.length, s->class_decl.name,
+                                in->length, in->name,
+                                req->length, req->name,
+                                type_kind_name(req->return_type.kind),
+                                type_kind_name(fn->fn_decl.return_type.kind));
+                        }
+                        if (fn->fn_decl.param_count != req->param_count) {
+                            type_error(c, s->line,
+                                "Class '%.*s' implements '%.*s': method '%.*s' "
+                                "has wrong parameter count (expected %d, got %d)",
+                                s->class_decl.length, s->class_decl.name,
+                                in->length, in->name,
+                                req->length, req->name,
+                                req->param_count, fn->fn_decl.param_count);
+                        } else {
+                            /* Check param types */
+                            ParamNode *cp = fn->fn_decl.params;
+                            ParamNode *rp = req->params;
+                            int pidx = 0;
+                            while (cp && rp) {
+                                if (!type_equals(cp->type, rp->type)) {
+                                    type_error(c, s->line,
+                                        "Class '%.*s' implements '%.*s': "
+                                        "method '%.*s' parameter %d type mismatch "
+                                        "(expected %s, got %s)",
+                                        s->class_decl.length, s->class_decl.name,
+                                        in->length, in->name,
+                                        req->length, req->name, pidx + 1,
+                                        type_kind_name(rp->type.kind),
+                                        type_kind_name(cp->type.kind));
+                                }
+                                cp = cp->next; rp = rp->next; pidx++;
+                            }
+                        }
+                        found = true;
+                        break;
+                    }
+
+                    if (found) break;
+                    /* Walk up to parent class */
+                    if (!cls->class_decl.parent_name || cls->class_decl.parent_length == 0)
+                        break;
+                    int plen = cls->class_decl.parent_length < 63
+                             ? cls->class_decl.parent_length : 63;
+                    memcpy(search_buf, cls->class_decl.parent_name, plen);
+                    search_buf[plen] = '\0';
+                }
+
+                if (!found) {
+                    type_error(c, s->line,
+                        "Class '%.*s' claims to implement '%.*s' but is missing "
+                        "method '%.*s'",
+                        s->class_decl.length, s->class_decl.name,
+                        in->length, in->name,
+                        req->length, req->name);
+                }
+            }
         }
     }
 
@@ -2138,6 +2292,9 @@ bool checker_check(Checker *c, Program *program) {
         }
         else if (s->kind == STMT_ENUM_DECL) {
             /* Enums are compile-time only — no method bodies to check */
+        }
+        else if (s->kind == STMT_INTERFACE_DECL) {
+            /* Interfaces are pure compile-time contracts — no bodies to check */
         }
         else {
             type_error(c, s->line,

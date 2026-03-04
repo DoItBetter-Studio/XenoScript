@@ -1,0 +1,8 @@
+@Mod(name="staticmod")
+class MyMod {
+    static int value = 42;
+
+    MyMod() {
+        print($"static={MyMod.value}");
+    }
+}

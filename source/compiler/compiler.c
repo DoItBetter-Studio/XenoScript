@@ -1602,6 +1602,10 @@ static void compile_stmt(Compiler *c, const Stmt *stmt) {
             compile_error(c, line,
                 "Enum declarations must be at the top level");
             break;
+
+        case STMT_INTERFACE_DECL:
+            /* Interfaces are compile-time only — nothing to emit */
+            break;
     }
 }
 

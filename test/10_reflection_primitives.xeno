@@ -1,0 +1,6 @@
+function main(): void {
+    int x = 5;
+    print(typeof(x).name);
+    print(typeof(x).isPrimitive);
+    print(typeof(x).isArray);
+}

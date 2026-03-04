@@ -486,6 +486,8 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
         return make_token(lexer, TOK_PROTECTED);
     if (len == 6 && strncmp(word, "static", 6) == 0)
         return make_token(lexer, TOK_STATIC);
+    if (len == 9 && strncmp(word, "interface", 9) == 0)
+        return make_token(lexer, TOK_INTERFACE);
 
     /* Nothing matched — it's a user-defined identifier */
     return make_token(lexer, TOK_IDENT);
@@ -745,6 +747,8 @@ const char *token_type_name(TokenType type)
         return "protected";
     case TOK_STATIC:
         return "static";
+    case TOK_INTERFACE:
+        return "interface";
     case TOK_PLUS:
         return "+";
     case TOK_MINUS:

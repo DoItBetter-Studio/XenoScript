@@ -1,0 +1,57 @@
+# ============================
+# Build Artifacts (intermediate)
+# ============================
+build/
+
+*.o
+*.obj
+*.a
+*.lib
+*.out
+
+# ============================
+# Debug Symbols
+# ============================
+*.pdb
+
+# ============================
+# OS Generated Files
+# ============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================
+# Logs
+# ============================
+*.log
+
+# ============================
+# Temporary / Editor Files
+# ============================
+*.tmp
+*.temp
+*.swp
+*~
+
+# ============================
+# VS Code
+# ============================
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# ============================
+# CMake (if you ever use it)
+# ============================
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# ============================
+# Packaging Artifacts
+# ============================
+*.zip

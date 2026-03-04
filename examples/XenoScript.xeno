@@ -1,6 +1,3 @@
-import <System>
-import "local.xeno"
-
 @Mod(name="My Mod", version="1.0.0", author="Tigga", description="A sample XenoScript mod")
 class Example
 {

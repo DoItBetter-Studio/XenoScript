@@ -872,20 +872,46 @@ static Stmt *parse_class_decl(Parser *p, int line) {
     Token class_name = p->current;
     consume(p, TOK_IDENT, "Expected class name after 'class'");
 
-    /* Optional parent class: class Dog : Animal */
+    /* Optional parent class and/or interfaces:
+     *   class Dog : Animal
+     *   class MyMod : IRunnable
+     *   class MyMod : Animal, IRunnable, ITickable
+     *
+     * The checker distinguishes a parent class from interfaces by looking
+     * up the name — SYM_CLASS → parent, SYM_INTERFACE → implements.
+     * At parse time we just collect all names after the colon. */
     const char *parent_name = NULL;
     int         parent_len  = 0;
+
+    /* Linked list of interface names — built forwards with a tail pointer */
+    typedef struct IfaceNameNode IFNode;
+    IFNode *ifaces      = NULL;
+    IFNode *ifaces_tail = NULL;
+    int     iface_count = 0;
+
     if (match(p, TOK_COLON)) {
-        Token parent = p->current;
-        consume(p, TOK_IDENT, "Expected parent class name after ':'");
-        parent_name = parent.start;
-        parent_len  = parent.length;
+        do {
+            Token name_tok = p->current;
+            consume(p, TOK_IDENT, "Expected class or interface name after ':'");
+            /* We stash ALL names; the checker will sort parent vs interface */
+            IFNode *inode = arena_alloc(&p->arena, sizeof(IFNode));
+            inode->name   = name_tok.start;
+            inode->length = name_tok.length;
+            inode->next   = NULL;
+            if (!ifaces) { ifaces = ifaces_tail = inode; }
+            else         { ifaces_tail->next = inode; ifaces_tail = inode; }
+            iface_count++;
+        } while (match(p, TOK_COMMA));
     }
 
     Stmt *cls = stmt_class_decl(&p->arena,
                                 class_name.start, class_name.length,
                                 parent_name, parent_len,
                                 line);
+    /* Stash the raw name list; checker_check() will classify each as
+     * parent class or interface and validate accordingly. */
+    cls->class_decl.interfaces     = ifaces;
+    cls->class_decl.interface_count = iface_count;
 
     consume(p, TOK_LBRACE, "Expected '{' to begin class body");
 
@@ -1047,6 +1073,83 @@ static Stmt *parse_class_decl(Parser *p, int line) {
     consume(p, TOK_RBRACE, "Expected '}' to end class body");
     return cls;
 }
+/*
+ * parse_interface_decl — parses:
+ *
+ *   interface IRunnable {
+ *       function run(): void;
+ *       function tick(int delta): void;
+ *   }
+ *
+ * Only method signatures are allowed (no bodies, no fields).
+ * Precondition: 'interface' has already been consumed.
+ */
+static Stmt *parse_interface_decl(Parser *p, int line) {
+    Token iface_name = p->current;
+    consume(p, TOK_IDENT, "Expected interface name after 'interface'");
+
+    Stmt *iface = stmt_interface_decl(&p->arena,
+                                      iface_name.start, iface_name.length,
+                                      line);
+
+    consume(p, TOK_LBRACE, "Expected '{' to begin interface body");
+
+    typedef struct IfaceMethodNode IMNode;
+    IMNode *methods_tail = NULL;
+
+    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        int sig_line = p->current.line;
+        consume(p, TOK_FN, "Expected 'function' in interface body");
+
+        Token mname = p->current;
+        consume(p, TOK_IDENT, "Expected method name");
+
+        consume(p, TOK_LPAREN, "Expected '(' after method name");
+
+        ParamNode *params      = NULL;
+        ParamNode *params_tail = NULL;
+        int        param_count = 0;
+
+        if (!check(p, TOK_RPAREN)) {
+            do {
+                Type  ptype = parse_type(p);
+                Token pname = p->current;
+                consume(p, TOK_IDENT, "Expected parameter name");
+                ParamNode *pn = param_node(&p->arena, ptype,
+                                           pname.start, pname.length, NULL);
+                if (!params) { params = params_tail = pn; }
+                else         { params_tail->next = pn; params_tail = pn; }
+                param_count++;
+            } while (match(p, TOK_COMMA));
+        }
+        consume(p, TOK_RPAREN, "Expected ')' after parameters");
+        consume(p, TOK_COLON,  "Expected ':' before return type");
+        Type ret = parse_type(p);
+        consume(p, TOK_SEMICOLON, "Expected ';' after interface method signature");
+
+        IMNode *mn      = arena_alloc(&p->arena, sizeof(IMNode));
+        mn->name        = mname.start;
+        mn->length      = mname.length;
+        mn->return_type = ret;
+        mn->params      = params;
+        mn->param_count = param_count;
+        mn->next        = NULL;
+
+        if (!iface->interface_decl.methods) {
+            iface->interface_decl.methods = mn;
+            methods_tail = mn;
+        } else {
+            methods_tail->next = mn;
+            methods_tail = mn;
+        }
+        iface->interface_decl.method_count++;
+        (void)sig_line;
+    }
+
+    consume(p, TOK_RBRACE, "Expected '}' to end interface body");
+    return iface;
+}
+
 /*
  * parse_if_stmt — parses:  if ( expr ) block [ else block ]
  * Precondition: 'if' has already been consumed.
@@ -1299,6 +1402,11 @@ static Stmt *parse_stmt(Parser *p) {
 
     if (match(p, TOK_CLASS)) {
         return parse_class_decl(p, line);
+    }
+
+    /* Interface declaration */
+    if (match(p, TOK_INTERFACE)) {
+        return parse_interface_decl(p, line);
     }
 
     /* Enum declaration */

@@ -522,6 +522,8 @@ typedef enum {
 
     STMT_ENUM_DECL,     /* enum Direction { North, South = 2, ... } */
 
+    STMT_INTERFACE_DECL, /* interface IRunnable { function run(): void; } */
+
 } StmtKind;
 
 /*
@@ -678,6 +680,14 @@ struct Stmt {
                 struct ClassMethodNode *next;
             } *methods;
             int method_count;
+
+            /* Implemented interfaces — linked list of names */
+            struct IfaceNameNode {
+                const char         *name;
+                int                 length;
+                struct IfaceNameNode *next;
+            } *interfaces;
+            int interface_count;
         } class_decl;
 
         /* STMT_ENUM_DECL */
@@ -695,6 +705,26 @@ struct Stmt {
             } *members;
             int member_count;
         } enum_decl;
+
+        /* STMT_INTERFACE_DECL
+         * An interface is a pure compile-time contract: a named set of
+         * method signatures that implementing classes must provide.
+         * No fields, no bodies, zero runtime cost. */
+        struct {
+            const char *name;
+            int         length;
+
+            /* Method signatures — stored as fn_decl stmts (body is NULL) */
+            struct IfaceMethodNode {
+                const char         *name;
+                int                 length;
+                Type                return_type;
+                ParamNode          *params;
+                int                 param_count;
+                struct IfaceMethodNode *next;
+            } *methods;
+            int method_count;
+        } interface_decl;
     };
 };
 
@@ -770,6 +800,7 @@ Stmt *stmt_class_decl(Arena *a, const char *name, int len,
                       const char *parent_name, int parent_len,
                       int line);
 Stmt *stmt_enum_decl (Arena *a, const char *name, int len, int line);
+Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line);
 
 /* List node helpers */
 StmtNode  *stmt_node  (Arena *a, Stmt *stmt,  StmtNode *next);
