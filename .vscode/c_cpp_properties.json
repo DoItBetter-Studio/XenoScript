@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "Win64",
+            "includePath": [
+                "${workspaceFolder}/source",            // where your parser.h actually is
+                "${workspaceFolder}/includes"           // any other headers
+            ],
+            "defines": [],
+            "compilerPath": "C:/msys64/mingw64/bin/x86_64-w64-mingw32-gcc.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "windows-gcc-x64"
+        }
+    ],
+    "version": 4
+}

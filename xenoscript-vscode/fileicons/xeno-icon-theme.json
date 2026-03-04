@@ -1,0 +1,10 @@
+{
+  "iconDefinitions": {
+    "xenoFile": {
+      "iconPath": "../icons/xeno-file.svg"
+    }
+  },
+  "fileExtensions": {
+    "xeno": "xenoFile"
+  }
+}

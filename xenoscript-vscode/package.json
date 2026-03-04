@@ -1,0 +1,51 @@
+{
+  "name": "xenoscript",
+  "displayName": "XenoScript",
+  "description": "Syntax highlighting support for the XenoScript programming language.",
+  "version": "0.0.1",
+  "publisher": "xenoscript",
+  "repository": {
+    "url": ""
+  },
+  "engines": {
+    "vscode": "^1.50.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "xeno",
+        "aliases": [
+          "XenoScript",
+          "xeno"
+        ],
+        "extensions": [
+          ".xeno"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "xeno",
+        "scopeName": "source.xeno",
+        "path": "./syntaxes/xeno.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "xeno",
+        "path": "./snippets/xeno.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "xeno-icons",
+        "label": "XenoScript Icons",
+        "path": "./fileicons/xeno-icon-theme.json"
+      }
+    ]
+  }
+}

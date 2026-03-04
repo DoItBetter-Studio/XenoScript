@@ -1,0 +1,273 @@
+{
+  "scopeName": "source.xeno",
+  "name": "XenoScript",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#interpolatedStrings" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#returnTypes" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#classNames" },
+    { "include": "#constructors" },
+    { "include": "#functionDefinitions" },
+    { "include": "#annotations" },
+    { "include": "#enumValues" },
+    { "include": "#staticMembers" },
+    { "include": "#identifiers" }
+  ],
+
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.xeno",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.xeno",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.xeno",
+          "match": "\"([^\"\\\\]|\\\\.)*\""
+        },
+        {
+          "name": "string.quoted.single.xeno",
+          "match": "'([^'\\\\]|\\\\.)*'"
+        }
+      ]
+    },
+
+    "interpolatedStrings": {
+      "patterns": [
+        {
+          "name": "string.interpolated.xeno",
+          "begin": "\\$\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.xeno" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.xeno" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.xeno",
+              "match": "\\\\."
+            },
+            {
+              "begin": "\\{",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.embedded.begin.xeno" }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": { "name": "punctuation.section.embedded.end.xeno" }
+              },
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        }
+      ]
+    },
+
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.loop.xeno",
+          "match": "\\b(for|foreach|while)\\b"
+        },
+        {
+          "name": "keyword.control.conditional.xeno",
+          "match": "\\b(if|else|match|case|default)\\b"
+        },
+        {
+          "name": "keyword.control.flow.xeno",
+          "match": "\\b(return|break|continue)\\b"
+        },
+        {
+          "name": "keyword.operator.new.xeno",
+          "match": "\\bnew\\b"
+        },
+        {
+          "name": "keyword.operator.typeof.xeno",
+          "match": "\\btypeof\\b"
+        },
+        {
+          "name": "keyword.operator.in.xeno",
+          "match": "\\bin\\b"
+        },
+        {
+          "name": "keyword.other.function.xeno",
+          "match": "\\bfunction\\b"
+        },
+        {
+          "name": "keyword.other.class.xeno",
+          "match": "\\b(class|enum)\\b"
+        },
+        {
+          "name": "storage.modifier.xeno",
+          "match": "\\b(public|private|protected|static)\\b"
+        },
+        {
+          "name": "constant.language.boolean.xeno",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.xeno",
+          "match": "\\b(int|float|bool|string|void|sbyte|byte|short|ushort|uint|long|ulong|double|char)\\b"
+        },
+        {
+          "name": "storage.type.array.xeno",
+          "match": "\\b(int|float|bool|string|void|sbyte|byte|short|ushort|uint|long|ulong|double|char)(\\[\\])+"
+        }
+      ]
+    },
+
+    "returnTypes": {
+      "patterns": [
+        {
+          "name": "entity.name.type.return.xeno",
+          "match": "\\)\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.return.xeno" }
+          }
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.xeno",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.xeno",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.xeno",
+          "match": "(\\+\\+|--|==|!=|<=|>=|&&|\\|\\||[+\\-*/%<>=!])"
+        },
+        {
+          "name": "punctuation.separator.xeno",
+          "match": "[,;:]"
+        },
+        {
+          "name": "punctuation.bracket.xeno",
+          "match": "[(){}\\[\\]]"
+        },
+        {
+          "name": "punctuation.bracket.array.xeno",
+          "match": "\\[\\]"
+        },
+        {
+          "name": "punctuation.accessor.xeno",
+          "match": "\\."
+        }
+      ]
+    },
+
+    "classNames": {
+      "patterns": [
+        {
+          "name": "entity.name.class.xeno",
+          "match": "\\bclass\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.class.xeno" }
+          }
+        }
+      ]
+    },
+
+    "constructors": {
+      "patterns": [
+        {
+          "name": "entity.name.function.constructor.xeno",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.constructor.xeno" }
+          }
+        }
+      ]
+    },
+
+    "functionDefinitions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.xeno",
+          "match": "\\bfunction\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.xeno" }
+          }
+        }
+      ]
+    },
+
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.xeno",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+
+    "enumValues": {
+      "patterns": [
+        {
+          "name": "constant.other.enum.xeno",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\.([A-Z][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.enum.xeno" },
+            "2": { "name": "constant.other.enum.xeno" }
+          }
+        }
+      ]
+    },
+
+    "annotations": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.annotation.xeno",
+          "match": "@[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+
+    "staticMembers": {
+      "patterns": [
+        {
+          "name": "variable.other.static.xeno",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\.([a-zA-Z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.class.xeno" },
+            "2": { "name": "variable.other.static.xeno" }
+          }
+        }
+      ]
+    }
+  },
+
+  "uuid": "c1b7e2b0-4c1a-4b3e-9f3c-8e2f1a9d7c11"
+}
