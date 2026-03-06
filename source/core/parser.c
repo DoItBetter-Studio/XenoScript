@@ -1113,16 +1113,35 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
     int        param_count = 0;
 
     if (!check(p, TOK_RPAREN)) {
+        bool saw_default = false;
         do {
-            /* Each parameter is:  TYPE IDENT */
+            /* Each parameter is:  TYPE IDENT [= expr] */
             Type  param_type = parse_type(p);
             Token param_name = p->current;
             consume(p, TOK_IDENT, "Expected parameter name");
+
+            /* Optional default value */
+            Expr *default_val = NULL;
+            if (match(p, TOK_ASSIGN)) {
+                default_val = parse_expr(p, BP_NONE);
+                saw_default = true;
+            } else if (saw_default) {
+                /* Required param after a defaulted one */
+                if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                    ParseError *e = &p->errors[p->error_count++];
+                    snprintf(e->message, sizeof(e->message),
+                             "Required parameter '%.*s' cannot follow a parameter with a default value",
+                             param_name.length, param_name.start);
+                    e->line      = param_name.line;
+                    p->had_error = true;
+                }
+            }
 
             ParamNode *pn = param_node(&p->arena,
                                        param_type,
                                        param_name.start, param_name.length,
                                        NULL);
+            pn->default_value = default_val;
             if (!params) { params = params_tail = pn; }
             else         { params_tail->next = pn; params_tail = pn; }
             param_count++;
@@ -1264,12 +1283,29 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             int        param_count = 0;
 
             if (!check(p, TOK_RPAREN)) {
+                bool saw_default_ctor = false;
                 do {
                     Type  param_type = parse_type(p);
                     Token param_name = p->current;
                     consume(p, TOK_IDENT, "Expected parameter name");
+
+                    Expr *default_val = NULL;
+                    if (match(p, TOK_ASSIGN)) {
+                        default_val = parse_expr(p, BP_NONE);
+                        saw_default_ctor = true;
+                    } else if (saw_default_ctor) {
+                        if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                            ParseError *e = &p->errors[p->error_count++];
+                            snprintf(e->message, sizeof(e->message),
+                                     "Required parameter '%.*s' cannot follow a parameter with a default value",
+                                     param_name.length, param_name.start);
+                            e->line      = param_name.line;
+                            p->had_error = true;
+                        }
+                    }
                     ParamNode *pn = param_node(&p->arena, param_type,
                                                param_name.start, param_name.length, NULL);
+                    pn->default_value = default_val;
                     if (!params) { params = params_tail = pn; }
                     else         { params_tail->next = pn; params_tail = pn; }
                     param_count++;

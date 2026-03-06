@@ -646,10 +646,11 @@ ArgNode *arg_node(Arena *a, Expr *expr, ArgNode *next) {
 ParamNode *param_node(Arena *a, Type type, const char *name, int len,
                       ParamNode *next) {
     ParamNode *n = arena_alloc(a, sizeof(ParamNode));
-    n->type   = type;
-    n->name   = name;
-    n->length = len;
-    n->next   = next;
+    n->type          = type;
+    n->name          = name;
+    n->length        = len;
+    n->default_value = NULL;
+    n->next          = next;
     return n;
 }
 

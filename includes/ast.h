@@ -37,6 +37,7 @@
 /* Forward declaration — Expr and Stmt reference each other */
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
+typedef struct ParamNode ParamNode; /* forward decl — used in Expr call nodes */
 
 
 /* ═════════════════════════════════════════════════════════════════════════════
@@ -346,6 +347,7 @@ struct Expr {
             int         arg_count;  /* How many arguments       */
             TypeArgNode *type_args;     /* NULL if non-generic call */
             int          type_arg_count;
+            ParamNode   *resolved_params; /* Set by checker — for default arg emission */
         } call;
 
         /* EXPR_NEW — new ClassName(args) or new ClassName<T>(args) */
@@ -356,6 +358,7 @@ struct Expr {
             int         arg_count;
             TypeArgNode *type_args;     /* NULL if not generic instantiation */
             int          type_arg_count;
+            ParamNode   *resolved_params; /* Set by checker — for default arg emission */
         } new_expr;
 
         /* EXPR_SUPER_CALL — super(args)
@@ -389,6 +392,7 @@ struct Expr {
             int         method_name_len;
             ArgNode    *args;
             int         arg_count;
+            ParamNode  *resolved_params; /* Set by checker — for default arg emission */
         } method_call;
 
         /* EXPR_ENUM_ACCESS — Direction.North
@@ -567,6 +571,7 @@ typedef struct ParamNode {
     Type             type;
     const char      *name;
     int              length;
+    Expr            *default_value;  /* NULL if no default — e.g. int x = 42 */
     struct ParamNode *next;
 } ParamNode;
 

@@ -24,6 +24,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
+#include "../../source/compiler/compile_pipeline.h"
 
 /* Forward declaration — xeno_execute is defined later in this file */
 static XenoResult xeno_execute(XenoVM *vm);
@@ -1192,8 +1193,36 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module) {
             if (r != XENO_OK) return r;
         }
 
-        /* No required main() anymore — constructor is the entry point */
-        return XENO_OK;
+        /* Find main() method on the mod class */
+        int main_mi = -1;
+        for (int mi = 0; mi < cls->method_count; mi++) {
+            if (strcmp(cls->methods[mi].name, "main") == 0) {
+                main_mi = mi;
+                break;
+            }
+        }
+        if (main_mi < 0) {
+            /* No main() — constructor-only entry point is valid.
+             * The constructor already ran above; nothing more to do. */
+            return XENO_OK;
+        }
+
+        int main_chunk_idx = cls->methods[main_mi].fn_index;
+        if (main_chunk_idx < 0 || main_chunk_idx >= module->count) {
+            xeno_vm_error(vm, "@Mod class '%s': main() has no bytecode", entry_class);
+            return XENO_RUNTIME_ERROR;
+        }
+        if (vm->frame_count >= XENO_FRAME_MAX) {
+            xeno_vm_error(vm, "Stack overflow calling @Mod main()");
+            return XENO_RUNTIME_ERROR;
+        }
+        Chunk *main_chunk = &module->chunks[main_chunk_idx];
+        CallFrame *frame  = &vm->frames[vm->frame_count++];
+        frame->chunk      = main_chunk;
+        frame->ip         = main_chunk->code;
+        memset(frame->slots, 0, sizeof(frame->slots));
+        frame->slots[0]   = val_obj(obj);
+        return xeno_execute(vm);
     }
 
     /* No @Mod -- this is a library, nothing to run */
@@ -1225,6 +1254,24 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {
     compiler_host_table_init(&host_table);
     module_init(&vm->source_module);
 
+    /* Resolve imports and load stdlib — same pipeline as xenoc */
+    Module staging; module_init(&staging);
+    bool import_err = false;
+    char *merged = pipeline_prepare(source, NULL, &staging, &import_err);
+    if (import_err || !merged) {
+        free(merged);
+        module_free(&staging);
+        xeno_vm_error(vm, "Import error");
+        free(checker);
+        return XENO_COMPILE_ERROR;
+    }
+
+    /* Re-init lexer/parser on merged source */
+    parser_free(&parser);
+    lexer_init(&lexer, merged);
+    parser_init(&parser, &lexer);
+    checker_init(checker, &parser.arena);
+
     /* Pre-declare all registered host functions to the type checker
      * and compiler so they resolve correctly during compilation */
     for (int i = 0; i < vm->host_fn_count; i++) {
@@ -1250,6 +1297,13 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {
             compiler_host_table_add(&host_table, e->name, i, pcount);
     }
 
+    /* Declare stdlib classes/functions to checker from staging */
+    pipeline_declare_staging(checker, &staging);
+
+    /* Merge staging into source_module so compiler finds stdlib indices */
+    module_merge(&vm->source_module, &staging);
+    module_free(&staging);
+
     /* Parse */
     Program program = parser_parse(&parser);
     if (parser.had_error) {
@@ -1257,6 +1311,7 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {
                       parser.errors[0].line,
                       parser.errors[0].message);
         parser_free(&parser);
+        free(merged);
         free(checker);
         return XENO_COMPILE_ERROR;
     }
@@ -1274,6 +1329,7 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {
                       checker->errors[0].line,
                       checker->errors[0].message);
         parser_free(&parser);
+        free(merged);
         free(checker);
         return XENO_COMPILE_ERROR;
     }
@@ -1284,11 +1340,13 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {
                       compiler.errors[0].line,
                       compiler.errors[0].message);
         parser_free(&parser);
+        free(merged);
         free(checker);
         return XENO_COMPILE_ERROR;
     }
 
     parser_free(&parser);
+    free(merged);
     free(checker);
     vm->has_source_module = true;
 

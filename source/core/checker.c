@@ -181,6 +181,21 @@ static Type error_type(Checker *c, Expr *expr, int line,
  */
 static bool is_unknown(Type t) { return t.kind == TYPE_UNKNOWN; }
 
+/* Count the minimum number of arguments required (params without defaults). */
+static int count_required_params(ParamNode *params) {
+    int n = 0;
+    for (ParamNode *p = params; p; p = p->next)
+        if (!p->default_value) n++;
+    return n;
+}
+
+/* Count total params. */
+static int count_params(ParamNode *params) {
+    int n = 0;
+    for (ParamNode *p = params; p; p = p->next) n++;
+    return n;
+}
+
 /* Returns the bit-width rank of an integer type (for widening rules).
  * Higher rank = wider type. */
 static int int_type_rank(TypeKind k) {
@@ -420,6 +435,19 @@ static bool types_assignable(const Type lhs, const Type rhs) {
     /* float <-> double: same runtime storage */
     if ((lhs.kind == TYPE_FLOAT || lhs.kind == TYPE_DOUBLE) &&
         (rhs.kind == TYPE_FLOAT || rhs.kind == TYPE_DOUBLE)) return true;
+    /* Generic erasure: List<string> declared, List assigned (or vice versa).
+     * Strip type args from both sides and compare base names. */
+    if (lhs.kind == TYPE_OBJECT && rhs.kind == TYPE_OBJECT &&
+        lhs.class_name && rhs.class_name) {
+        char lbase[64], rbase[64];
+        bool l_generic = generic_base_name(lhs.class_name, lbase, sizeof(lbase));
+        bool r_generic = generic_base_name(rhs.class_name, rbase, sizeof(rbase));
+        if (l_generic || r_generic) {
+            const char *lname = l_generic ? lbase : lhs.class_name;
+            const char *rname = r_generic ? rbase : rhs.class_name;
+            if (strcmp(lname, rname) == 0) return true;
+        }
+    }
     return false;
 }
 
@@ -1146,12 +1174,26 @@ static Type check_expr(Checker *c, Expr *expr) {
                     expr->call.length, expr->call.name);
             }
 
-            /* Check argument count */
-            if (expr->call.arg_count != sym->param_count) {
-                return error_type(c, expr, expr->line,
-                    "Function '%.*s' expects %d argument(s), got %d",
-                    expr->call.length, expr->call.name,
-                    sym->param_count, expr->call.arg_count);
+            /* Check argument count — allow fewer args than params if trailing
+             * params have default values. */
+            {
+                ParamNode *fn_params = sym->fn_decl_node
+                                     ? sym->fn_decl_node->fn_decl.params : NULL;
+                int required = fn_params ? count_required_params(fn_params)
+                                         : sym->param_count;
+                int total    = fn_params ? count_params(fn_params)
+                                         : sym->param_count;
+                if (expr->call.arg_count < required ||
+                    expr->call.arg_count > total) {
+                    return error_type(c, expr, expr->line,
+                        required == total
+                            ? "Function '%.*s' expects %d argument(s), got %d"
+                            : "Function '%.*s' expects %d-%d argument(s), got %d",
+                        expr->call.length, expr->call.name,
+                        required, total, expr->call.arg_count);
+                }
+                /* Store param list so compiler can emit default args */
+                expr->call.resolved_params = fn_params;
             }
 
             /* ── Generic function call: identity<int>(x) ────────────────
@@ -1344,7 +1386,38 @@ static Type check_expr(Checker *c, Expr *expr) {
 
             /* ── Type-check constructor arguments ───────────────────────
              * This resolves enum/class expressions in args (e.g. Target.Class)
-             * so the compiler sees EXPR_ENUM_ACCESS not EXPR_FIELD_GET. */
+             * so the compiler sees EXPR_ENUM_ACCESS not EXPR_FIELD_GET.
+             * Also validates arg count against constructor params (with defaults). */
+            {
+                /* Find the constructor's ParamNode list */
+                ParamNode *ctor_params = NULL;
+                if (cls_sym->class_decl) {
+                    typedef struct ClassMethodNode CMNode;
+                    for (CMNode *m = cls_sym->class_decl->class_decl.methods;
+                         m; m = m->next) {
+                        if (m->is_constructor) {
+                            ctor_params = m->fn->fn_decl.params;
+                            break;
+                        }
+                    }
+                }
+                /* Validate arg count */
+                if (ctor_params) {
+                    int req   = count_required_params(ctor_params);
+                    int total = count_params(ctor_params);
+                    if (expr->new_expr.arg_count < req ||
+                        expr->new_expr.arg_count > total) {
+                        type_error(c, expr->line,
+                            req == total
+                                ? "Constructor for '%s' expects %d argument(s), got %d"
+                                : "Constructor for '%s' expects %d-%d argument(s), got %d",
+                            cls_sym->class_name_buf, req, total,
+                            expr->new_expr.arg_count);
+                    }
+                }
+                /* Store param list for compiler default-arg emission */
+                expr->new_expr.resolved_params = ctor_params;
+            }
             for (ArgNode *arg = expr->new_expr.args; arg; arg = arg->next)
                 check_expr(c, arg->expr);
 
@@ -1884,18 +1957,21 @@ if (obj_type.kind == TYPE_ARRAY) {
                     if (!m->is_static) continue;
                     if (m->fn->fn_decl.length == mlen &&
                         memcmp(m->fn->fn_decl.name, mname, mlen) == 0) {
-                        /* Check arg count */
-                        int expected = 0;
-                        typedef struct ParamNode PNode;
-                        for (PNode *p = m->fn->fn_decl.params; p; p = p->next) expected++;
-                        if (expr->method_call.arg_count != expected) {
+                        /* Check arg count — allow omitting trailing defaulted params */
+                        int required = count_required_params(m->fn->fn_decl.params);
+                        int total    = count_params(m->fn->fn_decl.params);
+                        if (expr->method_call.arg_count < required ||
+                            expr->method_call.arg_count > total) {
                             return error_type(c, expr, expr->line,
-                                "Static method '%.*s' expects %d argument(s), got %d",
-                                mlen, mname, expected, expr->method_call.arg_count);
+                                required == total
+                                    ? "Static method '%.*s' expects %d argument(s), got %d"
+                                    : "Static method '%.*s' expects %d-%d argument(s), got %d",
+                                mlen, mname, required, total,
+                                expr->method_call.arg_count);
                         }
                         /* Type-check args */
                         int ai = 0;
-                        PNode *p = m->fn->fn_decl.params;
+                        ParamNode *p = m->fn->fn_decl.params;
                         for (ArgNode *arg = expr->method_call.args; arg && p;
                              arg = arg->next, p = p->next, ai++) {
                             Type at = check_expr(c, arg->expr);
@@ -2060,10 +2136,14 @@ if (obj_type.kind == TYPE_ARRAY) {
                         }
                         arg = arg->next; param = param->next; idx++;
                     }
-                    if (expr->method_call.arg_count != sig->param_count) {
+                    if (expr->method_call.arg_count < count_required_params(sig->params) ||
+                        expr->method_call.arg_count > sig->param_count) {
+                        int req = count_required_params(sig->params);
                         type_error(c, expr->line,
-                            "Method '%.*s' expects %d argument(s), got %d",
-                            mlen, mname, sig->param_count,
+                            req == sig->param_count
+                                ? "Method '%.*s' expects %d argument(s), got %d"
+                                : "Method '%.*s' expects %d-%d argument(s), got %d",
+                            mlen, mname, req, sig->param_count,
                             expr->method_call.arg_count);
                     }
                     return resolve(expr, sig->return_type);
@@ -2215,6 +2295,23 @@ if (obj_type.kind == TYPE_ARRAY) {
                                     type_kind_name(at.kind));
                             }
                             arg = arg->next; param = param->next; idx++;
+                        }
+                        /* Arg count check — allow omitting trailing defaulted params */
+                        {
+                            int req   = count_required_params(m->fn->fn_decl.params);
+                            int total = count_params(m->fn->fn_decl.params);
+                            if (expr->method_call.arg_count < req ||
+                                expr->method_call.arg_count > total) {
+                                type_error(c, expr->line,
+                                    req == total
+                                        ? "Method '%.*s' expects %d argument(s), got %d"
+                                        : "Method '%.*s' expects %d-%d argument(s), got %d",
+                                    expr->method_call.method_name_len,
+                                    expr->method_call.method_name,
+                                    req, total, expr->method_call.arg_count);
+                            }
+                            /* Store param list for compiler default-arg emission */
+                            expr->method_call.resolved_params = m->fn->fn_decl.params;
                         }
                         /* Return type: substitute T->concrete if generic */
                         Type ret = (mc_type_params && mc_concrete_count > 0)
@@ -2566,8 +2663,35 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                 }
             }
             Type arr_type = check_expr(c, stmt->foreach_stmt.array);
-            if (!is_unknown(arr_type) && arr_type.kind != TYPE_ARRAY) {
-                type_error(c, stmt->line, "foreach requires an array, got %s", type_kind_name(arr_type.kind)); break;
+            /* If the collection is an object (e.g. List<T>), try to call toArray()
+             * implicitly by rewriting the foreach expression as expr.toArray(). */
+            if (!is_unknown(arr_type) && arr_type.kind == TYPE_OBJECT) {
+                /* Synthesize: stmt->foreach_stmt.array = array_expr.toArray() */
+                Expr *obj_expr = stmt->foreach_stmt.array;
+                Expr *to_arr   = arena_alloc(c->arena, sizeof(Expr));
+                *to_arr = (Expr){0};
+                to_arr->kind = EXPR_METHOD_CALL;
+                to_arr->line = stmt->line;
+                to_arr->method_call.object           = obj_expr;
+                to_arr->method_call.method_name      = "toArray";
+                to_arr->method_call.method_name_len  = 7;
+                to_arr->method_call.args             = NULL;
+                to_arr->method_call.arg_count        = 0;
+                to_arr->method_call.resolved_params  = NULL;
+                /* Type-check the synthesized call to resolve its return type */
+                arr_type = check_expr(c, to_arr);
+                if (arr_type.kind == TYPE_ARRAY) {
+                    stmt->foreach_stmt.array = to_arr;  /* replace with toArray() call */
+                } else {
+                    type_error(c, stmt->line,
+                        "foreach requires an array or collection with toArray(), got %s",
+                        type_kind_name(arr_type.kind));
+                    break;
+                }
+            } else if (!is_unknown(arr_type) && arr_type.kind != TYPE_ARRAY) {
+                type_error(c, stmt->line, "foreach requires an array, got %s",
+                           type_kind_name(arr_type.kind));
+                break;
             }
             if (arr_type.kind == TYPE_ARRAY && arr_type.element_type) {
                 Type decl = stmt->foreach_stmt.elem_type;

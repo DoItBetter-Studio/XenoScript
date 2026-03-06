@@ -6,7 +6,7 @@ enum Phase {
     Cleanup = 99
 }
 
-@Mod(name=MyMod.ModId, version="1.0.0", author="Tigga")
+@Mod(MyMod.ModId, version="1.0.0", author="Tigga")
 class MyMod {
     public:
         static string ModId = "mymod";
@@ -16,12 +16,18 @@ class MyMod {
         float[] floatArray = new float[4];
         ushort[] anotherArray = new ushort[] { 10, 33, 65535, 15086 };
 
+        List<string> stringList = new List<string>();
+
         /*
 		 *  This is a multiline comment.
 		 * Does it continue to work properly?
          */
 
         MyMod() {
+            stringList.add("Hello");
+            stringList.add("World");
+
+
             check_is_alive();
             print($"=== {MyMod.ModId} loaded ===");
 
@@ -36,6 +42,11 @@ class MyMod {
             foreach (ushort value in anotherArray)
             {
                 print(value);
+            }
+
+            foreach (string s in stringList)
+            {
+                print(s);
             }
 
             floatArray[0] = 3.141596;
