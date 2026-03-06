@@ -1,0 +1,12 @@
+import <libraries>
+
+@Mod(MyMod.ModId, version="1.0.0", author="Tigga")
+class MyMod {
+    public:
+        static string ModId = "mymod";
+
+        Mod()
+        {
+            print(Utils.echo(MyMod.ModId));
+        }
+}

@@ -1,0 +1,8 @@
+class Utils
+{
+    public:
+        function echo(string s): string
+        {
+            return s;
+        }
+}

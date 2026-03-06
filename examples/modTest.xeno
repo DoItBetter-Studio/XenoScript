@@ -14,7 +14,7 @@ class MyMod {
         Phase current = Phase.Init;     // enum field with initializer
 
         float[] floatArray = new float[4];
-        ushort[] anotherArray = new ushort[] { 10, 33, 65535, 15086 };
+        int[] anotherArray = new int[] { 10, 33, 65535, 15086 };
 
         List<string> stringList = new List<string>();
 
@@ -39,9 +39,9 @@ class MyMod {
 
             print($"Type Check: { current }");
 
-            foreach (ushort value in anotherArray)
+            foreach (int value in anotherArray)
             {
-                print(value);
+                print(value.toString());
             }
 
             foreach (string s in stringList)

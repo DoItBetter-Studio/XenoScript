@@ -125,10 +125,15 @@ char *xar_manifest_to_json(const XarManifest *m) {
     }
     J("],");
 
+    /* Dependencies stored as {"name":"id","version":"ver"} objects */
     J("\"dependencies\":[");
     for (int i = 0; i < m->dep_count; i++) {
         if (i) J(",");
+        J("{\"name\":");
         json_str(out, &pos, cap, m->dependencies[i]);
+        J(",\"version\":");
+        json_str(out, &pos, cap, m->dep_versions[i]);
+        J("}");
     }
     J("]");
 
@@ -204,17 +209,62 @@ bool xar_manifest_from_json(XarManifest *m, const char *json, size_t len) {
                 p = json_skip_ws(p);
                 if (*p == ']') { p++; break; }
                 if (*p == ',') { p++; continue; }
-                char val[XAR_MAX_NAME] = {0};
-                p = json_parse_str(p, val, sizeof(val));
-                if (!p) return false;
+
                 if (is_exports) {
+                    /* exports: array of strings */
+                    char val[XAR_MAX_NAME] = {0};
+                    p = json_parse_str(p, val, sizeof(val));
+                    if (!p) return false;
                     if (m->export_count < XAR_MAX_EXPORTS)
                         snprintf(m->exports[m->export_count++],
                                  XAR_MAX_NAME, "%s", val);
                 } else {
-                    if (m->dep_count < XAR_MAX_DEPS)
-                        snprintf(m->dependencies[m->dep_count++],
-                                 XAR_MAX_NAME, "%s", val);
+                    /* dependencies: array of {name, version} objects */
+                    p = json_skip_ws(p);
+                    if (*p == '{') {
+                        p++;
+                        char dep_name[XAR_MAX_NAME] = {0};
+                        char dep_ver[64] = {0};
+                        while (*p) {
+                            p = json_skip_ws(p);
+                            if (*p == '}') { p++; break; }
+                            if (*p == ',') { p++; continue; }
+                            char dkey[32] = {0};
+                            p = json_parse_str(p, dkey, sizeof(dkey));
+                            if (!p) return false;
+                            p = json_skip_ws(p);
+                            if (*p != ':') return false;
+                            p++;
+                            p = json_skip_ws(p);
+                            if (strcmp(dkey, "name") == 0)
+                                p = json_parse_str(p, dep_name, sizeof(dep_name));
+                            else if (strcmp(dkey, "version") == 0)
+                                p = json_parse_str(p, dep_ver, sizeof(dep_ver));
+                            else {
+                                /* unknown key — skip value */
+                                char tmp[256]; p = json_parse_str(p, tmp, sizeof(tmp));
+                            }
+                            if (!p) return false;
+                        }
+                        if (m->dep_count < XAR_MAX_DEPS) {
+                            snprintf(m->dependencies[m->dep_count], XAR_MAX_NAME,
+                                     "%s", dep_name);
+                            snprintf(m->dep_versions[m->dep_count], 64,
+                                     "%s", dep_ver);
+                            m->dep_count++;
+                        }
+                    } else {
+                        /* Fallback: plain string dep (old format) */
+                        char val[XAR_MAX_NAME] = {0};
+                        p = json_parse_str(p, val, sizeof(val));
+                        if (!p) return false;
+                        if (m->dep_count < XAR_MAX_DEPS) {
+                            snprintf(m->dependencies[m->dep_count],
+                                     XAR_MAX_NAME, "%s", val);
+                            m->dep_versions[m->dep_count][0] = '\0';
+                            m->dep_count++;
+                        }
+                    }
                 }
             }
         } else {
@@ -370,4 +420,66 @@ XarResult xar_read(XarArchive *ar, const char *path) {
     XarResult r = xar_read_mem(ar, buf, sz);
     free(buf);
     return r;
+}
+
+/* ── xeno.project TOML → manifest ────────────────────────────────────── */
+
+#include "toml.h"
+
+bool xar_manifest_from_toml(XarManifest *m, const char *toml_source,
+                             char *error_out, size_t error_cap) {
+    memset(m, 0, sizeof(*m));
+
+    TomlDoc doc;
+    if (!toml_parse(&doc, toml_source)) {
+        if (error_out)
+            snprintf(error_out, error_cap, "TOML parse error: %s", doc.error);
+        return false;
+    }
+
+    /* [mod] section */
+    const char *id   = toml_get(&doc, "mod", "id");
+    const char *ver  = toml_get(&doc, "mod", "version");
+    const char *auth = toml_get(&doc, "mod", "author");
+    const char *desc = toml_get(&doc, "mod", "description");
+
+    if (!id || !*id) {
+        if (error_out)
+            snprintf(error_out, error_cap,
+                     "xeno.project: [mod] id is required");
+        toml_free(&doc);
+        return false;
+    }
+    if (!ver || !*ver) {
+        if (error_out)
+            snprintf(error_out, error_cap,
+                     "xeno.project: [mod] version is required");
+        toml_free(&doc);
+        return false;
+    }
+
+    snprintf(m->name,        sizeof(m->name),        "%s", id);
+    snprintf(m->version,     sizeof(m->version),     "%s", ver);
+    snprintf(m->author,      sizeof(m->author),      "%s", auth ? auth : "");
+    snprintf(m->description, sizeof(m->description), "%s", desc ? desc : "");
+
+    /* [dependencies] section — each entry is:  dep-id = "version" */
+    for (int i = 0; i < doc.count; i++) {
+        const TomlEntry *e = &doc.entries[i];
+        if (strcmp(e->section, "dependencies") != 0) continue;
+        if (m->dep_count >= XAR_MAX_DEPS) {
+            if (error_out)
+                snprintf(error_out, error_cap,
+                         "xeno.project: too many dependencies (max %d)",
+                         XAR_MAX_DEPS);
+            toml_free(&doc);
+            return false;
+        }
+        snprintf(m->dependencies[m->dep_count], XAR_MAX_NAME, "%s", e->key);
+        snprintf(m->dep_versions[m->dep_count], 64,           "%s", e->value);
+        m->dep_count++;
+    }
+
+    toml_free(&doc);
+    return true;
 }

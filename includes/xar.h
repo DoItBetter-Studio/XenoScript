@@ -72,6 +72,7 @@ typedef struct {
     char  exports[XAR_MAX_EXPORTS][XAR_MAX_NAME];
     int   export_count;
     char  dependencies[XAR_MAX_DEPS][XAR_MAX_NAME];
+    char  dep_versions[XAR_MAX_DEPS][64];   /* parallel to dependencies[] */
     int   dep_count;
 } XarManifest;
 
@@ -126,5 +127,15 @@ char *xar_manifest_to_json(const XarManifest *m);
 
 /* Parse JSON into a manifest. Returns false on malformed input. */
 bool  xar_manifest_from_json(XarManifest *m, const char *json, size_t len);
+
+/* ── Manifest TOML helpers (xeno.project) ─────────────────────────────── */
+
+/*
+ * Parse a xeno.project TOML file into a manifest.
+ * Reads [mod] id/version/author/description and [dependencies] key=version.
+ * Returns false on malformed input; sets error_out (if non-NULL) on failure.
+ */
+bool xar_manifest_from_toml(XarManifest *m, const char *toml_source,
+                             char *error_out, size_t error_cap);
 
 #endif /* XAR_H */

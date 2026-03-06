@@ -180,6 +180,72 @@ void xeno_vm_load_stdlib(XenoVM *vm) {
     }
 }
 
+bool xeno_vm_load_xar(XenoVM *vm, const XarArchive *ar) {
+    const char *mod_name = ar->manifest.name[0]
+                           ? ar->manifest.name : "<unnamed>";
+
+    /* Deduplicate — don't load the same mod twice */
+    for (int i = 0; i < vm->stdlib_module_count; i++) {
+        if (strcmp(vm->stdlib_loaded_names[i], mod_name) == 0)
+            return true;
+    }
+
+    if (vm->stdlib_module_count >= 64) {
+        fprintf(stderr, "vm: too many loaded modules\n");
+        return false;
+    }
+
+    /* Merge all chunks from the archive into a single pool module */
+    Module *pool_mod = &vm->stdlib_modules[vm->stdlib_module_count];
+    module_init(pool_mod);
+
+    for (int i = 0; i < ar->chunk_count; i++) {
+        Module chunk_mod;
+        module_init(&chunk_mod);
+        XbcResult xr = xbc_read_mem(&chunk_mod,
+                                     ar->chunks[i].data,
+                                     ar->chunks[i].size);
+        if (xr == XBC_OK) {
+            module_merge(pool_mod, &chunk_mod);
+            /* Run __sinit__ if present so static fields are initialised */
+            if (chunk_mod.sinit_index >= 0) {
+                vm->module = pool_mod;
+                Chunk *sc  = &chunk_mod.chunks[chunk_mod.sinit_index];
+                if (sc->count > 0 && vm->frame_count < XENO_FRAME_MAX) {
+                    CallFrame *frame = &vm->frames[vm->frame_count++];
+                    frame->chunk = sc;
+                    frame->ip    = sc->code;
+                    memset(frame->slots, 0, sizeof(frame->slots));
+                    xeno_execute(vm);
+                }
+            }
+            module_free(&chunk_mod);
+        }
+    }
+
+    snprintf(vm->stdlib_loaded_names[vm->stdlib_module_count],
+         XAR_MAX_NAME, "%s", mod_name);
+    vm->stdlib_module_count++;
+    return true;
+}
+
+XenoResult xeno_vm_run_mod(XenoVM *vm, const char *mod_name) {
+    /* Find the named mod in the stdlib pool (loaded via xeno_vm_load_xar) */
+    Module *mod_module = NULL;
+    for (int i = 0; i < vm->stdlib_module_count; i++) {
+        if (strcmp(vm->stdlib_loaded_names[i], mod_name) == 0) {
+            mod_module = &vm->stdlib_modules[i];
+            break;
+        }
+    }
+    if (!mod_module) {
+        xeno_vm_error(vm, "xeno_vm_run_mod: mod '%s' not loaded", mod_name);
+        return XENO_RUNTIME_ERROR;
+    }
+    /* Run the mod's module directly — xeno_vm_run will merge stdlib into it */
+    return xeno_vm_run(vm, mod_module);
+}
+
 void xeno_vm_set_mod_path(XenoVM *vm, const char *path) {
     strncpy(vm->mod_path, path, sizeof(vm->mod_path) - 1);
 }

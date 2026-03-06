@@ -191,6 +191,25 @@ void xeno_vm_load_stdlib(XenoVM *vm);
 bool xeno_vm_load_stdlib_module(XenoVM *vm, const char *name);
 
 /*
+ * Load a user mod .xar archive into the VM's module pool.
+ * All chunks from the archive are merged into the VM's stdlib pool
+ * so that types and functions from the mod are available to other
+ * mods that depend on it.
+ *
+ * Call this for each dependency BEFORE calling xeno_vm_run_source
+ * or xeno_vm_run on the mod that depends on it.
+ *
+ * Returns false if the archive cannot be loaded.
+ */
+bool xeno_vm_load_xar(XenoVM *vm, const XarArchive *ar);
+
+/*
+ * Run a mod that was previously loaded via xeno_vm_load_xar.
+ * mod_name must match the archive's manifest name / first export.
+ */
+XenoResult xeno_vm_run_mod(XenoVM *vm, const char *mod_name);
+
+/*
  * Set a search path for user .xar mod files (e.g. "./mods/").
  * The VM will scan this directory at load time for .xar files.
  * Must be called before xeno_vm_run / xeno_vm_run_source.

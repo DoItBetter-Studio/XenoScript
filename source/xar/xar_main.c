@@ -97,19 +97,10 @@ static void mark_seen(const char *key) {
 }
 
 static void dir_of(const char *path, char *out, size_t sz) {
-    if (sz == 0) return;
-
-    // Copy safely
-    size_t len = strlen(path);
-    if (len >= sz) len = sz - 1;
-    memcpy(out, path, len);
-    out[len] = '\0';
-
-    // Strip filename
+    snprintf(out, sz, "%.*s", (int)(sz - 1), path);
     char *sep = strrchr(out, '/');
     if (!sep) sep = strrchr(out, '\\');
-    if (sep) *(sep + 1) = '\0';
-    else out[0] = '\0';
+    if (sep) *(sep+1) = '\0'; else out[0] = '\0';
 }
 
 static char *buf_append(char *buf, size_t *len, size_t *cap,

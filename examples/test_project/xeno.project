@@ -1,0 +1,8 @@
+[mod]
+id          = "mymod"
+version     = "1.0.0"
+author      = "Tigga"
+description = "My first mod"
+
+[dependencies]
+libraries     = "v1.0.0"

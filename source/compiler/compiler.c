@@ -24,7 +24,8 @@ static void compile_expr(Compiler *c, const Expr *expr);
 /* After emitting `provided` explicit args, emit default expressions for the
  * remaining params and return the padded total arg count. */
 static int emit_default_args(Compiler *c, ParamNode *params,
-                              int provided) {
+                              int provided, int line) {
+    (void)line;
     int idx = 0, total = provided;
     for (ParamNode *p = params; p; p = p->next, idx++) {
         if (idx < provided) continue;
@@ -1030,7 +1031,7 @@ static void compile_expr(Compiler *c, const Expr *expr) {
 
             /* Emit any missing default args BEFORE the opcode */
             int total_argc = emit_default_args(c, expr->call.resolved_params,
-                                               expr->call.arg_count);
+                                               expr->call.arg_count, line);
             emit_op(c, OP_CALL, line);
             emit_u16(c, (uint16_t)fn_idx, line);
             emit_byte(c, (uint8_t)total_argc, line);
@@ -1058,7 +1059,7 @@ static void compile_expr(Compiler *c, const Expr *expr) {
             }
             /* Emit any missing default constructor args BEFORE the opcode */
             int ctor_argc = emit_default_args(c, expr->new_expr.resolved_params,
-                                              expr->new_expr.arg_count);
+                                              expr->new_expr.arg_count, line);
             emit_op(c, OP_NEW, line);
             emit_u16(c, (uint16_t)ci, line);
             emit_byte(c, (uint8_t)ctor_argc, line);
@@ -1274,7 +1275,7 @@ static void compile_expr(Compiler *c, const Expr *expr) {
                 mname_buf[mlen] = '\0';
                 int name_idx = add_const_str(c, mname_buf);
                 int iface_argc = emit_default_args(c, expr->method_call.resolved_params,
-                                                   expr->method_call.arg_count);
+                                                   expr->method_call.arg_count, line);
                 emit_op(c, OP_CALL_IFACE, line);
                 emit_u16(c, (uint16_t)name_idx, line);
                 emit_byte(c, (uint8_t)iface_argc, line);
@@ -1291,7 +1292,7 @@ static void compile_expr(Compiler *c, const Expr *expr) {
                 break;
             }
             int method_argc = emit_default_args(c, expr->method_call.resolved_params,
-                                                expr->method_call.arg_count);
+                                                expr->method_call.arg_count, line);
             emit_op(c, OP_CALL_METHOD, line);
             emit_u16(c, (uint16_t)fn_idx, line);
             emit_byte(c, (uint8_t)method_argc, line);

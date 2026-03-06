@@ -13,7 +13,9 @@
 #ifndef XENOSCRIPT_COMPILE_PIPELINE_H
 #define XENOSCRIPT_COMPILE_PIPELINE_H
 
+#ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
+#endif
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
@@ -31,13 +33,8 @@
 /* ── Path helpers ─────────────────────────────────────────────────────── */
 
 static void pipeline_dir_of(const char *path, char *out, size_t sz) {
-    if (sz == 0) return;
-
-    size_t len = strlen(path);
-    if (len >= sz) len = sz - 1;
-    memcpy(out, path, len);
-    out[len] = '\0';
-
+    snprintf(out, sz, "%.*s", (int)(sz - 1), path);
+    out[sz-1] = '\0';
     char *sl = strrchr(out, '/');
 #ifdef _WIN32
     char *bs = strrchr(out, '\\');
@@ -52,7 +49,8 @@ static char *pipeline_read_file(const char *path) {
     fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)sz, f); buf[sz] = '\0';
+    size_t nr = fread(buf, 1, (size_t)sz, f);
+    buf[nr] = '\0';  /* use actual bytes read */
     fclose(f); return buf;
 }
 
@@ -66,11 +64,13 @@ typedef struct {
     int  sys_loaded_count;
     char local_imported[PIPELINE_MAX_LOCAL][1024];
     int  local_import_count;
+    char deps_dir[512];   /* project deps/ directory, or "" if none */
 } PipelineState;
 
 static void pipeline_state_init(PipelineState *s) {
     s->sys_loaded_count   = 0;
     s->local_import_count = 0;
+    s->deps_dir[0]        = '\0';
 }
 
 static bool pipeline_sys_loaded(PipelineState *s, const char *name) {
@@ -110,6 +110,43 @@ static char *pipeline_buf_append(char *buf, size_t *len, size_t *cap,
 static bool pipeline_load_sys_module(PipelineState *s, const char *name,
                                       Module *staging) {
     if (pipeline_sys_loaded(s, name)) return true;
+
+    /* First: check deps_dir for a user-provided <name>.xar */
+    if (s->deps_dir[0]) {
+        char dep_path[1024];
+        snprintf(dep_path, sizeof(dep_path), "%s/%s.xar", s->deps_dir, name);
+        FILE *probe = fopen(dep_path, "rb");
+        if (probe) {
+            fclose(probe);
+            /* Load dep xar — read all chunks into staging */
+            FILE *f = fopen(dep_path, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
+                uint8_t *buf = malloc((size_t)sz);
+                if (buf) {
+                    size_t nr = fread(buf, 1, (size_t)sz, f); fclose(f);
+                    (void)nr;
+                    XarArchive dep; memset(&dep, 0, sizeof(dep));
+                    if (xar_read_mem(&dep, buf, (size_t)sz) == XAR_OK) {
+                        for (int j = 0; j < dep.chunk_count; j++) {
+                            Module cm; module_init(&cm);
+                            if (xbc_read_mem(&cm, dep.chunks[j].data,
+                                             dep.chunks[j].size) == XBC_OK) {
+                                module_merge(staging, &cm); module_free(&cm);
+                            }
+                        }
+                        xar_archive_free(&dep);
+                    }
+                    free(buf);
+                }
+            }
+            if (s->sys_loaded_count < PIPELINE_MAX_SYS)
+                strncpy(s->sys_loaded[s->sys_loaded_count++], name, 63);
+            return true;
+        }
+    }
+
+    /* Fall back to embedded stdlib xar */
     for (int i = 0; i < STDLIB_XAR_TOTAL_COUNT; i++) {
         if (strcmp(STDLIB_XAR_TABLE[i].name, name) != 0) continue;
         size_t sz = (size_t)(STDLIB_XAR_TABLE[i].end - STDLIB_XAR_TABLE[i].start);
@@ -249,7 +286,7 @@ static Type pipeline_kind_to_type(int kind) {
     }
 }
 
-static void pipeline_declare_staging(Checker *checker, const Module *staging) {
+static inline void pipeline_declare_staging(Checker *checker, const Module *staging) {
     for (int i = 0; i < staging->count; i++) {
         const char *nm = staging->names[i];
         if (strcmp(nm, "__sinit__") == 0) continue;
@@ -273,12 +310,45 @@ static void pipeline_declare_staging(Checker *checker, const Module *staging) {
  * populate `staging` with stdlib modules, and return the fully-merged source
  * string (heap-allocated, caller must free). Returns NULL on error.
  */
-static char *pipeline_prepare(const char *source, const char *source_path,
+static inline char *pipeline_prepare(const char *source, const char *source_path,
                                Module *staging, bool *err) {
     PipelineState ps;
     pipeline_state_init(&ps);
 
     /* Always load core */
+    pipeline_load_sys_module(&ps, "core", staging);
+
+    char base_dir[512] = "";
+    if (source_path && *source_path)
+        pipeline_dir_of(source_path, base_dir, sizeof(base_dir));
+
+    size_t len = 0, cap = 65536;
+    char *merged = malloc(cap);
+    if (!merged) { *err = true; return NULL; }
+    merged[0] = '\0';
+
+    *err = false;
+    merged = pipeline_resolve_imports(&ps, source, base_dir,
+                                       source_path ? source_path : "<source>",
+                                       merged, &len, &cap, staging, err);
+    if (*err || !merged) { free(merged); return NULL; }
+    return merged;
+}
+
+/*
+ * pipeline_prepare_project — like pipeline_prepare but with a deps_dir so
+ * `import <name>` resolves against deps/name.xar before falling back to stdlib.
+ * Used by xenoc build and xenovm project mode.
+ */
+static inline char *pipeline_prepare_project(const char *source,
+                                       const char *source_path,
+                                       const char *deps_dir,
+                                       Module *staging, bool *err) {
+    PipelineState ps;
+    pipeline_state_init(&ps);
+    if (deps_dir && *deps_dir)
+        snprintf(ps.deps_dir, sizeof(ps.deps_dir), "%s", deps_dir);
+
     pipeline_load_sys_module(&ps, "core", staging);
 
     char base_dir[512] = "";

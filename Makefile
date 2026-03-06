@@ -37,7 +37,7 @@ COMPILER_SRCS := \
     source/compiler/xbc.c
 
 VM_SRCS  := source/vm/vm.c
-XAR_SRCS := source/xar/xar.c
+XAR_SRCS := source/xar/xar.c source/xar/toml.c
 
 STDLIB_DECLARE   := source/stdlib/stdlib_declare.c
 STDLIB_REGISTER  := source/stdlib/stdlib_register.c
@@ -73,9 +73,7 @@ $(BIN)/xar: $(XAR_TOOL_SRCS) | $(BIN)
 # Stdlib: pack → embed
 # ==========================================================
 
-STDLIB_XENO := $(wildcard stdlib/*/*.xeno)
-
-$(STDLIB_SOURCES_H): $(STDLIB_XENO)
+$(STDLIB_SOURCES_H): $(wildcard stdlib/collections/*.xeno)
 	@printf "🐍 Regenerating stdlib_sources.h...\n"
 	@python3 source/stdlib/gen_stdlib.py
 
@@ -88,10 +86,12 @@ $(BUILD)/math.xar: stdlib/math/*.xeno | $(BIN)/xar $(BUILD)
 $(BUILD)/collections.xar: stdlib/collections/*.xeno | $(BIN)/xar $(BUILD)
 	@$(BIN)/xar pack stdlib/collections/ -o $@ -n collections -v 1.0.0
 
-# Linux embed (ELF)
+# Linux embed (ELF) — add .note.GNU-stack to suppress executable-stack warning
 $(BUILD)/%.xar.linux.o: $(BUILD)/%.xar
 	@printf "📦 Embedding %s (linux)\n" $<
-	@ld -r -b binary $< -o $@
+	@ld -r -b binary $< -o $@.tmp
+	@objcopy --add-section .note.GNU-stack=/dev/null $@.tmp $@
+	@rm $@.tmp
 
 # Win64 embed (PE)
 $(BUILD)/%.xar.win64.o: $(BUILD)/%.xar
