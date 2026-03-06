@@ -50,13 +50,13 @@ typedef union Value {
     XenoType    *type;
 } Value;
 
-static inline Value val_int  (int64_t     v) { Value r; r.i   = v; return r; }
-static inline Value val_float(double      v) { Value r; r.f   = v; return r; }
-static inline Value val_bool (bool        v) { Value r; r.b   = v; return r; }
-static inline Value val_str  (char       *v) { Value r; r.s   = v; return r; }
-static inline Value val_obj  (XenoObject *v) { Value r; r.obj = v; return r; }
-static inline Value val_arr  (XenoArray  *v) { Value r; r.arr  = v; return r; }
-static inline Value val_type (XenoType   *v) { Value r; r.type = v; return r; }
+static inline Value val_int  (int64_t     v) { Value r; r.i   = 0; r.i   = v; return r; }
+static inline Value val_float(double      v) { Value r; r.i   = 0; r.f   = v; return r; }
+static inline Value val_bool (bool        v) { Value r; r.i   = 0; r.b   = v; return r; }
+static inline Value val_str  (char       *v) { Value r; r.i   = 0; r.s   = v; return r; }
+static inline Value val_obj  (XenoObject *v) { Value r; r.i   = 0; r.obj = v; return r; }
+static inline Value val_arr  (XenoArray  *v) { Value r; r.i   = 0; r.arr  = v; return r; }
+static inline Value val_type (XenoType   *v) { Value r; r.i   = 0; r.type = v; return r; }
 
 /* XenoArray: heap-allocated homogeneous array.
  * Defined after Value so the flexible elements[] member works. */
@@ -388,6 +388,11 @@ typedef struct {
                            * RETURN_VOID from a constructor does not push a
                            * dummy value — the object was already pushed by
                            * OP_NEW before the constructor frame was set up. */
+
+    /* Type signature — stored so declare_staging can give the checker
+     * accurate types without re-parsing source. Uses TypeKind values. */
+    int  return_type_kind;              /* TypeKind of the return value     */
+    int  param_type_kinds[16];          /* TypeKind of each parameter       */
 } Chunk;
 
 /* Initialize an empty chunk */

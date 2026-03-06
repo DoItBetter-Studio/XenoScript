@@ -489,12 +489,13 @@ struct Expr {
  * Statements form the "spine" of the program — expressions hang off them.
  * ═════════════════════════════════════════════════════════════════════════════*/
 /* ── Annotation key-value pair ──────────────────────────────────────────────
- * Represents one key="value" argument inside an annotation, e.g. name="My Mod" */
+ * Represents one argument inside an annotation.
+ * Named:     name="My Mod"   -> key="name", value=<string_expr>
+ * Positional: "My Mod"       -> key=NULL (key_len=0), value=<string_expr>  */
 typedef struct AnnotationKVNode {
-    const char             *key;        /* key name (not null-terminated)   */
+    const char             *key;        /* arg name, or NULL if positional  */
     int                     key_len;
-    const char             *value;      /* string value (not null-terminated) */
-    int                     value_len;
+    struct Expr            *value;      /* parsed expression for the value  */
     struct AnnotationKVNode *next;
 } AnnotationKVNode;
 
@@ -553,6 +554,8 @@ typedef enum {
     STMT_ENUM_DECL,     /* enum Direction { North, South = 2, ... } */
 
     STMT_INTERFACE_DECL, /* interface IRunnable { function run(): void; } */
+
+    STMT_IMPORT,        /* import <math>;  /  import "utils.xeno";         */
 
 } StmtKind;
 
@@ -769,6 +772,16 @@ struct Stmt {
             } *methods;
             int method_count;
         } interface_decl;
+
+        /* STMT_IMPORT
+         * import <system_name>;   — is_system=true,  path = "math" etc.
+         * import "local.xeno";    — is_system=false, path = "./utils.xeno" etc.
+         * The path is a null-terminated string owned by the arena. */
+        struct {
+            const char *path;       /* module name or file path, null-terminated */
+            int         path_len;
+            bool        is_system;  /* true = <name>, false = "path" */
+        } import_decl;
     };
 };
 

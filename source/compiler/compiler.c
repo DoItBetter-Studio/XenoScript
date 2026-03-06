@@ -78,6 +78,61 @@ int module_find_class(const Module *m, const char *name) {
     return -1;
 }
 
+/* Deep-copy a Chunk from src into dst. */
+static bool chunk_deep_copy(Chunk *dst, const Chunk *src) {
+    chunk_init(dst);
+    dst->param_count       = src->param_count;
+    dst->local_count       = src->local_count;
+    dst->is_constructor    = src->is_constructor;
+    dst->return_type_kind  = src->return_type_kind;
+    for (int i = 0; i < src->param_count && i < 16; i++)
+        dst->param_type_kinds[i] = src->param_type_kinds[i];
+
+    if (src->count > 0) {
+        dst->code  = malloc(src->count);
+        dst->lines = malloc(src->count * sizeof(int));
+        if (!dst->code || !dst->lines) { chunk_free(dst); return false; }
+        memcpy(dst->code,  src->code,  src->count);
+        memcpy(dst->lines, src->lines, src->count * sizeof(int));
+        dst->count    = src->count;
+        dst->capacity = src->count;
+    }
+
+    if (src->constants.count > 0) {
+        dst->constants.values = malloc(src->constants.count * sizeof(Value));
+        if (!dst->constants.values) { chunk_free(dst); return false; }
+        memcpy(dst->constants.values, src->constants.values,
+               src->constants.count * sizeof(Value));
+        dst->constants.count    = src->constants.count;
+        dst->constants.capacity = src->constants.count;
+    }
+    return true;
+}
+
+bool module_merge(Module *dst, const Module *src) {
+    /* Merge functions — skip if name already exists in dst */
+    for (int i = 0; i < src->count; i++) {
+        const char *name = src->names[i];
+        /* Skip internal sinit chunks — each module runs its own */
+        if (strcmp(name, "__sinit__") == 0) continue;
+        /* Skip if already present */
+        if (module_find(dst, name, (int)strlen(name)) >= 0) continue;
+
+        int idx = module_add_chunk(dst);
+        if (!chunk_deep_copy(&dst->chunks[idx], &src->chunks[i])) return false;
+        strncpy(dst->names[idx], name, 63);
+    }
+
+    /* Merge class definitions */
+    for (int i = 0; i < src->class_count; i++) {
+        const ClassDef *sc = &src->classes[i];
+        if (module_find_class(dst, sc->name) >= 0) continue;
+        if (dst->class_count >= MODULE_MAX_CLASSES) continue;
+        dst->classes[dst->class_count++] = *sc;
+    }
+    return true;
+}
+
 void module_disassemble(const Module *m) {
     printf("\n+==========================================+\n");
     printf("|           MODULE DISASSEMBLY             |\n");
@@ -281,6 +336,24 @@ static int resolve_local(Compiler *c, const char *name, int length) {
  * index operands rather than doing name lookups at runtime.
  * ───────────────────────────────────────────────────────────────────────────*/
 
+/* Strip generic type arguments from a class name for module lookup.
+ * "Stack<string>" -> "Stack", "List<int>" -> "List", "Foo" -> "Foo"
+ * Writes into buf (caller provides buf/buf_size) and returns buf. */
+static const char *strip_generic(const char *class_name, char *buf, size_t buf_size) {
+    if (!class_name) { buf[0] = '\0'; return buf; }
+    const char *lt = strchr(class_name, '<');
+    if (!lt) {
+        strncpy(buf, class_name, buf_size - 1);
+        buf[buf_size - 1] = '\0';
+        return buf;
+    }
+    size_t len = (size_t)(lt - class_name);
+    if (len >= buf_size) len = buf_size - 1;
+    memcpy(buf, class_name, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 /* Look up a field index from a class by name, using the module's ClassDef.
  * Returns the fields[] array index (used by LOAD_STATIC/STORE_STATIC). */
 static int find_field_index_by_class(Compiler *c, const char *class_name,
@@ -388,8 +461,29 @@ static void compile_expr(Compiler *c, const Expr *expr) {
         case EXPR_AS: {
             /* expr as TypeName -> val : emit operand then OP_AS_TYPE [tag] */
             compile_expr(c, expr->type_op.operand);
-            emit_op(c, OP_AS_TYPE, line);
-            emit_byte(c, (uint8_t)expr->type_op.check_type.kind, line);
+
+            /* Special case: casting to string is a VALUE CONVERSION, not a
+             * type check. Use OP_TO_STR with the source type kind byte so the
+             * VM actually converts int/float/bool to their string representation. */
+            if (expr->type_op.check_type.kind == TYPE_STRING) {
+                TypeKind src = expr->type_op.operand->resolved_type.kind;
+                uint8_t to_str_kind;
+                if (src == TYPE_INT || src == TYPE_LONG || src == TYPE_SBYTE ||
+                    src == TYPE_BYTE || src == TYPE_SHORT || src == TYPE_USHORT ||
+                    src == TYPE_UINT || src == TYPE_ULONG)
+                    to_str_kind = 0; /* int kind in OP_TO_STR */
+                else if (src == TYPE_FLOAT || src == TYPE_DOUBLE)
+                    to_str_kind = 1; /* float kind */
+                else if (src == TYPE_BOOL)
+                    to_str_kind = 2; /* bool kind */
+                else
+                    to_str_kind = 255; /* string/already string → default no-op */
+                emit_op(c, OP_TO_STR, line);
+                emit_byte(c, to_str_kind, line);
+            } else {
+                emit_op(c, OP_AS_TYPE, line);
+                emit_byte(c, (uint8_t)expr->type_op.check_type.kind, line);
+            }
             break;
         }
 
@@ -630,8 +724,16 @@ static void compile_expr(Compiler *c, const Expr *expr) {
 
             /* Use the wider of the two types for opcode selection.
              * int-family types all use INT opcodes; float/double use FLOAT.
-             * This mirrors the checker's type_wider_int() rule. */
+             * This mirrors the checker's type_wider_int() rule.
+             * For comparisons (which resolve to TYPE_BOOL), use the left
+             * operand's type — resolved_type is always TYPE_BOOL for them. */
             TypeKind tk = expr->resolved_type.kind;
+            if (tk == TYPE_BOOL) {
+                TypeKind lk2 = expr->binary.left->resolved_type.kind;
+                /* For unknown/generic T or object refs, use raw int comparison */
+                if (lk2 != TYPE_UNKNOWN && lk2 != TYPE_OBJECT)
+                    tk = lk2;
+            }
             /* Map all int-family and char types to TYPE_INT for opcode selection */
             bool tk_is_int   = (tk == TYPE_INT || tk == TYPE_LONG ||
                                  tk == TYPE_SBYTE || tk == TYPE_BYTE ||
@@ -674,13 +776,13 @@ static void compile_expr(Compiler *c, const Expr *expr) {
                     emit_op(c, tk == TYPE_INT ? OP_CMP_GTE_INT : OP_CMP_GTE_FLOAT, line);
                     break;
                 case TOK_EQ:
-                    if      (tk == TYPE_INT || tk == TYPE_ENUM) emit_op(c, OP_CMP_EQ_INT,   line);
+                    if      (tk == TYPE_INT || tk == TYPE_ENUM || tk == TYPE_UNKNOWN) emit_op(c, OP_CMP_EQ_INT,   line);
                     else if (tk == TYPE_FLOAT)  emit_op(c, OP_CMP_EQ_FLOAT, line);
                     else if (tk == TYPE_BOOL)   emit_op(c, OP_CMP_EQ_BOOL,  line);
                     else                        emit_op(c, OP_CMP_EQ_STR,   line);
                     break;
                 case TOK_NEQ:
-                    if      (tk == TYPE_INT || tk == TYPE_ENUM) emit_op(c, OP_CMP_NEQ_INT,   line);
+                    if      (tk == TYPE_INT || tk == TYPE_ENUM || tk == TYPE_UNKNOWN) emit_op(c, OP_CMP_NEQ_INT,   line);
                     else if (tk == TYPE_FLOAT)  emit_op(c, OP_CMP_NEQ_FLOAT, line);
                     else if (tk == TYPE_BOOL)   emit_op(c, OP_CMP_NEQ_BOOL,  line);
                     else                        emit_op(c, OP_CMP_NEQ_STR,   line);
@@ -727,7 +829,8 @@ static void compile_expr(Compiler *c, const Expr *expr) {
             } else if (expr->postfix.is_static_field) {
                 /* Static field lvalue — ClassName.field++ / ClassName.field--
                  * Strategy: LOAD_STATIC, add/sub 1, STORE_STATIC, LOAD_STATIC */
-                const char *cname = expr->postfix.object->resolved_type.class_name;
+                char _cname_buf[128];
+                const char *cname = strip_generic(expr->postfix.object->resolved_type.class_name, _cname_buf, sizeof(_cname_buf));
                 int ci = module_find_class(c->module, cname);
                 if (ci < 0) {
                     compile_error(c, line, "Unknown class '%s'", cname);
@@ -771,7 +874,8 @@ static void compile_expr(Compiler *c, const Expr *expr) {
                  *   compile(object)   → push obj for the result read
                  *   GET_FIELD idx     → push new value as expression result
                  */
-                const char *class_name = expr->postfix.object->resolved_type.class_name;
+                char _pfx_buf[128];
+                const char *class_name = strip_generic(expr->postfix.object->resolved_type.class_name, _pfx_buf, sizeof(_pfx_buf));
                 int field_idx = find_instance_slot_by_class(c, class_name,
                                     expr->postfix.field_name,
                                     expr->postfix.field_name_len);
@@ -1108,7 +1212,8 @@ static void compile_expr(Compiler *c, const Expr *expr) {
             compile_expr(c, expr->field_set.object);
             compile_expr(c, expr->field_set.value);
 
-            const char *class_name = expr->field_set.object->resolved_type.class_name;
+            char _fs_buf[128];
+            const char *class_name = strip_generic(expr->field_set.object->resolved_type.class_name, _fs_buf, sizeof(_fs_buf));
             int field_idx = find_instance_slot_by_class(c, class_name,
                                 expr->field_set.field_name,
                                 expr->field_set.field_name_len);
@@ -1135,7 +1240,9 @@ static void compile_expr(Compiler *c, const Expr *expr) {
             for (ArgNode *arg = expr->method_call.args; arg; arg = arg->next)
                 compile_expr(c, arg->expr);
 
-            const char *class_name = expr->method_call.object->resolved_type.class_name;
+            const char *class_name_raw = expr->method_call.object->resolved_type.class_name;
+            char class_name_buf[128];
+            const char *class_name = strip_generic(class_name_raw, class_name_buf, sizeof(class_name_buf));
             int ci = module_find_class(c->module, class_name);
 
             if (ci < 0) {
@@ -1624,6 +1731,11 @@ static void compile_stmt(Compiler *c, const Stmt *stmt) {
         case STMT_INTERFACE_DECL:
             /* Interfaces are compile-time only — nothing to emit */
             break;
+
+        case STMT_IMPORT:
+            /* Import declarations are fully resolved before compilation —
+             * the imported source was merged into the program. Nothing to emit. */
+            break;
     }
 }
 
@@ -1698,6 +1810,8 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
 
+        if (s->kind == STMT_IMPORT) continue;
+
         if (s->kind == STMT_FN_DECL) {
             if (c->module->count >= MODULE_MAX_FUNCTIONS) {
                 compile_error(c, s->line, "Too many functions");
@@ -1735,21 +1849,38 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
                 strncpy(c->module->metadata.entry_class, cls->name, MOD_STRING_MAX - 1);
                 c->module->metadata.entry_class[MOD_STRING_MAX - 1] = '\0';
 
+                /* Extract ModMetadata from @Mod annotation args.
+                 * Supports both positional and named args.
+                 * Positional order: name, version, author, description.
+                 * Named: name=, version=, author=, description= */
+                int pos_idx = 0;
                 for (AnnotationKVNode *kv = ann->args; kv; kv = kv->next) {
-                    /* kv->value points at the raw string literal including quotes.
-                     * Strip the surrounding '"' characters. */
-                    const char *vstart = kv->value;
-                    int         vlen   = kv->value_len;
-                    if (vlen >= 2 && vstart[0] == '"' && vstart[vlen-1] == '"') {
-                        vstart++; vlen -= 2;
-                    }
-                    if (vlen > MOD_STRING_MAX - 1) vlen = MOD_STRING_MAX - 1;
+                    /* Determine which field this arg maps to */
                     char *dest = NULL;
-                    if      (kv->key_len == 4  && memcmp(kv->key, "name",        4)  == 0) dest = c->module->metadata.name;
-                    else if (kv->key_len == 7  && memcmp(kv->key, "version",     7)  == 0) dest = c->module->metadata.version;
-                    else if (kv->key_len == 6  && memcmp(kv->key, "author",      6)  == 0) dest = c->module->metadata.author;
-                    else if (kv->key_len == 11 && memcmp(kv->key, "description", 11) == 0) dest = c->module->metadata.description;
-                    if (dest) { memcpy(dest, vstart, vlen); dest[vlen] = '\0'; }
+                    if (kv->key == NULL) {
+                        /* positional */
+                        if      (pos_idx == 0) dest = c->module->metadata.name;
+                        else if (pos_idx == 1) dest = c->module->metadata.version;
+                        else if (pos_idx == 2) dest = c->module->metadata.author;
+                        else if (pos_idx == 3) dest = c->module->metadata.description;
+                        pos_idx++;
+                    } else {
+                        /* named */
+                        if      (kv->key_len == 4  && memcmp(kv->key, "name",        4)  == 0) dest = c->module->metadata.name;
+                        else if (kv->key_len == 7  && memcmp(kv->key, "version",     7)  == 0) dest = c->module->metadata.version;
+                        else if (kv->key_len == 6  && memcmp(kv->key, "author",      6)  == 0) dest = c->module->metadata.author;
+                        else if (kv->key_len == 11 && memcmp(kv->key, "description", 11) == 0) dest = c->module->metadata.description;
+                    }
+                    if (!dest) continue;
+
+                    /* Extract string value from the expression */
+                    if (kv->value && kv->value->kind == EXPR_STRING_LIT) {
+                        const char *vstart = kv->value->string_lit.chars;
+                        int         vlen   = kv->value->string_lit.length;
+                        if (vlen > MOD_STRING_MAX - 1) vlen = MOD_STRING_MAX - 1;
+                        memcpy(dest, vstart, vlen);
+                        dest[vlen] = '\0';
+                    }
                 }
             }
 
@@ -1969,6 +2100,8 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
         for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
 
+        if (s->kind == STMT_IMPORT) continue;
+
         if (s->kind == STMT_FN_DECL) {
             /* Find the chunk by name (handles any declaration order) */
             int fn_idx = module_find(c->module, s->fn_decl.name, s->fn_decl.length);
@@ -1993,6 +2126,14 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
             for (ParamNode *p = s->fn_decl.params; p; p = p->next)
                 declare_local(c, p->name, p->length);
             c->current_chunk->param_count = s->fn_decl.param_count;
+
+            /* Store type signature so declare_staging can give checker real types */
+            c->current_chunk->return_type_kind = (int)s->fn_decl.return_type.kind;
+            {
+                int pi = 0;
+                for (ParamNode *p = s->fn_decl.params; p && pi < 16; p = p->next, pi++)
+                    c->current_chunk->param_type_kinds[pi] = (int)p->type.kind;
+            }
 
             for (StmtNode *b = s->fn_decl.body->block.stmts; b; b = b->next)
                 compile_stmt(c, b->stmt);

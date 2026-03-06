@@ -1,2 +1,0 @@
-xenoc: type errors in 'test/15_error_type_mismatch.xeno':
-[line 2] Type error: Cannot initialize 'x' (type int) with string

@@ -1,0 +1,42 @@
+// XenoScript Standard Library — core/int
+// Extension methods for the int primitive type.
+// These are free functions; x.abs() desugars to int_abs(x).
+
+function int_abs(int n): int {
+    if (n < 0) { return 0 - n; }
+    return n;
+}
+
+function int_min(int a, int b): int {
+    if (a < b) { return a; }
+    return b;
+}
+
+function int_max(int a, int b): int {
+    if (a > b) { return a; }
+    return b;
+}
+
+function int_clamp(int value, int lo, int hi): int {
+    if (value < lo) { return lo; }
+    if (value > hi) { return hi; }
+    return value;
+}
+
+function int_sign(int n): int {
+    if (n > 0) { return 1; }
+    if (n < 0) { return -1; }
+    return 0;
+}
+
+function int_toFloat(int n): float {
+    return toFloat(n);
+}
+
+function int_toString(int n): string {
+    return n as string;
+}
+
+function int_inRange(int value, int lo, int hi): bool {
+    return value >= lo && value <= hi;
+}

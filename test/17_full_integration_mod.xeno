@@ -1,7 +1,7 @@
 enum Phase {
-    Init = 1,
-    Running = 5,
-    Cleanup = 99
+    Init,
+    Running,
+    Cleanup
 }
 
 interface IModLifecycle {
@@ -81,6 +81,7 @@ class MyMod : IModLifecycle {
             match (is_alive) {
                 case true:  print("I'm alive"); break;
                 case false: print("I'm dead");  break;
+                default: print("unknown"); break;
             }
         }
 }

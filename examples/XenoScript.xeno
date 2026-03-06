@@ -1,4 +1,6 @@
-@Mod(name="My Mod", version="1.0.0", author="Tigga", description="A sample XenoScript mod")
+import <collections>
+
+@Mod("My Mod", "1.0.0", "Tigga")
 class Example
 {
 	public:
@@ -173,18 +175,18 @@ class TestScript
 			stringList.add("Item 2");
 			print($"List contents: {stringList[0]}, {stringList[1]}");
 
-			Dictionary<int, string> intStringDict;
-			intStringDict.add(1, "Value 1");
-			intStringDict.add(2, "Value 2");
-			print($"Dictionary contents: Key 1 -> {intStringDict[1]}, Key 2 -> {intStringDict[2]}");
+			// Dictionary<int, string> intStringDict;
+			// intStringDict.add(1, "Value 1");
+			// intStringDict.add(2, "Value 2");
+			// print($"Dictionary contents: Key 1 -> {intStringDict[1]}, Key 2 -> {intStringDict[2]}");
 
-			foreach (string item : stringList)
+			foreach (string item in stringList)
 			{
 				print($"List item: {item}");
 			}
 		}
 
-	protected:
-		string[] arrayTest = new string[];
-		Dictionary<string, List<int>> dictTest = new Dictionary<string, List<int>>();
+	// protected:
+	// 	string[] arrayTest = new string[];
+	// 	Dictionary<string, List<int>> dictTest = new Dictionary<string, List<int>>();
 }

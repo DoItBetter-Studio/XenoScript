@@ -1,0 +1,12 @@
+import "attribute.xeno"
+import "attribute_target.xeno"
+
+class AttributeUsage: Attribute
+{
+    public:
+        Target[] targets;
+        AttributeUsage(Target[] t)
+        {
+            targets = t;
+        }
+}

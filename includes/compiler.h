@@ -68,6 +68,14 @@ int    module_find_class(const Module *m, const char *name);    /* returns index
 void   module_disassemble(const Module *m);   /* disassemble all chunks */
 int    module_add_chunk(Module *m);           /* add and init a new chunk slot */
 
+/*
+ * Merge all chunks and class definitions from `src` into `dst`.
+ * Used to graft stdlib .xar content into a user module before execution.
+ * Functions already present in `dst` (by name) are skipped (no duplicates).
+ * Returns true on success, false on allocation failure.
+ */
+bool   module_merge(Module *dst, const Module *src);
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * COMPILER ERRORS

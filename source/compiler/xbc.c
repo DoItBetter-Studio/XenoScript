@@ -247,6 +247,11 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
         if (!wb_u8(wb, (uint8_t)chunk->local_count))       return false;
         if (!wb_u8(wb, chunk->is_constructor ? 1 : 0))     return false;
 
+        /* Type signature (return + params) */
+        if (!wb_u8(wb, (uint8_t)chunk->return_type_kind))  return false;
+        for (int pi = 0; pi < chunk->param_count && pi < 16; pi++)
+            if (!wb_u8(wb, (uint8_t)chunk->param_type_kinds[pi])) return false;
+
         /* Scan bytecode to determine constant type tags.
          * The constant pool itself has no type info — we infer from opcodes. */
         uint8_t *const_kinds = calloc(chunk->constants.count + 1, 1);
@@ -302,12 +307,15 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                 case OP_STORE_STATIC:
                     pc += 2; break;  /* opcode already consumed; 2 operand bytes follow */
 
-                /* 1-byte operand opcodes */
+                /* 1-byte operand opcodes — always exactly 1 operand byte */
                 case OP_LOAD_LOCAL:
                 case OP_STORE_LOCAL:
                 case OP_LOAD_CONST_BOOL:
                 case OP_GET_FIELD:
                 case OP_SET_FIELD:
+                    pc += 1; break;
+
+                /* OP_TO_STR: 1 byte kind; if kind==4 (enum) an extra class_index byte follows */
                 case OP_TO_STR: {
                     uint8_t kind = (pc < chunk->count) ? chunk->code[pc] : 0;
                     pc += (kind == 4) ? 2 : 1; break;
@@ -553,6 +561,11 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
         chunk->param_count    = rb_u8(rb);
         chunk->local_count    = rb_u8(rb);
         chunk->is_constructor = rb_u8(rb) != 0;
+
+        /* Type signature (return + params) */
+        chunk->return_type_kind = rb_u8(rb);
+        for (int pi = 0; pi < chunk->param_count && pi < 16; pi++)
+            chunk->param_type_kinds[pi] = rb_u8(rb);
         if (rb->error) return XBC_ERR_IO;
 
         /* Constant pool */

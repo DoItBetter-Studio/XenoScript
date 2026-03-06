@@ -1,0 +1,185 @@
+// XenoScript Standard Library — Collections
+// Provides generic List<T>, Stack<T>, and Queue<T>.
+// Import with: import <collections>;
+
+// ── List<T> ──────────────────────────────────────────────────────────────
+// A dynamically-sized ordered sequence backed by a fixed-capacity array.
+// Capacity doubles are not supported (no heap realloc in XenoScript yet),
+// so List has a fixed maximum capacity set at construction.
+
+class List<T> {
+    private:
+        T[]  data;
+        int  size;
+        int  capacity;
+
+    public:
+        List(int cap) {
+            capacity = cap;
+            data     = new T[cap];
+            size     = 0;
+        }
+
+        function add(T item): void {
+            if (size >= capacity) {
+                print("List: capacity exceeded");
+                return;
+            }
+            data[size] = item;
+            size = size + 1;
+        }
+
+        function get(int index): T {
+            return data[index];
+        }
+
+        function set(int index, T item): void {
+            data[index] = item;
+        }
+
+        function count(): int {
+            return size;
+        }
+
+        function isEmpty(): bool {
+            return size == 0;
+        }
+
+        function clear(): void {
+            size = 0;
+        }
+
+        function contains(T item): bool {
+            for (int i = 0; i < size; i++) {
+                if (data[i] == item) { return true; }
+            }
+            return false;
+        }
+
+        function removeAt(int index): void {
+            for (int i = index; i < size - 1; i++) {
+                data[i] = data[i + 1];
+            }
+            size = size - 1;
+        }
+
+        function indexOf(T item): int {
+            for (int i = 0; i < size; i++) {
+                if (data[i] == item) { return i; }
+            }
+            return -1;
+        }
+}
+
+// ── Stack<T> ─────────────────────────────────────────────────────────────
+// LIFO structure backed by a fixed-capacity array.
+
+class Stack<T> {
+    private:
+        T[]  data;
+        int  top;
+        int  capacity;
+
+    public:
+        Stack(int cap) {
+            capacity = cap;
+            data     = new T[cap];
+            top      = 0;
+        }
+
+        function push(T item): void {
+            if (top >= capacity) {
+                print("Stack: overflow");
+                return;
+            }
+            data[top] = item;
+            top = top + 1;
+        }
+
+        function pop(): T {
+            if (top <= 0) {
+                print("Stack: underflow");
+                return data[0];
+            }
+            top = top - 1;
+            return data[top];
+        }
+
+        function peek(): T {
+            return data[top - 1];
+        }
+
+        function count(): int {
+            return top;
+        }
+
+        function isEmpty(): bool {
+            return top == 0;
+        }
+
+        function clear(): void {
+            top = 0;
+        }
+}
+
+// ── Queue<T> ─────────────────────────────────────────────────────────────
+// FIFO structure backed by a fixed-capacity circular array.
+
+class Queue<T> {
+    private:
+        T[]  data;
+        int  head;
+        int  tail;
+        int  size;
+        int  capacity;
+
+    public:
+        Queue(int cap) {
+            capacity = cap;
+            data     = new T[cap];
+            head     = 0;
+            tail     = 0;
+            size     = 0;
+        }
+
+        function enqueue(T item): void {
+            if (size >= capacity) {
+                print("Queue: capacity exceeded");
+                return;
+            }
+            data[tail] = item;
+            tail = (tail + 1);
+            if (tail >= capacity) { tail = 0; }
+            size = size + 1;
+        }
+
+        function dequeue(): T {
+            if (size <= 0) {
+                print("Queue: empty");
+                return data[0];
+            }
+            T item = data[head];
+            head = (head + 1);
+            if (head >= capacity) { head = 0; }
+            size = size - 1;
+            return item;
+        }
+
+        function peek(): T {
+            return data[head];
+        }
+
+        function count(): int {
+            return size;
+        }
+
+        function isEmpty(): bool {
+            return size == 0;
+        }
+
+        function clear(): void {
+            head = 0;
+            tail = 0;
+            size = 0;
+        }
+}

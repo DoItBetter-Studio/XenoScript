@@ -23,6 +23,7 @@
 
 #include "bytecode.h"
 #include "compiler.h"
+#include "xar.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -105,6 +106,15 @@ struct XenoVM {
     HostFnEntry host_fns[XENO_HOST_FN_MAX];
     int         host_fn_count;
 
+    /* Stdlib module pool — merged into every compiled module before execution.
+     * Populated by xeno_vm_load_stdlib() from embedded .xar blobs. */
+    Module      stdlib_modules[64];
+    int         stdlib_module_count;
+    char        stdlib_loaded_names[64][XAR_MAX_NAME]; /* dedup by name */
+
+    /* Mod search path — directory scanned for user .xar files at startup */
+    char        mod_path[512];
+
     /* Error state */
     char        error[256];               /* Last runtime error message      */
     bool        had_error;
@@ -162,10 +172,36 @@ int xeno_register_fn(XenoVM *vm, const char *name,
 XenoResult xeno_vm_run(XenoVM *vm, Module *module);
 
 /*
+ * Load all auto-loaded stdlib .xar archives into the VM's stdlib module pool.
+ * Also loads explicitly imported archives from STDLIB_XAR_TABLE by name.
+ * Call this after xeno_vm_init() and after registering all host functions,
+ * before running any script.
+ *
+ * `import_name` may be NULL to load only auto-loaded modules (core).
+ * Pass a name like "math" or "collections" to also load that explicit module.
+ * Call multiple times for multiple explicit imports — deduplication is handled.
+ */
+void xeno_vm_load_stdlib(XenoVM *vm);
+
+/*
+ * Load a single stdlib module by name into the VM's stdlib pool.
+ * Used internally by xeno_vm_run_source when it encounters an import.
+ * Returns false if the module name is not found in the embedded table.
+ */
+bool xeno_vm_load_stdlib_module(XenoVM *vm, const char *name);
+
+/*
+ * Set a search path for user .xar mod files (e.g. "./mods/").
+ * The VM will scan this directory at load time for .xar files.
+ * Must be called before xeno_vm_run / xeno_vm_run_source.
+ */
+void xeno_vm_set_mod_path(XenoVM *vm, const char *path);
+
+/*
  * Compile and execute a XenoScript source string.
  * Used for hot-reload (.xeno files) and dev tooling.
  *
- * On reload: call this again with new source — state resets completely.
+ * On reload: call this again with new source -- state resets completely.
  * The previous source_module is freed and replaced.
  *
  * Returns XENO_COMPILE_ERROR if compilation fails,

@@ -43,12 +43,12 @@ function printLabel<T where T : IPrintable>(T item): void {
 
 function main(): void {
     // Test generic function - int
-    // int x = identity<int>(42);
-    // print(x);
+    int x = identity<int>(42);
+    print(x);
 
     // Test generic function - string
-    // string s = identity<string>("hello generics");
-    // print(s);
+    string s = identity<string>("hello generics");
+    print(s);
 
     // Test generic class with int
     Box<int> box = new Box<int>(99);

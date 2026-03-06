@@ -1,0 +1,71 @@
+// XenoScript Standard Library — Queue<T>
+// FIFO structure. Grows automatically — no fixed cap.
+// On grow the buffer is linearised (head resets to 0).
+
+class Queue<T> {
+    private:
+        T[]  data;
+        int  head;
+        int  tail;
+        int  size;
+        int  capacity;
+
+    public:
+        Queue() {
+            capacity = 8;
+            data     = new T[8];
+            head     = 0;
+            tail     = 0;
+            size     = 0;
+        }
+
+        function enqueue(T item): void {
+            if (size >= capacity) {
+                int new_cap = capacity * 2;
+                T[] fresh   = new T[new_cap];
+                for (int i = 0; i < size; i++) {
+                    int src = head + i;
+                    if (src >= capacity) { src = src - capacity; }
+                    fresh[i] = data[src];
+                }
+                data     = fresh;
+                head     = 0;
+                tail     = size;
+                capacity = new_cap;
+            }
+            data[tail] = item;
+            tail = tail + 1;
+            if (tail >= capacity) { tail = 0; }
+            size = size + 1;
+        }
+
+        function dequeue(): T {
+            if (size <= 0) {
+                print("Queue: empty");
+                return data[0];
+            }
+            T item = data[head];
+            head = head + 1;
+            if (head >= capacity) { head = 0; }
+            size = size - 1;
+            return item;
+        }
+
+        function peek(): T {
+            return data[head];
+        }
+
+        function count(): int {
+            return size;
+        }
+
+        function isEmpty(): bool {
+            return size == 0;
+        }
+
+        function clear(): void {
+            head = 0;
+            tail = 0;
+            size = 0;
+        }
+}

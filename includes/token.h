@@ -100,6 +100,7 @@ typedef enum {
     TOK_STATIC,       /* static    — static member        */
     TOK_INTERFACE,    /* interface — interface declaration */
     TOK_WHERE,        /* where     — generic type constraint */
+    TOK_IMPORT,       /* import    — import declaration      */
 
     /* ── Arithmetic operators ──────────────────────────────────────────── */
     TOK_PLUS,         /* +  */

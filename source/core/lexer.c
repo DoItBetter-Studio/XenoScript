@@ -490,6 +490,8 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
         return make_token(lexer, TOK_INTERFACE);
     if (len == 5 && strncmp(word, "where", 5) == 0)
         return make_token(lexer, TOK_WHERE);
+    if (len == 6 && strncmp(word, "import", 6) == 0)
+        return make_token(lexer, TOK_IMPORT);
 
     /* Nothing matched — it's a user-defined identifier */
     return make_token(lexer, TOK_IDENT);

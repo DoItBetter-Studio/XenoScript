@@ -23,6 +23,7 @@
 
 #include "ast.h"
 #include "arena.h"
+#include "bytecode.h"
 #include <stdbool.h>
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +168,13 @@ void checker_declare_host(Checker *checker,
                           Type return_type,
                           Type *param_types,
                           int param_count);
+
+/*
+ * Declare a class to the checker from a compiled ClassDef (from a .xar chunk).
+ * Registers the class name in the global scope so the type checker knows it
+ * exists. Full method resolution happens at runtime via module_merge.
+ */
+void checker_declare_class_from_def(Checker *checker, const ClassDef *def);
 
 /*
  * Type-check an entire program.

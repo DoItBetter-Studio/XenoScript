@@ -18,9 +18,15 @@
  */
 
 #include "vm.h"
+#include "xar.h"
+#include "xbc.h"
+#include "stdlib_xar.h"
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
+
+/* Forward declaration — xeno_execute is defined later in this file */
+static XenoResult xeno_execute(XenoVM *vm);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,7 +96,94 @@ void xeno_vm_free(XenoVM *vm) {
         module_free(&vm->source_module);
         vm->has_source_module = false;
     }
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        module_free(&vm->stdlib_modules[i]);
+    vm->stdlib_module_count = 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * STDLIB XAR LOADING
+ * ───────────────────────────────────────────────────────────────────────────*/
+
+static bool stdlib_already_loaded(XenoVM *vm, const char *name) {
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        if (strcmp(vm->stdlib_loaded_names[i], name) == 0) return true;
+    return false;
+}
+
+static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
+                                const char *name) {
+    if (vm->stdlib_module_count >= 64) return false;
+
+    XarArchive ar;
+    if (xar_read_mem(&ar, data, size) != XAR_OK) {
+        fprintf(stderr, "vm: failed to read embedded .xar '%s'\n", name);
+        return false;
+    }
+
+    /* Each chunk in the archive is a compiled .xbc — merge all into one module */
+    Module *pool_mod = &vm->stdlib_modules[vm->stdlib_module_count];
+    module_init(pool_mod);
+
+    for (int i = 0; i < ar.chunk_count; i++) {
+        Module chunk_mod;
+        module_init(&chunk_mod);
+        XbcResult xr = xbc_read_mem(&chunk_mod,
+                                     ar.chunks[i].data,
+                                     ar.chunks[i].size);
+        if (xr == XBC_OK) {
+            module_merge(pool_mod, &chunk_mod);
+            /* Run sinit for this chunk so statics are initialised */
+            if (chunk_mod.sinit_index >= 0) {
+                vm->module = pool_mod;
+                Chunk *sc  = &chunk_mod.chunks[chunk_mod.sinit_index];
+                if (sc->count > 0 && vm->frame_count < XENO_FRAME_MAX) {
+                    CallFrame *frame = &vm->frames[vm->frame_count++];
+                    frame->chunk = sc;
+                    frame->ip    = sc->code;
+                    memset(frame->slots, 0, sizeof(frame->slots));
+                    xeno_execute(vm);
+                }
+            }
+            module_free(&chunk_mod);
+        }
+    }
+    xar_archive_free(&ar);
+
+    strncpy(vm->stdlib_loaded_names[vm->stdlib_module_count], name,
+            XAR_MAX_NAME - 1);
+    vm->stdlib_module_count++;
+    return true;
+}
+
+bool xeno_vm_load_stdlib_module(XenoVM *vm, const char *name) {
+    if (stdlib_already_loaded(vm, name)) return true;
+    for (int i = 0; i < STDLIB_XAR_TOTAL_COUNT; i++) {
+        if (strcmp(STDLIB_XAR_TABLE[i].name, name) == 0) {
+            size_t size = (size_t)(STDLIB_XAR_TABLE[i].end -
+                                   STDLIB_XAR_TABLE[i].start);
+            return load_xar_into_pool(vm, STDLIB_XAR_TABLE[i].start,
+                                       size, name);
+        }
+    }
+    return false; /* not found in embedded table */
+}
+
+void xeno_vm_load_stdlib(XenoVM *vm) {
+    /* Always load auto-loaded modules (core primitive extensions) */
+    for (int i = 0; i < STDLIB_XAR_AUTO_COUNT; i++) {
+        size_t size = (size_t)(STDLIB_XAR_TABLE[i].end -
+                               STDLIB_XAR_TABLE[i].start);
+        load_xar_into_pool(vm, STDLIB_XAR_TABLE[i].start,
+                            size, STDLIB_XAR_TABLE[i].name);
+    }
+}
+
+void xeno_vm_set_mod_path(XenoVM *vm, const char *path) {
+    strncpy(vm->mod_path, path, sizeof(vm->mod_path) - 1);
+}
+
+
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -907,7 +1000,9 @@ static XenoResult xeno_execute(XenoVM *vm) {
                 const char *mname = name_val.s;
 
                 /* Walk the object's class_def (and parent chain) for the method */
-                ClassDef *search_cls = obj_val.obj->class_def;
+                ClassDef *search_cls = obj_val.obj ? obj_val.obj->class_def : NULL;
+                if (!search_cls)
+                    RUNTIME_ERROR("Interface dispatch: object has no class_def");
                 int iface_fn_idx = -1;
                 int safety = 64;
                 while (search_cls && safety-- > 0) {
@@ -1031,6 +1126,12 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module) {
     vm->sp        = vm->stack;
     vm->frame_count = 0;
 
+    /* ── Merge stdlib pool into this module ──────────────────────────────
+     * Graft all loaded stdlib chunks into the running module so calls
+     * to stdlib functions (e.g. int_toString, List.add) resolve correctly. */
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        module_merge(module, &vm->stdlib_modules[i]);
+
     /* ── Run static initializers ─────────────────────────────────────────
      * If the module has a __sinit__ chunk, run it now to initialize all
      * static fields. This must happen before any entry point runs. */
@@ -1051,10 +1152,10 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module) {
         }
     }
 
-    /* ── Determine entry point ───────────────────────────────────────────
-     * If the module has a @Mod annotation, instantiate the entry class
-     * (its constructor is the entry point).
-     * Otherwise fall back to a top-level function named "main". */
+    /* Determine entry point.
+     * If the module has @Mod, instantiate the entry class, run constructor,
+     * then call main() on the instance.
+     * If no @Mod is present this is a library -- nothing to run. */
     if (module->metadata.has_mod) {
         const char *entry_class = module->metadata.entry_class;
         int ci = module_find_class(module, entry_class);
@@ -1074,44 +1175,29 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module) {
         for (int i = 0; i < cls->field_count; i++)
             obj->fields[i] = val_int(0);
 
-        if (cls->constructor_index < 0) {
-            /* No constructor — nothing to run, mod loaded successfully */
-            free(obj);
-            return XENO_OK;
+        /* Run constructor if present */
+        if (cls->constructor_index >= 0) {
+            if (vm->frame_count >= XENO_FRAME_MAX) {
+                free(obj);
+                xeno_vm_error(vm, "Stack overflow starting @Mod constructor");
+                return XENO_RUNTIME_ERROR;
+            }
+            Chunk *ctor_chunk = &module->chunks[cls->constructor_index];
+            CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
+            ctor_frame->chunk = ctor_chunk;
+            ctor_frame->ip    = ctor_chunk->code;
+            memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
+            ctor_frame->slots[0] = val_obj(obj);
+            XenoResult r = xeno_execute(vm);
+            if (r != XENO_OK) return r;
         }
 
-        /* Set up the constructor frame — slot 0 = this, no args */
-        if (vm->frame_count >= XENO_FRAME_MAX) {
-            free(obj);
-            xeno_vm_error(vm, "Stack overflow starting @Mod constructor");
-            return XENO_RUNTIME_ERROR;
-        }
-        Chunk *ctor_chunk = &module->chunks[cls->constructor_index];
-        CallFrame *frame  = &vm->frames[vm->frame_count++];
-        frame->chunk      = ctor_chunk;
-        frame->ip         = ctor_chunk->code;
-        memset(frame->slots, 0, sizeof(frame->slots));
-        frame->slots[0]   = val_obj(obj);
-
-        return xeno_execute(vm);
+        /* No required main() anymore — constructor is the entry point */
+        return XENO_OK;
     }
 
-    /* ── Fallback: plain main() function ─────────────────────────────── */
-    int main_idx = module_find(module, "main", 4);
-    if (main_idx < 0) {
-        xeno_vm_error(vm, "No 'main' function found in module (and no @Mod entry)");
-        return XENO_RUNTIME_ERROR;
-    }
-
-    Chunk *main_chunk = &module->chunks[main_idx];
-
-    /* Push the initial call frame for main() */
-    CallFrame *frame = &vm->frames[vm->frame_count++];
-    frame->chunk = main_chunk;
-    frame->ip    = main_chunk->code;
-    memset(frame->slots, 0, sizeof(frame->slots));
-
-    return xeno_execute(vm);
+    /* No @Mod -- this is a library, nothing to run */
+    return XENO_OK;
 }
 
 XenoResult xeno_vm_run_source(XenoVM *vm, const char *source) {

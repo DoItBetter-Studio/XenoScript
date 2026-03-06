@@ -1,0 +1,52 @@
+// XenoScript Standard Library — Math
+// Provides common mathematical functions.
+// All functions are backed by host implementations in the VM.
+// Import with: import <math>;
+
+function abs(int n): int {
+    if (n < 0) { return 0 - n; }
+    return n;
+}
+
+function absf(float n): float {
+    if (n < 0.0) { return 0.0 - n; }
+    return n;
+}
+
+function min(int a, int b): int {
+    if (a < b) { return a; }
+    return b;
+}
+
+function max(int a, int b): int {
+    if (a > b) { return a; }
+    return b;
+}
+
+function minf(float a, float b): float {
+    if (a < b) { return a; }
+    return b;
+}
+
+function maxf(float a, float b): float {
+    if (a > b) { return a; }
+    return b;
+}
+
+function clamp(int value, int lo, int hi): int {
+    if (value < lo) { return lo; }
+    if (value > hi) { return hi; }
+    return value;
+}
+
+function clampf(float value, float lo, float hi): float {
+    if (value < lo) { return lo; }
+    if (value > hi) { return hi; }
+    return value;
+}
+
+function sign(int n): int {
+    if (n > 0) { return 1; }
+    if (n < 0) { return -1; }
+    return 0;
+}

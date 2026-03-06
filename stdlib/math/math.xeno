@@ -1,0 +1,19 @@
+// XenoScript Standard Library — math
+// Mathematical functions backed by C host implementations.
+// Import with: import <math>;
+//
+// Host functions (C-backed, registered by the VM):
+//   abs(int): int           absf(float): float
+//   min(int,int): int       max(int,int): int
+//   minf(float,float): float  maxf(float,float): float
+//   clamp(int,int,int): int   clampf(float,float,float): float
+//   sign(int): int
+//   sqrt(float): float      pow(float,float): float
+//   floor(float): float     ceil(float): float     round(float): float
+//   sin(float): float       cos(float): float      tan(float): float
+//   log(float): float       log2(float): float     log10(float): float
+//   toFloat(int): float     toInt(float): int
+//
+// This file is intentionally empty of XenoScript declarations —
+// all symbols are declared as host functions by the compiler/VM
+// when this module is loaded. It exists so `import <math>;` is valid.

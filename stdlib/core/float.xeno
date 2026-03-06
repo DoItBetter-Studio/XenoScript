@@ -1,0 +1,60 @@
+// XenoScript Standard Library — core/float
+// Extension methods for the float primitive type.
+// These are free functions; x.floor() desugars to float_floor(x).
+
+function float_abs(float n): float {
+    if (n < 0.0) { return 0.0 - n; }
+    return n;
+}
+
+function float_min(float a, float b): float {
+    if (a < b) { return a; }
+    return b;
+}
+
+function float_max(float a, float b): float {
+    if (a > b) { return a; }
+    return b;
+}
+
+function float_clamp(float value, float lo, float hi): float {
+    if (value < lo) { return lo; }
+    if (value > hi) { return hi; }
+    return value;
+}
+
+function float_sign(float n): float {
+    if (n > 0.0) { return 1.0; }
+    if (n < 0.0) { return -1.0; }
+    return 0.0;
+}
+
+function float_floor(float n): float {
+    return floor(n);
+}
+
+function float_ceil(float n): float {
+    return ceil(n);
+}
+
+function float_round(float n): float {
+    return round(n);
+}
+
+function float_sqrt(float n): float {
+    return sqrt(n);
+}
+
+function float_toInt(float n): int {
+    return toInt(n);
+}
+
+function float_toString(float n): string {
+    return n as string;
+}
+
+function float_isNear(float a, float b, float epsilon): bool {
+    float d = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    return d <= epsilon;
+}

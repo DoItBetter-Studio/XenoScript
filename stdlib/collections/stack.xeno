@@ -1,0 +1,50 @@
+// XenoScript Standard Library — Stack<T>
+// LIFO structure. Grows automatically — no fixed cap.
+
+class Stack<T> {
+    private:
+        T[]  data;
+        int  top;
+        int  capacity;
+
+    public:
+        Stack() {
+            capacity = 8;
+            data     = new T[8];
+            top      = 0;
+        }
+
+        function push(T item): void {
+            if (top >= capacity) {
+                capacity = capacity * 2;
+                data     = __array_grow(data, capacity);
+            }
+            data[top] = item;
+            top = top + 1;
+        }
+
+        function pop(): T {
+            if (top <= 0) {
+                print("Stack: underflow");
+                return data[0];
+            }
+            top = top - 1;
+            return data[top];
+        }
+
+        function peek(): T {
+            return data[top - 1];
+        }
+
+        function count(): int {
+            return top;
+        }
+
+        function isEmpty(): bool {
+            return top == 0;
+        }
+
+        function clear(): void {
+            top = 0;
+        }
+}

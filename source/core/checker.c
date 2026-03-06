@@ -1342,6 +1342,12 @@ static Type check_expr(Checker *c, Expr *expr) {
                     cls_sym->class_name_buf);
             }
 
+            /* ── Type-check constructor arguments ───────────────────────
+             * This resolves enum/class expressions in args (e.g. Target.Class)
+             * so the compiler sees EXPR_ENUM_ACCESS not EXPR_FIELD_GET. */
+            for (ArgNode *arg = expr->new_expr.args; arg; arg = arg->next)
+                check_expr(c, arg->expr);
+
             /* Use the null-terminated class_name_buf so type_equals works.
              * For generic types, the resolved type is still the base class
              * (erasure: Stack<int> and Stack<string> are both "Stack" at runtime). */
@@ -1824,7 +1830,8 @@ if (obj_type.kind == TYPE_ARRAY) {
                             ? substitute_type(f->type, fs_type_params,
                                               fs_concrete_args, fs_concrete_count)
                             : f->type;
-                        if (!type_equals(fs_field_type, val_type) && !is_unknown(val_type)) {
+                        if (!type_equals(fs_field_type, val_type) && !is_unknown(val_type)
+                            && val_type.kind != TYPE_ANY) {
                             return error_type(c, expr, expr->line,
                                 "Cannot assign %s to field '%.*s' of type %s",
                                 type_kind_name(val_type.kind),
@@ -1917,6 +1924,87 @@ if (obj_type.kind == TYPE_ARRAY) {
                 }
                 return error_type(c, expr, expr->line,
                     "Class '%s' has no static method '%.*s'", cname, mlen, mname);
+            }
+
+            /* ── Primitive extension methods ─────────────────────────────
+             * x.method(args) on int/float/bool/string desugars to a call
+             * to {type_name}_{method_name}(x, args...) — a free function
+             * defined in the core stdlib (e.g. int_toString, float_clamp).
+             *
+             * The checker rewrites the AST node in-place from EXPR_METHOD_CALL
+             * to EXPR_CALL so the compiler emits a plain OP_CALL. */
+            if (obj_type.kind == TYPE_INT   || obj_type.kind == TYPE_FLOAT ||
+                obj_type.kind == TYPE_BOOL  || obj_type.kind == TYPE_STRING) {
+
+                const char *type_prefix;
+                switch (obj_type.kind) {
+                    case TYPE_INT:    type_prefix = "int";    break;
+                    case TYPE_FLOAT:  type_prefix = "float";  break;
+                    case TYPE_BOOL:   type_prefix = "bool";   break;
+                    default:          type_prefix = "string"; break;
+                }
+                const char *mname = expr->method_call.method_name;
+                int         mlen  = expr->method_call.method_name_len;
+
+                /* Build "{type_prefix}_{method_name}" in a buffer */
+                char fn_name[128];
+                int prefix_len = (int)strlen(type_prefix);
+                if (prefix_len + 1 + mlen >= (int)sizeof(fn_name)) {
+                    return error_type(c, expr, expr->line,
+                        "Primitive extension method name too long");
+                }
+                memcpy(fn_name, type_prefix, prefix_len);
+                fn_name[prefix_len] = '_';
+                memcpy(fn_name + prefix_len + 1, mname, mlen);
+                fn_name[prefix_len + 1 + mlen] = '\0';
+
+                /* Look up the free function in scope */
+                Symbol *fn_sym = lookup_symbol(c, fn_name, (int)strlen(fn_name));
+                if (!fn_sym || fn_sym->kind != SYM_FN) {
+                    return error_type(c, expr, expr->line,
+                        "'%s' has no extension method '%.*s' (looked for '%s')",
+                        type_prefix, mlen, mname, fn_name);
+                }
+
+                /* Build the rewritten arg list: receiver first, then original args */
+                /* We reuse the existing expr node — rebuild as EXPR_CALL */
+                Expr *receiver = expr->method_call.object;
+                ArgNode *orig_args = expr->method_call.args;
+                int       orig_argc = expr->method_call.arg_count;
+
+                /* Prepend receiver to arg list */
+                ArgNode *receiver_arg = arena_alloc(c->arena, sizeof(ArgNode));
+                receiver_arg->expr = receiver;
+                receiver_arg->next = orig_args;
+
+                /* Intern the function name string in the arena */
+                char *fn_name_copy = arena_alloc(c->arena, strlen(fn_name) + 1);
+                memcpy(fn_name_copy, fn_name, strlen(fn_name) + 1);
+
+                /* Rewrite in-place to EXPR_CALL */
+                expr->kind                   = EXPR_CALL;
+                expr->call.name              = fn_name_copy;
+                expr->call.length            = (int)strlen(fn_name_copy);
+                expr->call.args              = receiver_arg;
+                expr->call.arg_count         = orig_argc + 1;
+                expr->call.type_args         = NULL;
+                expr->call.type_arg_count    = 0;
+
+                /* Type-check all arguments (receiver already checked above) */
+                int ai = 0;
+                for (ArgNode *arg = orig_args; arg; arg = arg->next, ai++)
+                    check_expr(c, arg->expr);
+
+                /* Return the function's declared return type.
+                 * We use fn_sym->type directly — do NOT recurse into check_expr
+                 * for this node, because declare_staging registers stdlib fns
+                 * with type_any() which would lose the real return type. */
+                if (fn_sym->fn_decl_node) {
+                    /* Symbol was declared from parsed source — use AST return type */
+                    return resolve(expr, fn_sym->fn_decl_node->fn_decl.return_type);
+                }
+                /* Fallback: use the type stored on the symbol */
+                return resolve(expr, fn_sym->type);
             }
 
             if (obj_type.kind != TYPE_OBJECT) {
@@ -2286,6 +2374,22 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                 }
             }
 
+            /* If the declared type is an array of TYPE_OBJECT that resolves to an
+             * enum (e.g. Target[]), upgrade the element type to TYPE_ENUM. */
+            if (declared.kind == TYPE_ARRAY && declared.element_type &&
+                declared.element_type->kind == TYPE_OBJECT &&
+                declared.element_type->class_name) {
+                Symbol *esym = lookup_symbol(c,
+                    declared.element_type->class_name,
+                    (int)strlen(declared.element_type->class_name));
+                if (esym && esym->kind == SYM_ENUM) {
+                    /* Patch element type in place — element_type is arena-allocated */
+                    Type *elem_heap = (Type *)declared.element_type;
+                    elem_heap->kind      = TYPE_ENUM;
+                    elem_heap->enum_name = esym->enum_name_buf;
+                }
+            }
+
             /* void variables are not allowed */
             if (declared.kind == TYPE_VOID) {
                 type_error(c, stmt->line,
@@ -2642,6 +2746,15 @@ static void check_stmt(Checker *c, Stmt *stmt) {
                 "Interface '%.*s' must be declared at the top level",
                 stmt->interface_decl.length, stmt->interface_decl.name);
             break;
+
+        case STMT_IMPORT:
+            /* Import statements are fully resolved by xenoc_main before the
+             * checker runs — the imported source is merged into the program.
+             * If a STMT_IMPORT node survives to check_stmt it means it appeared
+             * inside a function body, which is invalid. */
+            type_error(c, stmt->line,
+                "Import declarations must appear at the top level");
+            break;
     }
 }
 
@@ -2699,6 +2812,18 @@ static void check_fn_body(Checker *c, Stmt *fn_stmt) {
         sym.name   = p->name;
         sym.length = p->length;
         sym.type   = p->type;
+
+        /* If the declared type is TYPE_OBJECT but resolves to a known enum,
+         * upgrade the type to TYPE_ENUM so body type-checks work correctly. */
+        if (sym.type.kind == TYPE_OBJECT && sym.type.class_name) {
+            Symbol *maybe_enum = lookup_symbol(c,
+                sym.type.class_name, (int)strlen(sym.type.class_name));
+            if (maybe_enum && maybe_enum->kind == SYM_ENUM) {
+                sym.type    = type_enum(maybe_enum->enum_name_buf);
+                p->type     = sym.type;   /* patch AST too so return-type checks work */
+            }
+        }
+
         if (!define_symbol(c, sym)) {
             type_error(c, fn_stmt->line,
                 "Duplicate parameter name '%.*s'",
@@ -2743,7 +2868,29 @@ void checker_declare_host(Checker *c,
     sym.param_count = param_count < MAX_PARAMS ? param_count : MAX_PARAMS;
     for (int i = 0; i < sym.param_count; i++)
         sym.param_types[i] = param_types[i];
-    define_symbol(c, sym);  /* global scope (depth 0) */
+    bool ok = define_symbol(c, sym);
+    if (!ok) fprintf(stderr, "DEBUG: checker_declare_host DUPLICATE '%s'\n", name);
+}
+
+void checker_declare_class_from_def(Checker *c, const ClassDef *def) {
+    /* Skip if already declared (e.g. core loaded twice) */
+    int nlen = (int)strlen(def->name);
+    if (lookup_symbol(c, def->name, nlen)) return;
+
+    Symbol sym = {0};
+    sym.kind   = SYM_CLASS;
+    sym.name   = def->name;
+    sym.length = nlen;
+    /* Store name in the stable buf so type.class_name survives */
+    int blen   = nlen < 63 ? nlen : 63;
+    memcpy(sym.class_name_buf, def->name, blen);
+    sym.class_name_buf[blen] = '\0';
+    sym.type   = type_object(sym.class_name_buf);
+
+    if (define_symbol(c, sym)) {
+        Symbol *stored = lookup_symbol(c, def->name, nlen);
+        if (stored) stored->type.class_name = stored->class_name_buf;
+    }
 }
 
 bool checker_check(Checker *c, Program *program) {
@@ -2760,6 +2907,8 @@ bool checker_check(Checker *c, Program *program) {
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
 
+        if (s->kind == STMT_IMPORT) continue; /* resolved before checker */
+
         if (s->kind == STMT_FN_DECL) {
             Symbol sym = {0};
             sym.kind          = SYM_FN;
@@ -2771,33 +2920,35 @@ bool checker_check(Checker *c, Program *program) {
              * and its class_name matches a declared type parameter, convert
              * it to TYPE_PARAM so substitute_type works at call sites. */
             TypeParamNode *tp_list = s->fn_decl.type_params;
+
+            /* Helper: given a TYPE_OBJECT whose class_name matches a type param,
+             * return a TYPE_PARAM with a stable arena-allocated name. */
+#define PATCH_TO_PARAM(t_) do { \
+    if ((t_).kind == TYPE_OBJECT && (t_).class_name && tp_list) { \
+        for (TypeParamNode *_tp = tp_list; _tp; _tp = _tp->next) { \
+            int _tl = _tp->length < 63 ? _tp->length : 63; \
+            if (strncmp((t_).class_name, _tp->name, _tl) == 0 && \
+                (t_).class_name[_tl] == '\0') { \
+                char *_stab = arena_alloc(c->arena, _tl + 1); \
+                memcpy(_stab, _tp->name, _tl); _stab[_tl] = '\0'; \
+                (t_) = type_param(_stab); break; \
+            } \
+        } \
+    } \
+} while(0)
+
             Type ret = s->fn_decl.return_type;
-            if (ret.kind == TYPE_OBJECT && ret.class_name && tp_list) {
-                for (TypeParamNode *tp = tp_list; tp; tp = tp->next) {
-                    char tbuf[64]; int tl = tp->length < 63 ? tp->length : 63;
-                    memcpy(tbuf, tp->name, tl); tbuf[tl] = '\0';
-                    if (strcmp(ret.class_name, tbuf) == 0) {
-                        ret = type_param(tbuf); break;
-                    }
-                }
-            }
+            PATCH_TO_PARAM(ret);
             sym.type        = ret;
             sym.param_count = s->fn_decl.param_count;
 
             int i = 0;
             for (ParamNode *p = s->fn_decl.params; p && i < MAX_PARAMS; p = p->next) {
                 Type pt = p->type;
-                if (pt.kind == TYPE_OBJECT && pt.class_name && tp_list) {
-                    for (TypeParamNode *tp = tp_list; tp; tp = tp->next) {
-                        char tbuf[64]; int tl = tp->length < 63 ? tp->length : 63;
-                        memcpy(tbuf, tp->name, tl); tbuf[tl] = '\0';
-                        if (strcmp(pt.class_name, tbuf) == 0) {
-                            pt = type_param(tbuf); break;
-                        }
-                    }
-                }
+                PATCH_TO_PARAM(pt);
                 sym.param_types[i++] = pt;
             }
+#undef PATCH_TO_PARAM
 
             if (!define_symbol(c, sym))
                 type_error(c, s->line, "Function '%.*s' already declared",
@@ -2867,6 +3018,8 @@ bool checker_check(Checker *c, Program *program) {
     /* ── PASS 1b: Resolve parent class and implemented interfaces ───────── */
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
+
+        if (s->kind == STMT_IMPORT) continue; /* resolved before checker */
         if (s->kind != STMT_CLASS_DECL) continue;
         if (!s->class_decl.interfaces) continue;
 
@@ -2906,6 +3059,8 @@ bool checker_check(Checker *c, Program *program) {
     /* ── PASS 1b_iface: Validate interface parent names ─────────────────── */
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
+
+        if (s->kind == STMT_IMPORT) continue; /* resolved before checker */
         if (s->kind != STMT_INTERFACE_DECL) continue;
         if (!s->interface_decl.parent_name || s->interface_decl.parent_length == 0) continue;
         Symbol *psym = lookup_symbol(c,
@@ -2925,6 +3080,8 @@ bool checker_check(Checker *c, Program *program) {
      * (interface + all its parent interfaces). */
     for (StmtNode *n = program->stmts; n; n = n->next) {
         Stmt *s = n->stmt;
+
+        if (s->kind == STMT_IMPORT) continue; /* resolved before checker */
         if (s->kind != STMT_CLASS_DECL) continue;
 
         typedef struct IfaceNameNode  IFNode;
@@ -3044,12 +3201,26 @@ bool checker_check(Checker *c, Program *program) {
             if (s->kind != STMT_CLASS_DECL) continue;
 
             for (AnnotationNode *ann = s->class_decl.annotations; ann; ann = ann->next) {
-                /* Only @Mod is defined for now — reject anything else */
-                if (ann->name_len != 3 || memcmp(ann->name, "Mod", 3) != 0) {
-                    type_error(c, s->line,
-                        "Unknown annotation '@%.*s' on class '%.*s'",
-                        ann->name_len, ann->name,
-                        s->class_decl.length, s->class_decl.name);
+                /* @Mod is built-in. Any other annotation must correspond to a
+                 * class in scope that (eventually) inherits from Attribute.
+                 * For now we just require the class to exist — full Attribute
+                 * inheritance checking can be added when core.xeno defines it. */
+                bool is_mod = (ann->name_len == 3 && memcmp(ann->name, "Mod", 3) == 0);
+                if (!is_mod) {
+                    /* Look up the annotation class by name */
+                    char ann_class[128];
+                    int  ann_len = ann->name_len < 127 ? ann->name_len : 127;
+                    memcpy(ann_class, ann->name, ann_len);
+                    ann_class[ann_len] = '\0';
+                    Symbol *sym = lookup_symbol(c, ann->name, ann->name_len);
+                    if (!sym || sym->kind != SYM_CLASS) {
+                        type_error(c, s->line,
+                            "Unknown annotation '@%.*s' on class '%.*s' "
+                            "(no matching class found)",
+                            ann->name_len, ann->name,
+                            s->class_decl.length, s->class_decl.name);
+                    }
+                    /* Non-@Mod annotations are valid but not further processed yet */
                     continue;
                 }
 
@@ -3059,21 +3230,15 @@ bool checker_check(Checker *c, Program *program) {
                         "@Mod can only appear on one class per file");
                 }
 
-                /* Validate keys — only name/version/author/description allowed */
+                /* Validate args — @Mod requires at least a name.
+                 * Positional: @Mod("name", "version", "author", "description")
+                 * Named:      @Mod(name="name", version="1.0")
+                 * First positional (no key) or key=="name" is required. */
                 bool has_name = false;
                 for (AnnotationKVNode *kv = ann->args; kv; kv = kv->next) {
-                    bool valid =
-                        (kv->key_len == 4 && memcmp(kv->key, "name",        4) == 0) ||
-                        (kv->key_len == 7 && memcmp(kv->key, "version",     7) == 0) ||
-                        (kv->key_len == 6 && memcmp(kv->key, "author",      6) == 0) ||
-                        (kv->key_len == 11&& memcmp(kv->key, "description", 11) == 0);
-                    if (!valid) {
-                        type_error(c, s->line,
-                            "@Mod: unknown key '%.*s' (allowed: name, version, author, description)",
-                            kv->key_len, kv->key);
-                    }
-                    if (kv->key_len == 4 && memcmp(kv->key, "name", 4) == 0)
-                        has_name = true;
+                    bool is_name_pos = (kv->key == NULL);  /* first positional */
+                    bool is_name_key = (kv->key_len == 4 && memcmp(kv->key, "name", 4) == 0);
+                    if (is_name_pos || is_name_key) { has_name = true; break; }
                 }
 
                 if (!has_name) {
@@ -3152,6 +3317,9 @@ bool checker_check(Checker *c, Program *program) {
         }
         else if (s->kind == STMT_INTERFACE_DECL) {
             /* Interfaces are pure compile-time contracts — no bodies to check */
+        }
+        else if (s->kind == STMT_IMPORT) {
+            /* Import declarations resolved before checker runs — skip */
         }
         else {
             type_error(c, s->line,

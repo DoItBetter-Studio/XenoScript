@@ -24,6 +24,9 @@
 
 #include "vm.h"
 #include "xbc.h"
+#include "xar.h"
+#include "stdlib_xar.h"
+#include "../../source/stdlib/stdlib_register.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +48,8 @@ static XenoResult std_print(XenoVM *vm, int argc, Value *argv, Value *out) {
 static void register_std_fns(XenoVM *vm) {
     int p_any[1] = { TYPE_ANY };
     xeno_register_fn_typed(vm, "print", std_print, TYPE_VOID, 1, p_any);
+    /* Register all stdlib host functions (math, etc.) at indices 1..N */
+    stdlib_register_host_fns(vm);
 }
 
 static void print_usage(void) {
@@ -91,6 +96,8 @@ int main(int argc, char **argv) {
 
     xeno_vm_init(vm);
     register_std_fns(vm);
+    /* Load core stdlib (always) and pre-warm the stdlib pool */
+    xeno_vm_load_stdlib(vm);
 
     XenoResult result;
 

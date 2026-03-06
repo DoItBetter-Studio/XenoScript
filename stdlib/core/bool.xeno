@@ -1,0 +1,13 @@
+// XenoScript Standard Library — core/bool
+// Extension methods for the bool primitive type.
+// x.toString() desugars to bool_toString(x).
+
+function bool_toString(bool b): string {
+    if (b) { return "true"; }
+    return "false";
+}
+
+function bool_toInt(bool b): int {
+    if (b) { return 1; }
+    return 0;
+}

@@ -1,13 +1,15 @@
+import <collections>
+
 enum Phase {
     Init = 1,
     Running = 5,
     Cleanup = 99
 }
 
-@Mod(name="mymod", version="1.0.0", author="Tigga")
+@Mod(name=MyMod.ModId, version="1.0.0", author="Tigga")
 class MyMod {
     public:
-        static string modName = "My Mod";
+        static string ModId = "mymod";
         int maxTicks = 5;
         Phase current = Phase.Init;     // enum field with initializer
 
@@ -21,7 +23,7 @@ class MyMod {
 
         MyMod() {
             check_is_alive();
-            print($"=== {MyMod.modName} loaded ===");
+            print($"=== {MyMod.ModId} loaded ===");
 
             is_alive = true;
 
@@ -35,6 +37,8 @@ class MyMod {
             {
                 print(value);
             }
+
+            floatArray[0] = 3.141596;
         }
 
         function run(): void {

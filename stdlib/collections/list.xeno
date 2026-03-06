@@ -1,0 +1,66 @@
+// XenoScript Standard Library — List<T>
+// A dynamically-sized ordered sequence. Grows automatically — no fixed cap.
+
+class List<T> {
+    private:
+        T[]  data;
+        int  size;
+        int  capacity;
+
+    public:
+        List() {
+            capacity = 8;
+            data     = new T[8];
+            size     = 0;
+        }
+
+        function add(T item): void {
+            if (size >= capacity) {
+                capacity = capacity * 2;
+                data     = __array_grow(data, capacity);
+            }
+            data[size] = item;
+            size = size + 1;
+        }
+
+        function get(int index): T {
+            return data[index];
+        }
+
+        function set(int index, T item): void {
+            data[index] = item;
+        }
+
+        function count(): int {
+            return size;
+        }
+
+        function isEmpty(): bool {
+            return size == 0;
+        }
+
+        function clear(): void {
+            size = 0;
+        }
+
+        function contains(T item): bool {
+            for (int i = 0; i < size; i++) {
+                if (data[i] == item) { return true; }
+            }
+            return false;
+        }
+
+        function removeAt(int index): void {
+            for (int i = index; i < size - 1; i++) {
+                data[i] = data[i + 1];
+            }
+            size = size - 1;
+        }
+
+        function indexOf(T item): int {
+            for (int i = 0; i < size; i++) {
+                if (data[i] == item) { return i; }
+            }
+            return -1;
+        }
+}

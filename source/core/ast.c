@@ -1016,6 +1016,12 @@ void ast_print_stmt(const Stmt *stmt, int indent) {
             }
             break;
         }
+
+        case STMT_IMPORT:
+            printf("STMT_IMPORT %s '%s'\n",
+                   stmt->import_decl.is_system ? "<system>" : "local",
+                   stmt->import_decl.path ? stmt->import_decl.path : "");
+            break;
     }
 }
 

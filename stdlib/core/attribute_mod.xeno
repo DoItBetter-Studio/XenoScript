@@ -1,0 +1,20 @@
+import "attribute.xeno"
+import "attribute_usage.xeno"
+
+@AttributeUsage([Target.Class])
+class Mod : Attribute
+{
+    public:
+        string name;
+        string version;
+        string author;
+        string description;
+
+        Mod(string name, string version, string author, string description)
+        {
+            this.name = name;
+            this.version = version;
+            this.author = author;
+            this.description = description;
+        }
+}

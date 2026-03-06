@@ -1,0 +1,7 @@
+enum Target
+{
+    Class,
+    Method,
+    Field,
+    Enum
+}

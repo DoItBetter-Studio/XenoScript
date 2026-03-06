@@ -55,3 +55,19 @@ compile_commands.json
 # Packaging Artifacts
 # ============================
 *.zip
+
+# ============================
+# VS Code Extension
+# ============================
+xenoscript-vscode/
+
+# ============================
+# Test Artifacts
+# ============================
+test/*.err
+test/*.out
+
+# ============================
+# Bin Artifacts
+# ============================
+bin/

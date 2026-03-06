@@ -1,0 +1,7 @@
+import <collections>
+import "static_class.xeno"
+
+function main(): void
+{
+    List<TestClass> int_test = new List<TestClass>();
+}

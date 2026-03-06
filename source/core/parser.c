@@ -319,10 +319,10 @@ typedef enum {
     BP_AND        = 3,   /* &&         left-associative  */
     BP_EQUALITY   = 4,   /* == !=      left-associative  */
     BP_COMPARISON = 5,   /* < <= > >=  left-associative  */
-    BP_TERM       = 6,   /* + -        left-associative  */
-    BP_FACTOR     = 7,   /* * / %      left-associative  */
-    BP_UNARY      = 8,   /* - !        right-associative (prefix) */
-    BP_CALL       = 9,   /* foo(...)   left-associative  */
+    BP_TERM       = 7,   /* + -        left-associative  (gap ensures < right parses + - ) */
+    BP_FACTOR     = 9,   /* * / %      left-associative  */
+    BP_UNARY      = 11,  /* - !        right-associative (prefix) */
+    BP_CALL       = 13,  /* foo(...)   left-associative  */
 } BindingPower;
 
 /* Forward declaration — parse_expr and parse_prefix call each other
@@ -735,6 +735,23 @@ static Expr *parse_prefix(Parser *p) {
                 } while (match(p, TOK_COMMA));
             }
             consume(p, TOK_RBRACE, "Expected '}' to close array literal");
+            return expr_array_lit(&p->arena, head, count, t.line);
+        }
+
+        /* Array literal: [e0, e1, e2]  (bracket syntax — same semantics as braces) */
+        case TOK_LBRACKET: {
+            ArgNode *head = NULL, *tail = NULL;
+            int count = 0;
+            if (!check(p, TOK_RBRACKET)) {
+                do {
+                    Expr    *elem = parse_expr(p, BP_NONE);
+                    ArgNode *node = arg_node(&p->arena, elem, NULL);
+                    if (!head) { head = tail = node; }
+                    else       { tail->next = node; tail = node; }
+                    count++;
+                } while (match(p, TOK_COMMA));
+            }
+            consume(p, TOK_RBRACKET, "Expected ']' to close array literal");
             return expr_array_lit(&p->arena, head, count, t.line);
         }
 
@@ -1641,6 +1658,76 @@ static Stmt *parse_match_stmt(Parser *p, int line) {
 static Stmt *parse_stmt(Parser *p) {
     int line = p->current.line;
 
+    /* Import declaration — must appear before any other top-level statements.
+     * import <name>;       — system import (angle brackets)
+     * import "path.xeno";  — local import (quoted string)
+     * The compiler resolves these before the type-check pass. */
+    if (match(p, TOK_IMPORT)) {
+        Stmt *s = arena_alloc(&p->arena, sizeof(Stmt));
+        s->kind = STMT_IMPORT;
+        s->line = line;
+
+        if (check(p, TOK_LT)) {
+            /* System import: import <name> */
+            advance(p); /* consume '<' */
+            s->import_decl.is_system = true;
+
+            /* Collect identifier(s) — e.g. <collections> or <math> */
+            if (!check(p, TOK_IDENT)) {
+                if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                    ParseError *e = &p->errors[p->error_count++];
+                    snprintf(e->message, sizeof(e->message), "Expected system module name after '<'");
+                    e->line = p->current.line;
+                    p->had_error = true; p->panic_mode = true;
+                }
+                return s;
+            }
+            const char *start = p->current.start;
+            int total_len = 0;
+            while (check(p, TOK_IDENT) || (p->current.type == TOK_DOT)) {
+                total_len += p->current.length;
+                advance(p);
+                if (check(p, TOK_DOT)) { total_len += 1; advance(p); }
+                else break;
+            }
+            /* Re-measure: just use start..current.start */
+            total_len = (int)(p->current.start - start);
+            char *name = arena_alloc(&p->arena, total_len + 1);
+            memcpy(name, start, total_len);
+            name[total_len] = '\0';
+            s->import_decl.path     = name;
+            s->import_decl.path_len = total_len;
+
+            consume(p, TOK_GT, "Expected '>' after system module name");
+        } else if (check(p, TOK_STRING_LIT)) {
+            /* Local import: import "path/to/file.xeno" */
+            Token str_tok = p->current;
+            advance(p);
+            s->import_decl.is_system = false;
+            /* Strip surrounding quotes */
+            const char *raw   = str_tok.start + 1;
+            int         rlen  = str_tok.length - 2;
+            if (rlen < 0) rlen = 0;
+            char *path = arena_alloc(&p->arena, rlen + 1);
+            memcpy(path, raw, rlen);
+            path[rlen] = '\0';
+            s->import_decl.path     = path;
+            s->import_decl.path_len = rlen;
+        } else {
+            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                ParseError *e = &p->errors[p->error_count++];
+                snprintf(e->message, sizeof(e->message),
+                         "Expected '<n>' or \"path\" after 'import'");
+                e->line = p->current.line;
+                p->had_error = true; p->panic_mode = true;
+            }
+            return s;
+        }
+
+        match(p, TOK_SEMICOLON);  /* semicolon after import is optional */
+        return s;
+    }
+
     /* Function declaration */
     if (match(p, TOK_FN)) {
         return parse_fn_decl(p, line);
@@ -1663,22 +1750,37 @@ static Stmt *parse_stmt(Parser *p) {
             ann->args      = NULL;
             ann->next      = NULL;
 
-            /* Parse optional (key="value", ...) argument list */
+            /* Parse optional (arg, ...) argument list.
+             * Supports:
+             *   positional:  @Mod("name", "1.0")
+             *   named:       @Mod(name="name", version="1.0")
+             *   expressions: @Hook(Target.Class)
+             *   mixed:       @Attr("val", count=3)
+             */
             if (match(p, TOK_LPAREN)) {
                 AnnotationKVNode *kv_tail = NULL;
                 while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
-                    Token key = p->current;
-                    consume(p, TOK_IDENT, "Expected key name in annotation");
-                    consume(p, TOK_ASSIGN, "Expected '=' after annotation key");
-                    Token val = p->current;
-                    consume(p, TOK_STRING_LIT, "Expected string value in annotation");
-
                     AnnotationKVNode *kv = arena_alloc(&p->arena, sizeof(AnnotationKVNode));
-                    kv->key       = key.start;
-                    kv->key_len   = key.length;
-                    kv->value     = val.start;
-                    kv->value_len = val.length;
-                    kv->next      = NULL;
+                    kv->key     = NULL;
+                    kv->key_len = 0;
+                    kv->value   = NULL;
+                    kv->next    = NULL;
+
+                    /* Check for named arg: ident '=' expr */
+                    if (check(p, TOK_IDENT)) {
+                        Token peek_next = p->next;  /* lookahead */
+                        if (peek_next.type == TOK_ASSIGN) {
+                            /* named arg */
+                            Token key_tok = p->current;
+                            advance(p);  /* consume ident */
+                            advance(p);  /* consume '=' */
+                            kv->key     = key_tok.start;
+                            kv->key_len = key_tok.length;
+                        }
+                    }
+
+                    /* Parse the value as a full expression */
+                    kv->value = parse_expr(p, BP_NONE);
 
                     if (!ann->args) { ann->args = kv_tail = kv; }
                     else            { kv_tail->next = kv; kv_tail = kv; }
@@ -1874,8 +1976,11 @@ static Stmt *parse_stmt(Parser *p) {
             }
             return NULL;
         }
-        /* Class/interface array: ClassName[] varName = ... */
-        if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET) {
+        /* Class/interface array: ClassName[] varName = ...
+         * Distinguish from array access: data[i] = ...
+         * Use 3-token lookahead: Type[] requires next=[ and peek=] */
+        if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET &&
+            p->peek.type == TOK_RBRACKET) {
             Type type = parse_type(p);   /* consumes ClassName[] */
             return parse_var_decl(p, type, line);
         }
