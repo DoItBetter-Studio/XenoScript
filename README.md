@@ -209,10 +209,7 @@ XenoScript uses a layered standard library model:
   This layer is shared across games and embedded into the compiler, VM, packer, and LSP.
 
 - **Game-extended standard library** — additional `.xeno` files written by the game developer.  
-  Each game ships its own extended stdlib as a `.xar` archive, defining engine APIs, events,
-  host-facing types, and helpers. This extended stdlib is treated as part of the standard
-  library for that game and is embedded into the compiler, VM, packer, LSP, and the game
-  itself. Each game ships its own XenoScript environment.
+  Each game builds its own customized XenoScript toolchain with the extended stdlib embedded directly into the binaries (xenoc, xenovm, xar, xenolsp), defining engine APIs, events, host-facing types, and helpers. This creates a game-specific XenoScript dialect where game APIs are available via standard `<name>` imports, but embedded in the toolchain rather than distributed as external `.xar` files.
 
 - **External mod packages** — community or project-local `.xar` files.  
   These live outside the game (for example, in a `/mods` directory) and are resolved from
@@ -268,6 +265,49 @@ Each game defines its own XenoScript environment through its extended standard l
 
 ---
 
+## 🏗️ Game Development Setup
+
+XenoScript treats its standard library as a **dialect foundation** rather than a fixed API. Game developers are expected to extend and customize the core stdlib (`core`, `math`, `collections`) with game-specific types, events, and APIs. This creates a layered stdlib model:
+
+- **Core stdlib** (embedded in toolchain): Fundamental language features  
+- **Game-extended stdlib** (embedded in customized toolchain): Game-specific additions, becoming part of the game's XenoScript dialect  
+- **Mod packages**: Community or project-local extensions, distributed as `.xar` archives  
+
+Each game builds its own version of the XenoScript toolchain (xenoc, xenovm, xar, xenolsp) with the extended stdlib embedded directly into the binaries, just like the core stdlib. This makes game APIs available via standard `<name>` imports without needing external `.xar` resolution.  
+
+### Recommended Directory Structure
+
+For optimal modding workflow, games should follow this structure:
+
+```
+game_root/
+├── game.exe / game          # Main game executable (Windows/Linux)
+├── tools/                    # XenoScript toolchain
+│   ├── xenoc                 # Compiler
+│   ├── xar                   # Package tool
+│   └── xenolsp               # Language server
+└── mods/                     # Mods directory
+    ├── my_mod/               # Development mod project (directory)
+    ├── another_mod.xar       # Compiled mod package
+    └── utilities.xar         # Shared mod dependency
+```
+
+This structure enables the VS Code extension to automatically detect the LSP server and game-specific stdlib. However, the extension is designed to be customizable — developers can configure paths to match their project's needs.
+
+The game loads mods from the `mods/` directory. Directories are treated as development projects (enabling faster iteration with hot-reloading), while `.xar` files are compiled packages.
+
+### VS Code Extension Configuration
+
+The VS Code extension currently uses a static LSP path but is intended to be game-aware. For now:
+
+- Install the extension from source or marketplace  
+- Configure the LSP server path in VS Code settings if your game uses a non-standard location  
+- The extension provides syntax highlighting, basic diagnostics, and will gain full IntelliSense as LSP features mature  
+
+Future versions will automatically detect game environments and load appropriate stdlibs.
+
+---
+
 ## 🚧 Project Status
 
 Actively in development.
@@ -290,8 +330,13 @@ The language, VM, and standard library are evolving together.
 - ✅ VS Code extension with diagnostics, hover, and completions  
 - ✅ 27-test suite passing  
 
-**In progress / planned:**
-- 🔲 [Future features to be added]  
+**Partially implemented / in progress:**
+- 🔄 LSP server: Basic diagnostics working; go-to-definition, find-references, and full IntelliSense autocomplete are under development  
+- 🔄 VS Code extension: Error squigglies appear at line start (not precise positioning); extension detects static LSP path but may need customization for game-specific stdlibs  
+
+**Planned:**
+- 🔲 Enhanced LSP features (precise error positioning, full symbol navigation)  
+- 🔲 Game-aware VS Code extension configuration for dynamic stdlib detection  
 
 ---
 
