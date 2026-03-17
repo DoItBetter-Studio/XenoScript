@@ -98,6 +98,10 @@ typedef enum {
     TOK_PRIVATE,      /* private   — access modifier      */
     TOK_PROTECTED,    /* protected — access modifier      */
     TOK_STATIC,       /* static    — static member        */
+    TOK_FINAL,        /* final     — immutable field      */
+    TOK_VIRTUAL,      /* virtual   — overridable method   */
+    TOK_OVERRIDE,     /* override  — overrides virtual    */
+    TOK_EVENT,        /* event     — event declaration    */
     TOK_INTERFACE,    /* interface — interface declaration */
     TOK_WHERE,        /* where     — generic type constraint */
     TOK_IMPORT,       /* import    — import declaration      */
@@ -108,6 +112,8 @@ typedef enum {
     TOK_STAR,         /* *  */
     TOK_PLUS_PLUS,    /* ++ */
     TOK_MINUS_MINUS,  /* -- */
+    TOK_PLUS_ASSIGN,  /* += */
+    TOK_MINUS_ASSIGN, /* -= */
     TOK_SLASH,        /* /  */
     TOK_PERCENT,      /* %  */
 
@@ -126,6 +132,18 @@ typedef enum {
     TOK_AND,          /* && */
     TOK_OR,           /* || */
     TOK_BANG,         /* !  */
+
+    /* ── Nullable operators ──────────────────────────────────────────────── */
+    TOK_QUESTION,         /* ?   — nullable type suffix: string?         */
+    TOK_QUESTION_DOT,     /* ?.  — null-safe member access: x?.name      */
+    TOK_QUESTION_QUESTION,/* ??  — null coalescing: x ?? defaultVal      */
+
+    /* ── Keywords ───────────────────────────────────────────────────────── */
+    TOK_NULL,         /* null — the null literal                         */
+    TOK_THROW,        /* throw                                           */
+    TOK_TRY,          /* try                                             */
+    TOK_CATCH,        /* catch                                           */
+    TOK_FINALLY,      /* finally                                         */
 
     /* ── Delimiters ─────────────────────────────────────────────────────── */
     TOK_LPAREN,       /* (  */
@@ -163,6 +181,7 @@ typedef struct {
     const char *start;   /* Pointer into the source string where this began */
     int         length;  /* How many characters long this token is          */
     int         line;    /* Source line number, 1-based, for error messages  */
+    int         col;     /* Source column number, 1-based, for LSP          */
 } Token;
 
 

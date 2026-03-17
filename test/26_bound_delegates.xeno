@@ -1,0 +1,59 @@
+// Tests: bound delegates — instance methods as event handlers
+
+@Mod("BoundDelegates", "1.0.0", "Test", "Bound delegate tests")
+class BoundDelegates {
+    event OnMessage(string msg);
+    event OnScore(int points);
+
+    static function staticHandler(string msg): void {
+        print("static:" + msg);
+    }
+
+    public:
+        BoundDelegates() {
+            Player p1 = new Player("Alice");
+            Player p2 = new Player("Bob");
+
+            OnMessage += p1.receive;
+            OnMessage += p2.receive;
+            OnMessage("hello");
+
+            OnMessage -= p1.receive;
+            OnMessage("world");
+
+            Scorer s = new Scorer();
+            OnScore += s.addPoints;
+            OnScore(10);
+            OnScore(5);
+            print(s.total);
+
+            OnMessage += staticHandler;
+            OnMessage("final");
+        }
+}
+
+class Player {
+    public:
+        string name;
+
+        Player(string name) {
+            this.name = name;
+        }
+
+        function receive(string msg): void {
+            print(this.name + ":" + msg);
+        }
+}
+
+class Scorer {
+    public:
+        int total;
+
+        Scorer() {
+            this.total = 0;
+        }
+
+        function addPoints(int pts): void {
+            this.total = this.total + pts;
+        }
+}

@@ -24,6 +24,8 @@ void chunk_init(Chunk *chunk)
     chunk->local_count = 0;
     chunk->param_count = 0;
     chunk->is_constructor = false;
+    chunk->return_type_kind = 0;
+    memset(chunk->param_type_kinds, 0, sizeof(chunk->param_type_kinds));
     chunk->constants.values = NULL;
     chunk->constants.count = 0;
     chunk->constants.capacity = 0;
@@ -49,7 +51,6 @@ int chunk_write(Chunk *chunk, uint8_t byte, int line)
         int new_cap = chunk->capacity < CHUNK_INIT_CAPACITY
                           ? CHUNK_INIT_CAPACITY
                           : chunk->capacity * 2;
-
         chunk->code = realloc(chunk->code, new_cap * sizeof(uint8_t));
         chunk->lines = realloc(chunk->lines, new_cap * sizeof(int));
         chunk->capacity = new_cap;
@@ -296,6 +297,58 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_simple("CMP_EQ_STR", offset);
     case OP_CMP_NEQ_STR:
         return dis_simple("CMP_NEQ_STR", offset);
+    case OP_CMP_EQ_VAL:
+        return dis_simple("CMP_EQ_VAL", offset);
+    case OP_CMP_NEQ_VAL:
+        return dis_simple("CMP_NEQ_VAL", offset);
+
+    /* Exception handling */
+    case OP_TRY_BEGIN:
+        return dis_jump("TRY_BEGIN", chunk, offset);
+    case OP_TRY_END:
+        return dis_simple("TRY_END", offset);
+    case OP_THROW:
+        return dis_simple("THROW", offset);
+    case OP_LOAD_EXCEPTION:
+        return dis_simple("LOAD_EXCEPTION", offset);
+    case OP_EXCEPTION_IS_TYPE: {
+        /* [u8 name_len][name_bytes] */
+        uint8_t nlen = chunk->code[offset + 1];
+        printf("%-20s '", "EXCEPTION_IS_TYPE");
+        for (int _i = 0; _i < nlen && offset + 2 + _i < chunk->count; _i++)
+            putchar(chunk->code[offset + 2 + _i]);
+        printf("'\n");
+        return offset + 2 + nlen;
+    }
+
+    case OP_EVENT_SUBSCRIBE:
+    case OP_EVENT_UNSUBSCRIBE:
+    case OP_EVENT_SUBSCRIBE_BOUND:
+    case OP_EVENT_UNSUBSCRIBE_BOUND:
+    case OP_EVENT_FIRE: {
+        const char *label = (op == OP_EVENT_SUBSCRIBE)         ? "EVENT_SUBSCRIBE"
+                          : (op == OP_EVENT_UNSUBSCRIBE)       ? "EVENT_UNSUBSCRIBE"
+                          : (op == OP_EVENT_SUBSCRIBE_BOUND)   ? "EVENT_SUBSCRIBE_BOUND"
+                          : (op == OP_EVENT_UNSUBSCRIBE_BOUND) ? "EVENT_UNSUBSCRIBE_BOUND"
+                                                               : "EVENT_FIRE";
+        uint8_t nlen = chunk->code[offset + 1];
+        printf("%-24s '", label);
+        for (int _i = 0; _i < nlen && offset + 2 + _i < chunk->count; _i++)
+            putchar(chunk->code[offset + 2 + _i]);
+        if (op == OP_EVENT_FIRE) {
+            uint8_t argc = chunk->code[offset + 2 + nlen];
+            printf("' argc=%d\n", argc);
+            return offset + 3 + nlen;
+        } else {
+            /* handler name follows event name */
+            uint8_t hnlen = chunk->code[offset + 2 + nlen];
+            printf("' handler='");
+            for (int _i = 0; _i < hnlen && offset + 3 + nlen + _i < chunk->count; _i++)
+                putchar(chunk->code[offset + 3 + nlen + _i]);
+            printf("'\n");
+            return offset + 3 + nlen + hnlen;
+        }
+    }
 
     /* Stack */
     case OP_POP:
@@ -306,6 +359,8 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_jump("JUMP", chunk, offset);
     case OP_JUMP_IF_FALSE:
         return dis_jump("JUMP_IF_FALSE", chunk, offset);
+    case OP_JUMP_IF_TRUE:
+        return dis_jump("JUMP_IF_TRUE", chunk, offset);
 
     /* Calls */
     case OP_CALL:
@@ -333,7 +388,7 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     case OP_TRUNC_CHAR:
         return dis_simple("TRUNC_CHAR", offset);
     case OP_NEW_ARRAY:
-        return dis_simple("NEW_ARRAY", offset);
+        return dis_byte("NEW_ARRAY", chunk, offset);
     case OP_ARRAY_LIT:
         return dis_byte("ARRAY_LIT", chunk, offset);
     case OP_ARRAY_GET:
@@ -351,7 +406,13 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         uint16_t class_idx = (chunk->code[offset + 1] << 8) | chunk->code[offset + 2];
         uint8_t argc = chunk->code[offset + 3];
         printf("%-20s class[%d]  argc=%d\n", "NEW", class_idx, argc);
-        return offset + 4;
+        /* skip: opcode(1) + class_idx(2) + argc(1) + tac(1) + tac×kind(N) */
+        int base = offset + 4;
+        if (base < chunk->count) {
+            uint8_t tac = chunk->code[base];
+            return base + 1 + tac;
+        }
+        return base;
     }
     case OP_GET_FIELD:
     {
@@ -428,6 +489,18 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         printf("%04d TYPE_FIELD %d (%s)\n", offset, field, fname);
         return offset + 2;
     }
+    case OP_TYPE_HAS_ATTR:
+        return dis_simple("TYPE_HAS_ATTR", offset);
+    case OP_TYPE_GET_ATTR_ARG:
+        return dis_simple("TYPE_GET_ATTR_ARG", offset);
+    case OP_PUSH_NULL:
+        return dis_simple("PUSH_NULL", offset);
+    case OP_IS_NULL:
+        return dis_simple("IS_NULL", offset);
+    case OP_NULL_ASSERT:
+        return dis_jump("NULL_ASSERT", chunk, offset);
+    case OP_NULL_COALESCE:
+        return dis_jump("NULL_COALESCE", chunk, offset);
     default:
         printf("UNKNOWN opcode %d\n", op);
         return offset + 1;
@@ -541,6 +614,8 @@ const char *opcode_name(OpCode op)
         return "JUMP";
     case OP_JUMP_IF_FALSE:
         return "JUMP_IF_FALSE";
+    case OP_JUMP_IF_TRUE:
+        return "JUMP_IF_TRUE";
     case OP_CALL:
         return "CALL";
     case OP_RETURN:
@@ -569,6 +644,30 @@ const char *opcode_name(OpCode op)
         return "LOAD_STATIC";
     case OP_STORE_STATIC:
         return "STORE_STATIC";
+    case OP_PUSH_NULL:
+        return "PUSH_NULL";
+    case OP_IS_NULL:
+        return "IS_NULL";
+    case OP_NULL_ASSERT:
+        return "NULL_ASSERT";
+    case OP_NULL_COALESCE:
+        return "NULL_COALESCE";
+    case OP_EVENT_SUBSCRIBE:
+        return "EVENT_SUBSCRIBE";
+    case OP_EVENT_UNSUBSCRIBE:
+        return "EVENT_UNSUBSCRIBE";
+    case OP_EVENT_FIRE:
+        return "EVENT_FIRE";
+    case OP_EVENT_SUBSCRIBE_BOUND:
+        return "EVENT_SUBSCRIBE_BOUND";
+    case OP_EVENT_UNSUBSCRIBE_BOUND:
+        return "EVENT_UNSUBSCRIBE_BOUND";
+    case OP_EVENT_SUBSCRIBE_MEMBER:
+        return "EVENT_SUBSCRIBE_MEMBER";
+    case OP_EVENT_UNSUBSCRIBE_MEMBER:
+        return "EVENT_UNSUBSCRIBE_MEMBER";
+    case OP_EVENT_FIRE_MEMBER:
+        return "EVENT_FIRE_MEMBER";
     default:
         return "UNKNOWN";
     }

@@ -177,6 +177,36 @@ static char *rb_str(ReadBuf *rb) {
  * SERIALIZATION — Module -> WriteBuf
  * ───────────────────────────────────────────────────────────────────────────*/
 
+/* ── Write one AttributeInstance to the buffer ──────────────────────────── */
+static bool wb_attr_arg(WriteBuf *wb, const AttrArg *a) {
+    if (!wb_u8(wb, (uint8_t)a->kind)) return false;
+    switch (a->kind) {
+        case ATTR_ARG_STRING: if (!wb_str(wb, a->s ? a->s : "")) return false; break;
+        case ATTR_ARG_INT:    if (!wb_write(wb, &a->i, 8)) return false; break;
+        case ATTR_ARG_FLOAT:  if (!wb_write(wb, &a->f, 8)) return false; break;
+        case ATTR_ARG_BOOL:   if (!wb_u8(wb, a->b ? 1 : 0)) return false; break;
+        case ATTR_ARG_ARRAY:
+            if (!wb_u8(wb, (uint8_t)a->arr.count)) return false;
+            for (int ei = 0; ei < a->arr.count; ei++)
+                if (!wb_attr_arg(wb, &a->arr.elems[ei])) return false;
+            break;
+    }
+    return true;
+}
+
+static bool wb_attribute_instances(WriteBuf *wb,
+                                    const AttributeInstance *attrs, int count) {
+    if (!wb_u8(wb, (uint8_t)count)) return false;
+    for (int ai = 0; ai < count; ai++) {
+        const AttributeInstance *inst = &attrs[ai];
+        if (!wb_str(wb, inst->class_name))        return false;
+        if (!wb_u8(wb, (uint8_t)inst->arg_count)) return false;
+        for (int ki = 0; ki < inst->arg_count; ki++)
+            if (!wb_attr_arg(wb, &inst->args[ki])) return false;
+    }
+    return true;
+}
+
 /*
  * Correct serialization — all in one pass, no double-writes.
  */
@@ -188,20 +218,13 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
     if (!wb_u16(wb, (uint16_t)module->count))       return false;
     if (!wb_u16(wb, (uint16_t)module->class_count)) return false;
 
-    /* ── Static init chunk index ──────────────────────────────────────── */
+    /* ── sinit index ─────────────────────────────────────────────────── */
     if (!wb_u16(wb, (uint16_t)(module->sinit_index < 0 ? 0xFFFF : (uint16_t)module->sinit_index))) return false;
 
-    /* ── Mod metadata ────────────────────────────────────────────────── */
-    if (!wb_u8(wb, module->metadata.has_mod ? 1 : 0)) return false;
-    if (module->metadata.has_mod) {
-        if (!wb_str(wb, module->metadata.name))        return false;
-        if (!wb_str(wb, module->metadata.version))     return false;
-        if (!wb_str(wb, module->metadata.author))      return false;
-        if (!wb_str(wb, module->metadata.description)) return false;
-        if (!wb_str(wb, module->metadata.entry_class)) return false;
-    }
+    /* ── uses_stdlib flag ───────────────────────────────────────────── */
+    if (!wb_u8(wb, module->uses_stdlib ? 1 : 0)) return false;
 
-    /* ── Class definitions ───────────────────────────────────────────── */
+    /* ── Class definitions (includes per-class attributes) ──────────── */
     for (int ci = 0; ci < module->class_count; ci++) {
         const ClassDef *cls = &module->classes[ci];
 
@@ -220,15 +243,69 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
             if (!wb_u8(wb, (uint8_t)fd->type_kind))       return false;
             if (!wb_str(wb, fd->class_name))              return false;
             if (!wb_u8(wb, fd->is_static ? 1 : 0))       return false;
+            if (!wb_u8(wb, fd->is_final  ? 1 : 0))       return false;
         }
 
         /* Methods */
         if (!wb_u16(wb, (uint16_t)cls->method_count)) return false;
         for (int mi = 0; mi < cls->method_count; mi++) {
             const MethodDef *md = &cls->methods[mi];
-            if (!wb_str(wb, md->name))                    return false;
-            if (!wb_u32(wb, (uint32_t)md->fn_index))      return false;
-            if (!wb_u8(wb, md->is_static ? 1 : 0))       return false;
+            if (!wb_str(wb, md->name))                       return false;
+            if (!wb_u32(wb, (uint32_t)md->fn_index))         return false;
+            if (!wb_u8(wb, md->is_static ? 1 : 0))          return false;
+            if (!wb_u8(wb, md->is_virtual ? 1 : 0))         return false;
+            if (!wb_u8(wb, (uint8_t)md->return_type_kind))  return false;
+            if (!wb_str(wb, md->return_class_name))          return false;
+            /* v17: param signature */
+            if (!wb_u8(wb, (uint8_t)md->param_count))        return false;
+            for (int pi = 0; pi < md->param_count && pi < METHOD_MAX_PARAMS; pi++) {
+                if (!wb_u8(wb, (uint8_t)md->param_type_kinds[pi])) return false;
+                if (!wb_str(wb, md->param_class_names[pi]))         return false;
+                if (!wb_u8(wb, md->param_is_nullable[pi] ? 1 : 0)) return false;
+            }
+            if (!wb_attribute_instances(wb, md->attributes, md->attribute_count)) return false;
+        }
+
+        /* Class attributes */
+        if (!wb_attribute_instances(wb, cls->attributes, cls->attribute_count)) return false;
+
+        /* Generic type parameters */
+        if (!wb_u8(wb, (uint8_t)cls->type_param_count)) return false;
+        for (int ti = 0; ti < cls->type_param_count; ti++) {
+            if (!wb_str(wb, cls->type_param_names[ti])) return false;
+        }
+
+        /* Interface list and is_interface flag (v16+) */
+        if (!wb_u8(wb, cls->is_interface ? 1 : 0)) return false;
+        if (!wb_u8(wb, (uint8_t)cls->interface_count)) return false;
+        for (int ii = 0; ii < cls->interface_count; ii++) {
+            if (!wb_str(wb, cls->interface_names[ii])) return false;
+        }
+
+
+        if (!wb_u8(wb, (uint8_t)cls->event_count)) return false;
+        for (int ei = 0; ei < cls->event_count; ei++) {
+            const EventDef *ed = &cls->events[ei];
+            if (!wb_str(wb, ed->name)) return false;
+            if (!wb_u8(wb, (uint8_t)ed->param_count)) return false;
+            for (int pi = 0; pi < ed->param_count; pi++) {
+                if (!wb_u8(wb, (uint8_t)ed->param_type_kinds[pi])) return false;
+                if (!wb_str(wb, ed->param_class_names[pi]))         return false;
+                if (!wb_u8(wb, ed->param_is_nullable[pi] ? 1 : 0)) return false;
+            }
+        }
+    }
+
+    /* ── Top-level event definitions ─────────────────────────────────── */
+    if (!wb_u16(wb, (uint16_t)module->event_count)) return false;
+    for (int ei = 0; ei < module->event_count; ei++) {
+        const EventDef *ed = &module->events[ei];
+        if (!wb_str(wb, ed->name)) return false;
+        if (!wb_u8(wb, (uint8_t)ed->param_count)) return false;
+        for (int pi = 0; pi < ed->param_count; pi++) {
+            if (!wb_u8(wb, (uint8_t)ed->param_type_kinds[pi])) return false;
+            if (!wb_str(wb, ed->param_class_names[pi]))         return false;
+            if (!wb_u8(wb, ed->param_is_nullable[pi] ? 1 : 0)) return false;
         }
     }
 
@@ -298,9 +375,14 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                     }
                     pc += 3; break;
 
-                /* OP_NEW: uint16 class_idx + uint8 argc = 3 bytes */
-                case OP_NEW:
-                    pc += 3; break;
+                /* OP_NEW: uint16 class_idx + uint8 argc + uint8 tac + tac bytes = variable */
+                case OP_NEW: {
+                    /* skip class_idx(2) + argc(1) = 3, then read tac to skip type args */
+                    pc += 3;
+                    uint8_t tac = (pc < chunk->count) ? chunk->code[pc] : 0;
+                    pc += 1 + tac;  /* skip tac byte + tac kind bytes */
+                    break;
+                }
 
                 /* 2-byte operand opcodes (two uint8_t operands = class_idx + field_idx) */
                 case OP_LOAD_STATIC:
@@ -320,6 +402,7 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                     uint8_t kind = (pc < chunk->count) ? chunk->code[pc] : 0;
                     pc += (kind == 4) ? 2 : 1; break;
                 }
+                case OP_NEW_ARRAY:
                 case OP_ARRAY_LIT:
                 case OP_IS_TYPE:
                 case OP_AS_TYPE:
@@ -348,7 +431,6 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                 case OP_TRUNC_U32:
                 case OP_TRUNC_U64:
                 case OP_TRUNC_CHAR:
-                case OP_NEW_ARRAY:
                 case OP_ARRAY_GET:
                 case OP_ARRAY_SET:
                 case OP_ARRAY_LEN:
@@ -386,7 +468,61 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                 case OP_OR_BOOL:
                 case OP_CONCAT_STR:
                 case OP_LOAD_THIS:
+                case OP_PUSH_NULL:
+                case OP_IS_NULL:
+                case OP_CMP_EQ_VAL:
+                case OP_CMP_NEQ_VAL:
                     break;
+
+                /* OP_JUMP_IF_TRUE: 2-byte signed offset */
+                case OP_JUMP_IF_TRUE:
+                    pc += 2; break;
+
+                /* OP_NULL_COALESCE: 2-byte forward offset */
+                case OP_NULL_COALESCE:
+                    pc += 2; break;
+
+                /* OP_NULL_ASSERT: 2-byte line number */
+                case OP_NULL_ASSERT:
+                    pc += 2; break;
+
+                /* OP_TRY_BEGIN: 2-byte catch offset */
+                case OP_TRY_BEGIN:
+                    pc += 2; break;
+
+                /* OP_TRY_END, OP_THROW, OP_LOAD_EXCEPTION: no operands */
+                case OP_TRY_END:
+                case OP_THROW:
+                case OP_LOAD_EXCEPTION:
+                    break;
+
+                /* OP_EXCEPTION_IS_TYPE: [u8 name_len][name_bytes] */
+                case OP_EXCEPTION_IS_TYPE: {
+                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
+                    pc += 1 + nlen;
+                    break;
+                }
+
+                /* OP_EVENT_SUBSCRIBE / OP_EVENT_UNSUBSCRIBE: [u8 nlen][name][u16 fn_idx] */
+                case OP_EVENT_SUBSCRIBE:
+                case OP_EVENT_UNSUBSCRIBE: {
+                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
+                    pc += 1 + nlen + 2; /* name + u16 fn_idx */
+                    break;
+                }
+
+                /* OP_EVENT_FIRE: [u8 nlen][name][u8 argc] */
+                case OP_EVENT_FIRE: {
+                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
+                    pc += 1 + nlen + 1; /* name + u8 argc */
+                    break;
+                }
+
+                /* OP_CALL_SUPER: 2-byte fn_idx + 1-byte argc */
+                /* Already listed above but double-check: */
+
+                /* OP_GET_FIELD: 1-byte field_idx (already listed, verify) */
+                /* OP_SET_FIELD: 1-byte field_idx (already listed) */
 
                 default: break;
             }
@@ -406,8 +542,10 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
             if (kind == CONST_STR) {
                 if (!wb_str(wb, v.s)) { free(const_kinds); return false; }
             } else {
-                uint64_t raw;
-                memcpy(&raw, &v, 8);
+                /* Serialize the payload (union field) as raw 8 bytes.
+                 * We extract the union portion only, skipping is_null. */
+                uint64_t raw = 0;
+                memcpy(&raw, &v.i, 8);   /* .i overlaps all union members */
                 if (!wb_u64(wb, raw)) { free(const_kinds); return false; }
             }
         }
@@ -427,6 +565,64 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
  * DESERIALIZATION — ReadBuf -> Module
  * ───────────────────────────────────────────────────────────────────────────*/
 
+/* ── Read one AttrArg from the buffer ───────────────────────────────────── */
+static XbcResult rb_attr_arg(ReadBuf *rb, AttrArg *a) {
+    memset(a, 0, sizeof(AttrArg));
+    a->kind = (AttrArgKind)rb_u8(rb);
+    if (rb->error) return XBC_ERR_IO;
+    switch (a->kind) {
+        case ATTR_ARG_STRING: {
+            char *sv = rb_str(rb);
+            if (rb->error || !sv) return XBC_ERR_OOM;
+            a->s = sv; break;
+        }
+        case ATTR_ARG_INT:   if (!rb_read(rb, &a->i, 8)) return XBC_ERR_IO; break;
+        case ATTR_ARG_FLOAT: if (!rb_read(rb, &a->f, 8)) return XBC_ERR_IO; break;
+        case ATTR_ARG_BOOL:  a->b = rb_u8(rb) != 0; if (rb->error) return XBC_ERR_IO; break;
+        case ATTR_ARG_ARRAY: {
+            uint8_t ecnt = rb_u8(rb);
+            if (rb->error) return XBC_ERR_IO;
+            a->arr.count = (int)ecnt;
+            if (ecnt == 0) { a->arr.elems = NULL; break; }
+            a->arr.elems = calloc(ecnt, sizeof(AttrArg));
+            if (!a->arr.elems) return XBC_ERR_OOM;
+            for (int ei = 0; ei < (int)ecnt; ei++) {
+                XbcResult er = rb_attr_arg(rb, &a->arr.elems[ei]);
+                if (er != XBC_OK) return er;
+            }
+            break;
+        }
+        default: break;
+    }
+    return XBC_OK;
+}
+
+static XbcResult rb_attribute_instances(ReadBuf *rb,
+                                         AttributeInstance *attrs, int *count) {
+    uint8_t attr_count = rb_u8(rb);
+    if (rb->error) return XBC_ERR_IO;
+    if (attr_count > CLASS_MAX_ATTRIBUTES) return XBC_ERR_CORRUPT;
+    *count = (int)attr_count;
+    for (int ai = 0; ai < *count; ai++) {
+        AttributeInstance *inst = &attrs[ai];
+        memset(inst, 0, sizeof(AttributeInstance));
+        char *aname = rb_str(rb);
+        if (rb->error || !aname) return XBC_ERR_OOM;
+        strncpy(inst->class_name, aname, CLASS_NAME_MAX - 1);
+        inst->class_name[CLASS_NAME_MAX - 1] = '\0';
+        free(aname);
+        uint8_t arg_count = rb_u8(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (arg_count > ATTR_MAX_ARGS) return XBC_ERR_CORRUPT;
+        inst->arg_count = (int)arg_count;
+        for (int ki = 0; ki < inst->arg_count; ki++) {
+            XbcResult er = rb_attr_arg(rb, &inst->args[ki]);
+            if (er != XBC_OK) return er;
+        }
+    }
+    return XBC_OK;
+}
+
 static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
     module_init(module);
 
@@ -443,39 +639,17 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
     uint16_t class_count = rb_u16(rb);
     if (rb->error) return XBC_ERR_IO;
 
-    /* ── Static init chunk index ──────────────────────────────────────── */
+    /* ── sinit index ─────────────────────────────────────────────────── */
     uint16_t sinit_raw = rb_u16(rb);
     if (rb->error) return XBC_ERR_IO;
     module->sinit_index = (sinit_raw == 0xFFFF) ? -1 : (int)sinit_raw;
 
-    /* ── Mod metadata ────────────────────────────────────────────────── */
-    uint8_t has_mod = rb_u8(rb);
+    /* ── uses_stdlib flag ───────────────────────────────────────────── */
+    uint8_t uses_stdlib = rb_u8(rb);
     if (rb->error) return XBC_ERR_IO;
-    module->metadata.has_mod = has_mod != 0;
-    if (module->metadata.has_mod) {
-        char *s;
-        s = rb_str(rb); if (rb->error || !s) return XBC_ERR_OOM;
-        strncpy(module->metadata.name, s, MOD_STRING_MAX - 1);
-        module->metadata.name[MOD_STRING_MAX - 1] = '\0'; free(s);
+    module->uses_stdlib = uses_stdlib != 0;
 
-        s = rb_str(rb); if (rb->error || !s) return XBC_ERR_OOM;
-        strncpy(module->metadata.version, s, MOD_STRING_MAX - 1);
-        module->metadata.version[MOD_STRING_MAX - 1] = '\0'; free(s);
-
-        s = rb_str(rb); if (rb->error || !s) return XBC_ERR_OOM;
-        strncpy(module->metadata.author, s, MOD_STRING_MAX - 1);
-        module->metadata.author[MOD_STRING_MAX - 1] = '\0'; free(s);
-
-        s = rb_str(rb); if (rb->error || !s) return XBC_ERR_OOM;
-        strncpy(module->metadata.description, s, MOD_STRING_MAX - 1);
-        module->metadata.description[MOD_STRING_MAX - 1] = '\0'; free(s);
-
-        s = rb_str(rb); if (rb->error || !s) return XBC_ERR_OOM;
-        strncpy(module->metadata.entry_class, s, MOD_STRING_MAX - 1);
-        module->metadata.entry_class[MOD_STRING_MAX - 1] = '\0'; free(s);
-    }
-
-    /* ── Class definitions ───────────────────────────────────────────── */
+    /* ── Class definitions (includes per-class attributes) ──────────── */
     for (int ci = 0; ci < class_count; ci++) {
         if (module->class_count >= MODULE_MAX_CLASSES) return XBC_ERR_CORRUPT;
 
@@ -518,6 +692,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             free(class_name);
 
             fd->is_static = rb_u8(rb) != 0;
+            fd->is_final  = rb_u8(rb) != 0;
             if (rb->error) return XBC_ERR_IO;
         }
 
@@ -536,9 +711,146 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             md->name[FIELD_NAME_MAX - 1] = '\0';
             free(mname);
 
-            md->fn_index  = (int)rb_u32(rb);
-            md->is_static = rb_u8(rb) != 0;
+            md->fn_index        = (int)rb_u32(rb);
+            md->is_static       = rb_u8(rb) != 0;
+            md->is_virtual      = rb_u8(rb) != 0;
+            md->return_type_kind = (int)rb_u8(rb);
+            char *rcname = rb_str(rb);
+            if (rb->error || !rcname) return XBC_ERR_OOM;
+            strncpy(md->return_class_name, rcname, CLASS_NAME_MAX - 1);
+            md->return_class_name[CLASS_NAME_MAX - 1] = '\0';
+            free(rcname);
             if (rb->error) return XBC_ERR_IO;
+            /* v17: param signature */
+            md->param_count = (int)rb_u8(rb);
+            if (rb->error) return XBC_ERR_IO;
+            if (md->param_count > METHOD_MAX_PARAMS) md->param_count = METHOD_MAX_PARAMS;
+            for (int pi = 0; pi < md->param_count; pi++) {
+                md->param_type_kinds[pi] = (int)rb_u8(rb);
+                if (rb->error) return XBC_ERR_IO;
+                char *pcname = rb_str(rb);
+                if (rb->error || !pcname) return XBC_ERR_OOM;
+                strncpy(md->param_class_names[pi], pcname, METHOD_PARAM_CLASS_MAX - 1);
+                md->param_class_names[pi][METHOD_PARAM_CLASS_MAX - 1] = '\0';
+                free(pcname);
+                md->param_is_nullable[pi] = rb_u8(rb) != 0;
+                if (rb->error) return XBC_ERR_IO;
+            }
+            /* Read method attribute count and heap-allocate if needed */
+            {
+                uint8_t mac = rb_u8(rb);
+                if (rb->error) return XBC_ERR_IO;
+                md->attribute_count = (int)mac;
+                if (mac > 0) {
+                    md->attributes = calloc(mac, sizeof(AttributeInstance));
+                    if (!md->attributes) return XBC_ERR_OOM;
+                    /* Re-read using a temporary count var since we already read the byte */
+                    int tmp = 0;
+                    ReadBuf rb2 = *rb; /* snapshot — but we already consumed the count */
+                    /* Actually read each instance manually */
+                    for (int ai = 0; ai < (int)mac; ai++) {
+                        AttributeInstance *inst = &md->attributes[ai];
+                        memset(inst, 0, sizeof(AttributeInstance));
+                        char *aname = rb_str(rb);
+                        if (rb->error || !aname) return XBC_ERR_OOM;
+                        strncpy(inst->class_name, aname, CLASS_NAME_MAX - 1);
+                        inst->class_name[CLASS_NAME_MAX - 1] = '\0';
+                        free(aname);
+                        uint8_t argc = rb_u8(rb);
+                        if (rb->error) return XBC_ERR_IO;
+                        inst->arg_count = (int)argc;
+                        for (int ki = 0; ki < inst->arg_count; ki++) {
+                            XbcResult er = rb_attr_arg(rb, &inst->args[ki]);
+                            if (er != XBC_OK) return er;
+                        }
+                    }
+                    (void)tmp; (void)rb2;
+                } else {
+                    md->attributes = NULL;
+                }
+            }
+        }
+
+        /* Class attributes */
+        XbcResult car = rb_attribute_instances(rb, cls->attributes, &cls->attribute_count);
+        if (car != XBC_OK) return car;
+
+        /* Generic type parameters */
+        cls->type_param_count = (int)rb_u8(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (cls->type_param_count > 8) cls->type_param_count = 8;
+        for (int ti = 0; ti < cls->type_param_count; ti++) {
+            char *tname = rb_str(rb);
+            if (rb->error || !tname) { cls->type_param_count = ti; break; }
+            int tl = (int)strlen(tname);
+            if (tl > 7) tl = 7;
+            memcpy(cls->type_param_names[ti], tname, tl);
+            cls->type_param_names[ti][tl] = '\0';
+            free(tname);
+        }
+
+        /* Interface list and is_interface flag (v16+) */
+        cls->is_interface = (rb_u8(rb) != 0);
+        if (rb->error) return XBC_ERR_IO;
+        cls->interface_count = (int)rb_u8(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (cls->interface_count > 8) cls->interface_count = 8;
+        for (int ii = 0; ii < cls->interface_count; ii++) {
+            char *iname = rb_str(rb);
+            if (rb->error || !iname) { cls->interface_count = ii; break; }
+            int il = (int)strlen(iname);
+            if (il > 63) il = 63;
+            memcpy(cls->interface_names[ii], iname, il);
+            cls->interface_names[ii][il] = '\0';
+            free(iname);
+        }
+
+        /* Class event definitions */
+        uint8_t ev_count = rb_u8(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (ev_count > CLASS_MAX_EVENTS) ev_count = CLASS_MAX_EVENTS;
+        cls->event_count = (int)ev_count;
+        for (int ei = 0; ei < (int)ev_count; ei++) {
+            EventDef *ed = &cls->events[ei];
+            memset(ed, 0, sizeof(EventDef));
+            char *ename = rb_str(rb);
+            if (rb->error || !ename) return XBC_ERR_OOM;
+            strncpy(ed->name, ename, FIELD_NAME_MAX - 1); free(ename);
+            ed->param_count = (int)rb_u8(rb);
+            if (rb->error) return XBC_ERR_IO;
+            for (int pi = 0; pi < ed->param_count && pi < EVENT_MAX_PARAMS; pi++) {
+                ed->param_type_kinds[pi]  = (int)rb_u8(rb);
+                char *cn = rb_str(rb);
+                if (rb->error || !cn) return XBC_ERR_OOM;
+                strncpy(ed->param_class_names[pi], cn, EVENT_CLASS_NAME_MAX - 1); free(cn);
+                ed->param_is_nullable[pi] = rb_u8(rb) != 0;
+                if (rb->error) return XBC_ERR_IO;
+            }
+        }
+    }
+
+    /* ── Top-level event definitions ─────────────────────────────────── */
+    {
+        uint16_t tev_count = rb_u16(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (tev_count > MODULE_MAX_EVENTS) tev_count = MODULE_MAX_EVENTS;
+        module->event_count = (int)tev_count;
+        for (int ei = 0; ei < (int)tev_count; ei++) {
+            EventDef *ed = &module->events[ei];
+            memset(ed, 0, sizeof(EventDef));
+            char *ename = rb_str(rb);
+            if (rb->error || !ename) return XBC_ERR_OOM;
+            strncpy(ed->name, ename, FIELD_NAME_MAX - 1); free(ename);
+            ed->param_count = (int)rb_u8(rb);
+            if (rb->error) return XBC_ERR_IO;
+            for (int pi = 0; pi < ed->param_count && pi < EVENT_MAX_PARAMS; pi++) {
+                ed->param_type_kinds[pi]  = (int)rb_u8(rb);
+                char *cn = rb_str(rb);
+                if (rb->error || !cn) return XBC_ERR_OOM;
+                strncpy(ed->param_class_names[pi], cn, EVENT_CLASS_NAME_MAX - 1); free(cn);
+                ed->param_is_nullable[pi] = rb_u8(rb) != 0;
+                if (rb->error) return XBC_ERR_IO;
+            }
         }
     }
 
@@ -575,16 +887,16 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
         for (int i = 0; i < const_count; i++) {
             uint8_t kind = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
-
-            Value v = {0};
+    
+            Value v; memset(&v, 0, sizeof(Value));
             if (kind == CONST_STR) {
                 char *s = rb_str(rb);
                 if (rb->error || !s) return XBC_ERR_OOM;
-                v.s = s;
+                v.is_null = 0; v.s = s;
             } else {
                 uint64_t raw = rb_u64(rb);
                 if (rb->error) return XBC_ERR_IO;
-                memcpy(&v, &raw, 8);
+                memcpy(&v.i, &raw, 8);   /* restore union, leave is_null=0 */
             }
 
             chunk_add_constant(chunk, v);

@@ -1,6 +1,0 @@
-@Mod(name="testmod")
-class MyMod {
-    MyMod() {
-        print("mod constructor");
-    }
-}

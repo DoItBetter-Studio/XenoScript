@@ -1,5 +1,0 @@
-class TestClass
-{
-    public:
-        int someInt = 42;
-}

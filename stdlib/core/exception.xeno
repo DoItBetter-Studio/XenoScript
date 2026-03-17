@@ -1,0 +1,14 @@
+// Base class for all XenoScript exceptions.
+// User-defined exception classes must extend this.
+class Exception {
+    public:
+        string message;
+
+        Exception(string msg) {
+            message = msg;
+        }
+
+        function toString(): string {
+            return "Exception: " + message;
+        }
+}

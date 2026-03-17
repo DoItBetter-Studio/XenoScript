@@ -107,6 +107,8 @@ static void synchronize(Parser *p) {
             case TOK_RETURN:
             case TOK_BREAK:
             case TOK_CONTINUE:
+            case TOK_TRY:
+            case TOK_THROW:
                 return;
             default:
                 break;
@@ -188,6 +190,12 @@ static Type parse_type(Parser *p) {
         Type *heap = arena_alloc(&p->arena, sizeof(Type));
         *heap = base;
         base = type_array(heap);
+    }
+    /* Nullable suffix: int?, string?, MyClass?, etc.
+     * Only one ? allowed — void? and null? are invalid but caught in checker. */
+    if (p->current.type == TOK_QUESTION) {
+        advance(p);
+        base.is_nullable = true;
     }
     return base;
 }
@@ -329,6 +337,26 @@ typedef enum {
  * indirectly through parse_stmt -> parse_expr */
 static Expr *parse_expr(Parser *p, int min_bp);
 
+static __int128_t parse_int128(const char *s)
+{
+    int negative = 0;
+    __int128_t result = 0;
+
+    if (*s == '-') {
+        negative = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+
+    while (*s >= '0' && *s <= '9') {
+        result = result * 10 + (*s - '0');
+        s++;
+    }
+
+    return negative ? -result : result;
+}
+
 /*
  * parse_prefix — handles tokens that can START an expression:
  *   - Literals (int, float, bool, string)
@@ -348,12 +376,12 @@ static Expr *parse_prefix(Parser *p) {
         case TOK_INT_LIT: {
             /* Convert the lexeme (pointer + length, NOT null-terminated)
              * to an int64. We copy to a temp buffer for strtoll. */
-            char buf[32];
-            int  len = t.length < 31 ? t.length : 31;
+            char buf[64];
+            int  len = t.length < 63 ? t.length : 63;
             memcpy(buf, t.start, len);
             buf[len] = '\0';
-            int64_t value = (int64_t)strtoll(buf, NULL, 10);
-            return expr_int_lit(&p->arena, value, t.line);
+            __int128_t value = parse_int128(buf);
+            return expr_int_lit(&p->arena, value, t.line, t.col);
         }
 
         /* ── Float literal ─────────────────────────────────────────────── */
@@ -363,7 +391,7 @@ static Expr *parse_prefix(Parser *p) {
             memcpy(buf, t.start, len);
             buf[len] = '\0';
             double value = strtod(buf, NULL);
-            return expr_float_lit(&p->arena, value, t.line);
+            return expr_float_lit(&p->arena, value, t.line, t.col);
         }
 
         /* ── Char literal ──────────────────────────────────────────────── */
@@ -385,20 +413,28 @@ static Expr *parse_prefix(Parser *p) {
             } else {
                 codepoint = (unsigned char)*s;
             }
-            return expr_char_lit(&p->arena, codepoint, t.line);
+            return expr_char_lit(&p->arena, codepoint, t.line, t.col);
         }
 
         /* ── Bool literals ─────────────────────────────────────────────── */
-        case TOK_TRUE:  return expr_bool_lit(&p->arena, true,  t.line);
-        case TOK_FALSE: return expr_bool_lit(&p->arena, false, t.line);
+        case TOK_TRUE:  return expr_bool_lit(&p->arena, true, t.line, t.col);
+        case TOK_FALSE: return expr_bool_lit(&p->arena, false, t.line, t.col);
+
+        /* ── Null literal ──────────────────────────────────────────────── */
+        case TOK_NULL: {
+            Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+            e->kind = EXPR_NULL_LIT;
+            e->line = t.line;
+            e->resolved_type = (Type){.kind = TYPE_NULL};
+            return e;
+        }
 
         /* ── String literal ────────────────────────────────────────────── */
         case TOK_STRING_LIT:
             /* The lexeme includes the surrounding quotes. We trim them:
              * start+1 skips the opening quote, length-2 drops both quotes. */
             return expr_string_lit(&p->arena,
-                                   t.start + 1, t.length - 2,
-                                   t.line);
+                                   t.start + 1, t.length - 2, t.line, t.col);
 
         /* ── Interpolated string: $"Hello, {name}!" ─────────────────────
          * After TOK_INTERP_BEGIN the lexer alternates between:
@@ -409,7 +445,7 @@ static Expr *parse_prefix(Parser *p) {
          * finishing with TOK_INTERP_END (the closing "). */
         case TOK_INTERP_BEGIN: {
             typedef struct InterpSegment ISeg;
-            Expr *node = expr_interp_string(&p->arena, t.line);
+            Expr *node = expr_interp_string(&p->arena, t.line, t.col);
             ISeg *tail = NULL;
 
             while (!check(p, TOK_INTERP_END) && !check(p, TOK_EOF)) {
@@ -530,8 +566,7 @@ static Expr *parse_prefix(Parser *p) {
 
                 Expr *call_e = expr_call(&p->arena,
                                  t.start, t.length,
-                                 args, arg_count,
-                                 t.line);
+                                 args, arg_count, t.line, t.col);
                 call_e->call.type_args      = call_type_args;
                 call_e->call.type_arg_count = call_type_arg_count;
                 return call_e;
@@ -549,7 +584,7 @@ static Expr *parse_prefix(Parser *p) {
             }
 
             /* Plain variable reference */
-            return expr_ident(&p->arena, t.start, t.length, t.line);
+            return expr_ident(&p->arena, t.start, t.length, t.line, t.col);
         }
 
         /* ── Unary operators ───────────────────────────────────────────── */
@@ -558,7 +593,7 @@ static Expr *parse_prefix(Parser *p) {
             /* Unary operators are RIGHT-associative prefix operators.
              * We recurse with BP_UNARY so that !!x parses as !(!x). */
             Expr *operand = parse_expr(p, BP_UNARY);
-            return expr_unary(&p->arena, t.type, operand, t.line);
+            return expr_unary(&p->arena, t.type, operand, t.line, t.col);
         }
 
         /* ── Prefix ++ / -- ────────────────────────────────────────────── */
@@ -569,14 +604,13 @@ static Expr *parse_prefix(Parser *p) {
             Expr *operand = parse_expr(p, BP_CALL);
             if (operand->kind == EXPR_IDENT) {
                 return expr_prefix(&p->arena, t.type,
-                                   operand->ident.name, operand->ident.length, t.line);
+                                   operand->ident.name, operand->ident.length, t.line, t.col);
             }
             if (operand->kind == EXPR_FIELD_GET) {
                 return expr_postfix_field(&p->arena, t.type, true,
                                           operand->field_get.object,
                                           operand->field_get.field_name,
-                                          operand->field_get.field_name_len,
-                                          t.line);
+                                          operand->field_get.field_name_len, t.line, t.col);
             }
             if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
                 ParseError *e = &p->errors[p->error_count++];
@@ -599,7 +633,7 @@ static Expr *parse_prefix(Parser *p) {
 
         /* ── this ──────────────────────────────────────────────────────── */
         case TOK_THIS:
-            return expr_this(&p->arena, t.line);
+            return expr_this(&p->arena, t.line, t.col);
 
         /* ── super(args) ─────────────────────────────────────────────── */
         case TOK_SUPER: {
@@ -617,7 +651,7 @@ static Expr *parse_prefix(Parser *p) {
                 } while (match(p, TOK_COMMA));
             }
             consume(p, TOK_RPAREN, "Expected ')' after super arguments");
-            return expr_super_call(&p->arena, args, arg_count, t.line);
+            return expr_super_call(&p->arena, args, arg_count, t.line, t.col);
         }
 
         /* ── new ClassName(args) ────────────────────────────────────────── */
@@ -649,12 +683,12 @@ static Expr *parse_prefix(Parser *p) {
                         } while (match(p, TOK_COMMA));
                     }
                     consume(p, TOK_RBRACE, "Expected '}' to close array initializer");
-                    return expr_array_lit(&p->arena, head, count, t.line);
+                    return expr_array_lit(&p->arena, head, count, t.line, t.col);
                 }
                 /* new Type[n] — fixed-size allocation */
                 Expr *len = parse_expr(p, BP_NONE);
                 consume(p, TOK_RBRACKET, "Expected ']' after array length");
-                return expr_new_array(&p->arena, elem, len, t.line);
+                return expr_new_array(&p->arena, elem, len, t.line, t.col);
             }
             /* Also handle: new ClassName[n] for object arrays */
             if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET) {
@@ -676,12 +710,12 @@ static Expr *parse_prefix(Parser *p) {
                         } while (match(p, TOK_COMMA));
                     }
                     consume(p, TOK_RBRACE, "Expected '}' to close array initializer");
-                    return expr_array_lit(&p->arena, head, count, t.line);
+                    return expr_array_lit(&p->arena, head, count, t.line, t.col);
                 }
                 /* new Type[n] — fixed-size allocation */
                 Expr *len = parse_expr(p, BP_NONE);
                 consume(p, TOK_RBRACKET, "Expected ']' after array length");
-                return expr_new_array(&p->arena, elem, len, t.line);
+                return expr_new_array(&p->arena, elem, len, t.line, t.col);
             }
             /* new ClassName(...) — object construction */
             /* new ClassName<T>(...) — generic object construction */
@@ -714,8 +748,7 @@ static Expr *parse_prefix(Parser *p) {
 
             Expr *new_e = expr_new(&p->arena,
                             class_tok.start, class_tok.length,
-                            args, arg_count,
-                            t.line);
+                            args, arg_count, t.line, t.col);
             new_e->new_expr.type_args      = type_args;
             new_e->new_expr.type_arg_count = type_arg_count;
             return new_e;
@@ -735,7 +768,7 @@ static Expr *parse_prefix(Parser *p) {
                 } while (match(p, TOK_COMMA));
             }
             consume(p, TOK_RBRACE, "Expected '}' to close array literal");
-            return expr_array_lit(&p->arena, head, count, t.line);
+            return expr_array_lit(&p->arena, head, count, t.line, t.col);
         }
 
         /* Array literal: [e0, e1, e2]  (bracket syntax — same semantics as braces) */
@@ -752,7 +785,7 @@ static Expr *parse_prefix(Parser *p) {
                 } while (match(p, TOK_COMMA));
             }
             consume(p, TOK_RBRACKET, "Expected ']' to close array literal");
-            return expr_array_lit(&p->arena, head, count, t.line);
+            return expr_array_lit(&p->arena, head, count, t.line, t.col);
         }
 
         default:
@@ -766,13 +799,13 @@ static Expr *parse_prefix(Parser *p) {
                 p->panic_mode = true;
             }
             /* Return a dummy node to let the parser continue */
-            return expr_int_lit(&p->arena, 0, t.line);
+            return expr_int_lit(&p->arena, 0, t.line, t.col);
         case TOK_TYPEOF: {
             /* typeof(expr) — parse the inner expression */
             consume(p, TOK_LPAREN, "Expected '(' after 'typeof'");
             Expr *operand = parse_expr(p, BP_NONE);
             consume(p, TOK_RPAREN, "Expected ')' after typeof expression");
-            return expr_typeof(&p->arena, operand, t.line);
+            return expr_typeof(&p->arena, operand, t.line, t.col);
         }
     }
 }
@@ -786,6 +819,7 @@ static int left_binding_power(TokenType type) {
         case TOK_ASSIGN: return BP_ASSIGN;
         case TOK_OR:     return BP_OR;
         case TOK_AND:    return BP_AND;
+        case TOK_QUESTION_QUESTION: return BP_OR - 1; /* ?? just below ||  */
         case TOK_EQ:
         case TOK_NEQ:    return BP_EQUALITY;
         case TOK_LT: case TOK_LTE:
@@ -798,7 +832,9 @@ static int left_binding_power(TokenType type) {
         case TOK_PERCENT: return BP_FACTOR;
         case TOK_PLUS_PLUS:
         case TOK_MINUS_MINUS: return BP_UNARY; /* postfix binds tight */
+        case TOK_BANG:        return BP_UNARY; /* postfix ! null-assert */
         case TOK_DOT:         return BP_CALL + 1; /* member access binds tightest */
+        case TOK_QUESTION_DOT: return BP_CALL + 1; /* ?. same as .  */
         case TOK_LBRACKET:    return BP_CALL + 1; /* index access same as member   */
         default:          return BP_NONE;  /* Not an infix operator */
     }
@@ -815,14 +851,14 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
     if (op.type == TOK_PLUS_PLUS || op.type == TOK_MINUS_MINUS) {
         if (left->kind == EXPR_IDENT) {
             return expr_postfix(&p->arena, op.type,
-                                left->ident.name, left->ident.length, op.line);
+                                left->ident.name, left->ident.length, op.line, op.col);
         }
         if (left->kind == EXPR_FIELD_GET) {
             return expr_postfix_field(&p->arena, op.type, false,
                                       left->field_get.object,
                                       left->field_get.field_name,
                                       left->field_get.field_name_len,
-                                      op.line);
+                                      op.line, op.col);
         }
         if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
             ParseError *e = &p->errors[p->error_count++];
@@ -845,9 +881,70 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         if (check(p, TOK_ASSIGN)) {
             advance(p); /* consume '=' */
             Expr *value = parse_expr(p, BP_NONE);
-            return expr_index_assign(&p->arena, left, index, value, op.line);
+            return expr_index_assign(&p->arena, left, index, value, op.line, op.col);
         }
-        return expr_index(&p->arena, left, index, op.line);
+        return expr_index(&p->arena, left, index, op.line, op.col);
+    }
+
+    /* Null-assert postfix: expr! */
+    if (op.type == TOK_BANG) {
+        Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+        e->kind = EXPR_NULL_ASSERT;
+        e->line = op.line;
+        e->null_assert.operand = left;
+        return e;
+    }
+
+    /* Null-safe member access: obj?.field or obj?.method(args) */
+    if (op.type == TOK_QUESTION_DOT) {
+        Token member = p->current;
+        consume(p, TOK_IDENT, "Expected field or method name after '?.'");
+
+        if (check(p, TOK_LPAREN)) {
+            /* Null-safe method call: obj?.method(args) */
+            advance(p); /* consume '(' */
+            ArgNode *args      = NULL;
+            ArgNode *args_tail = NULL;
+            int      arg_count = 0;
+            if (!check(p, TOK_RPAREN)) {
+                do {
+                    Expr    *arg  = parse_expr(p, BP_NONE);
+                    ArgNode *node = arg_node(&p->arena, arg, NULL);
+                    if (!args) { args = args_tail = node; }
+                    else       { args_tail->next = node; args_tail = node; }
+                    arg_count++;
+                } while (match(p, TOK_COMMA));
+            }
+            consume(p, TOK_RPAREN, "Expected ')' after method arguments");
+            Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+            e->kind = EXPR_NULL_SAFE_CALL;
+            e->line = op.line;
+            e->null_safe_call.object          = left;
+            e->null_safe_call.method_name     = member.start;
+            e->null_safe_call.method_name_len = member.length;
+            e->null_safe_call.args            = args;
+            e->null_safe_call.arg_count       = arg_count;
+            return e;
+        }
+        /* Null-safe field read: obj?.field */
+        Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+        e->kind = EXPR_NULL_SAFE_GET;
+        e->line = op.line;
+        e->null_safe_get.object        = left;
+        e->null_safe_get.field_name    = member.start;
+        e->null_safe_get.field_name_len = member.length;
+        return e;
+    }
+
+    /* Null coalescing: left ?? right */
+    if (op.type == TOK_QUESTION_QUESTION) {
+        Expr *right = parse_expr(p, lbp); /* right-associative: same bp */
+        Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+        e->kind = EXPR_NULL_COALESCE;
+        e->line = op.line;
+        e->null_coalesce.left  = left;
+        e->null_coalesce.right = right;
+        return e;
     }
 
     /* Member access: obj.field, obj.method(args), obj.field = value */
@@ -873,7 +970,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             consume(p, TOK_RPAREN, "Expected ')' after method arguments");
             return expr_method_call(&p->arena, left,
                                     member.start, member.length,
-                                    args, arg_count, op.line);
+                                    args, arg_count, op.line, op.col);
         }
 
         if (check(p, TOK_ASSIGN)) {
@@ -882,12 +979,12 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             Expr *value = parse_expr(p, BP_ASSIGN);
             return expr_field_set(&p->arena, left,
                                   member.start, member.length,
-                                  value, op.line);
+                                  value, op.line, op.col);
         }
 
         /* Plain field access: obj.field */
         return expr_field_get(&p->arena, left,
-                              member.start, member.length, op.line);
+                              member.start, member.length, op.line, op.col);
     }
 
     if (op.type == TOK_ASSIGN) {
@@ -907,21 +1004,21 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         Expr *right = parse_expr(p, lbp); /* right-associative: same bp */
         return expr_assign(&p->arena,
                            left->ident.name, left->ident.length,
-                           right, op.line);
+                           right, op.line, op.col);
     }
 
     /* is / as — right side is a type name, not an expression */
     if (op.type == TOK_IS || op.type == TOK_AS) {
         Type target = parse_type(p);
         if (op.type == TOK_IS)
-            return expr_is(&p->arena, left, target, op.line);
+            return expr_is(&p->arena, left, target, op.line, op.col);
         else
-            return expr_as(&p->arena, left, target, op.line);
+            return expr_as(&p->arena, left, target, op.line, op.col);
     }
 
     /* All other binary operators: left-associative (pass lbp + 1) */
     Expr *right = parse_expr(p, lbp + 1);
-    return expr_binary(&p->arena, op.type, left, right, op.line);
+    return expr_binary(&p->arena, op.type, left, right, op.line, op.col);
 }
 
 /*
@@ -980,7 +1077,7 @@ static Stmt *parse_block(Parser *p) {
     }
 
     consume(p, TOK_RBRACE, "Expected '}' after block");
-    return stmt_block(&p->arena, head, line);
+    return stmt_block(&p->arena, head, line, p->current.col);
 }
 
 /*
@@ -1001,7 +1098,7 @@ static Stmt *parse_var_decl(Parser *p, Type type, int line) {
     }
 
     consume(p, TOK_SEMICOLON, "Expected ';' after variable declaration");
-    return stmt_var_decl(&p->arena, type, name.start, name.length, init, line);
+    return stmt_var_decl(&p->arena, type, name.start, name.length, init, line, name.col);
 }
 
 /*
@@ -1161,7 +1258,7 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
                         ret_type,
                         name.start, name.length,
                         params, param_count,
-                        body, line);
+                        body, line, p->current.col);
     fn->fn_decl.type_params      = type_params;
     fn->fn_decl.type_param_count = type_param_count;
     return fn;
@@ -1218,9 +1315,20 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             consume(p, TOK_IDENT, "Expected class or interface name after ':'");
             /* We stash ALL names; the checker will sort parent vs interface */
             IFNode *inode = arena_alloc(&p->arena, sizeof(IFNode));
-            inode->name   = name_tok.start;
-            inode->length = name_tok.length;
-            inode->next   = NULL;
+            inode->name           = name_tok.start;
+            inode->length         = name_tok.length;
+            inode->type_arg_count = 0;
+            /* Optional type args: class Foo : Bar<int> or class Foo : Bar<K,V> */
+            if (check(p, TOK_LT)) {
+                int tac = 0;
+                TypeArgNode *ta = parse_type_arg_list(p, &tac);
+                if (tac > 8) tac = 8;
+                TypeArgNode *cur = ta;
+                for (int _ti = 0; cur && _ti < tac; cur = cur->next, _ti++)
+                    inode->type_args[_ti] = cur->type;
+                inode->type_arg_count = tac;
+            }
+            inode->next = NULL;
             if (!ifaces) { ifaces = ifaces_tail = inode; }
             else         { ifaces_tail->next = inode; ifaces_tail = inode; }
             iface_count++;
@@ -1230,7 +1338,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
     Stmt *cls = stmt_class_decl(&p->arena,
                                 class_name.start, class_name.length,
                                 parent_name, parent_len,
-                                line);
+                                line, p->current.col);
     /* Stash the raw name list; checker_check() will classify each as
      * parent class or interface and validate accordingly. */
     cls->class_decl.interfaces      = ifaces;
@@ -1263,8 +1371,61 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             continue;
         }
 
-        /* ── Per-member 'static' modifier (allowed inside any section) ─ */
-        bool is_static = match(p, TOK_STATIC);
+        /* ── Per-member annotations: @Event(...) etc. ───────────────────── */
+        AnnotationNode *member_annotations     = NULL;
+        AnnotationNode *member_annotations_tail = NULL;
+        while (check(p, TOK_AT)) {
+            advance(p);  /* consume '@' */
+            Token ann_name = p->current;
+            consume(p, TOK_IDENT, "Expected annotation name after '@'");
+
+            AnnotationNode *ann = arena_alloc(&p->arena, sizeof(AnnotationNode));
+            ann->name     = ann_name.start;
+            ann->name_len = ann_name.length;
+            ann->args     = NULL;
+            ann->next     = NULL;
+
+            if (match(p, TOK_LPAREN)) {
+                AnnotationKVNode *kv_tail = NULL;
+                while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                    AnnotationKVNode *kv = arena_alloc(&p->arena, sizeof(AnnotationKVNode));
+                    kv->key = NULL; kv->key_len = 0; kv->value = NULL; kv->next = NULL;
+                    if (check(p, TOK_IDENT) && p->next.type == TOK_ASSIGN) {
+                        Token key_tok = p->current; advance(p); advance(p);
+                        kv->key = key_tok.start; kv->key_len = key_tok.length;
+                    }
+                    kv->value = parse_expr(p, BP_NONE);
+                    if (!ann->args) { ann->args = kv_tail = kv; }
+                    else            { kv_tail->next = kv; kv_tail = kv; }
+                    if (!match(p, TOK_COMMA)) break;
+                }
+                consume(p, TOK_RPAREN, "Expected ')' after annotation arguments");
+            }
+
+            if (!member_annotations) { member_annotations = member_annotations_tail = ann; }
+            else { member_annotations_tail->next = ann; member_annotations_tail = ann; }
+        }
+
+        /* ── Per-member 'static' and/or 'final' modifiers ──────────────── */
+        bool is_static   = match(p, TOK_STATIC);
+        bool is_final    = match(p, TOK_FINAL);
+        bool is_virtual  = match(p, TOK_VIRTUAL);
+        bool is_override = match(p, TOK_OVERRIDE);
+        /* Also allow: final static (less idiomatic but forgiving) */
+        if (!is_static && is_final && check(p, TOK_STATIC)) {
+            advance(p);
+            is_static = true;
+        }
+        /* virtual and override are mutually exclusive */
+        if (is_virtual && is_override) {
+            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                ParseError *_pe = &p->errors[p->error_count++];
+                snprintf(_pe->message, sizeof(_pe->message),
+                         "A method cannot be both 'virtual' and 'override'");
+                _pe->line     = p->current.line;
+                p->had_error  = true;
+            }
+        }
 
         /* ── Constructor: ClassName(params) { body } ───────────────────
          * Recognised by: current token is an identifier matching the class
@@ -1316,7 +1477,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             Stmt *body = parse_block(p);
             Stmt *fn   = stmt_fn_decl(&p->arena, type_void(),
                                       class_name.start, class_name.length,
-                                      params, param_count, body, member_line);
+                                      params, param_count, body, member_line, p->current.col);
 
             typedef struct ClassMethodNode CMNode;
             CMNode *mn         = arena_alloc(&p->arena, sizeof(CMNode));
@@ -1324,6 +1485,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             mn->is_static      = false;
             mn->access         = current_access;
             mn->is_constructor = true;
+            mn->is_virtual     = false;
+            mn->is_override    = false;
+            mn->annotations    = member_annotations;
             mn->next           = NULL;
             if (!cls->class_decl.methods) {
                 cls->class_decl.methods = mn;
@@ -1338,6 +1502,15 @@ static Stmt *parse_class_decl(Parser *p, int line) {
 
         /* ── Method: function name(params): ReturnType { body } ────── */
         if (match(p, TOK_FN)) {
+            if (is_final) {
+                if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                    ParseError *e = &p->errors[p->error_count++];
+                    snprintf(e->message, sizeof(e->message),
+                             "'final' cannot be applied to a method");
+                    e->line      = member_line;
+                    p->had_error = true;
+                }
+            }
             Stmt *fn = parse_fn_decl(p, member_line);
 
             typedef struct ClassMethodNode CMNode;
@@ -1346,6 +1519,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             mn->is_static      = is_static;
             mn->access         = current_access;
             mn->is_constructor = false;
+            mn->is_virtual     = is_virtual;
+            mn->is_override    = is_override;
+            mn->annotations    = member_annotations;
             mn->next           = NULL;
             if (!cls->class_decl.methods) {
                 cls->class_decl.methods = mn;
@@ -1384,8 +1560,10 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                 fn->name          = field_name.start;
                 fn->length        = field_name.length;
                 fn->is_static     = is_static;
+                fn->is_final      = is_final;
                 fn->access        = current_access;
                 fn->initializer   = initializer;
+                fn->annotations   = member_annotations;
                 fn->next          = NULL;
                 if (!cls->class_decl.fields) {
                     cls->class_decl.fields = fn;
@@ -1397,6 +1575,69 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                 cls->class_decl.field_count++;
                 continue;
             }
+        }
+
+        /* ── Event member: event Name(params); ───────────────────────── */
+        if (match(p, TOK_EVENT)) {
+            if (!check(p, TOK_IDENT)) {
+                if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                    ParseError *e = &p->errors[p->error_count++];
+                    snprintf(e->message, sizeof(e->message),
+                             "Expected event name after 'event'");
+                    e->line = p->current.line; p->had_error = true;
+                }
+                continue;
+            }
+            const char *ename = p->current.start;
+            int         elen  = p->current.length;
+            advance(p);
+            consume(p, TOK_LPAREN, "Expected '(' after event name");
+
+            ParamNode *params = NULL, *ptail = NULL;
+            int param_count = 0;
+            if (!check(p, TOK_RPAREN)) {
+                do {
+                    Type ptype = parse_type(p);
+                    if (!check(p, TOK_IDENT)) {
+                        if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                            ParseError *e = &p->errors[p->error_count++];
+                            snprintf(e->message, sizeof(e->message),
+                                     "Expected parameter name in event declaration");
+                            e->line = p->current.line; p->had_error = true;
+                        }
+                        break;
+                    }
+                    const char *pname = p->current.start;
+                    int         plen  = p->current.length;
+                    advance(p);
+                    ParamNode *pn = arena_alloc(&p->arena, sizeof(ParamNode));
+                    pn->name = pname; pn->length = plen;
+                    pn->type = ptype; pn->next = NULL;
+                    if (!params) { params = pn; ptail = pn; }
+                    else         { ptail->next = pn; ptail = pn; }
+                    param_count++;
+                } while (match(p, TOK_COMMA));
+            }
+            consume(p, TOK_RPAREN, "Expected ')' after event parameters");
+            consume(p, TOK_SEMICOLON, "Expected ';' after event declaration");
+
+            typedef struct ClassEventNode CENode;
+            CENode *en = arena_alloc(&p->arena, sizeof(CENode));
+            en->name        = ename;
+            en->length      = elen;
+            en->params      = params;
+            en->param_count = param_count;
+            en->access      = current_access;
+            en->next        = NULL;
+            if (!cls->class_decl.events) {
+                cls->class_decl.events = en;
+            } else {
+                CENode *tail = cls->class_decl.events;
+                while (tail->next) tail = tail->next;
+                tail->next = en;
+            }
+            cls->class_decl.event_count++;
+            continue;
         }
 
         /* ── Unknown token in class body ────────────────────────────── */
@@ -1432,7 +1673,7 @@ static Stmt *parse_interface_decl(Parser *p, int line) {
 
     Stmt *iface = stmt_interface_decl(&p->arena,
                                       iface_name.start, iface_name.length,
-                                      line);
+                                      line, p->current.col);
 
     /* Optional generic type parameter list: interface IContainer<T> { } */
     if (check(p, TOK_LT)) {
@@ -1531,7 +1772,7 @@ static Stmt *parse_if_stmt(Parser *p, int line) {
         }
     }
 
-    return stmt_if(&p->arena, cond, then_branch, else_branch, line);
+    return stmt_if(&p->arena, cond, then_branch, else_branch, line, p->current.col);
 }
 
 /*
@@ -1543,7 +1784,7 @@ static Stmt *parse_while_stmt(Parser *p, int line) {
     Expr *cond = parse_expr(p, BP_NONE);
     consume(p, TOK_RPAREN, "Expected ')' after while condition");
     Stmt *body = parse_block(p);
-    return stmt_while(&p->arena, cond, body, line);
+    return stmt_while(&p->arena, cond, body, line, p->current.col);
 }
 
 /*
@@ -1575,7 +1816,7 @@ static Stmt *parse_for_stmt(Parser *p, int line) {
         } else {
             Expr *init_expr = parse_expr(p, BP_NONE);
             consume(p, TOK_SEMICOLON, "Expected ';' after for-init");
-            init = stmt_expr(&p->arena, init_expr, line);
+            init = stmt_expr(&p->arena, init_expr, line, p->current.col);
         }
     } else {
         advance(p); /* consume the ';' for empty init */
@@ -1596,7 +1837,7 @@ static Stmt *parse_for_stmt(Parser *p, int line) {
     consume(p, TOK_RPAREN, "Expected ')' after for clauses");
 
     Stmt *body = parse_block(p);
-    return stmt_for(&p->arena, init, cond, step, body, line);
+    return stmt_for(&p->arena, init, cond, step, body, line, p->current.col);
 }
 
 /*
@@ -1622,7 +1863,7 @@ static Stmt *parse_match_stmt(Parser *p, int line) {
     consume(p, TOK_RPAREN, "Expected ')' after match subject");
     consume(p, TOK_LBRACE, "Expected '{' to open match body");
 
-    Stmt *node = stmt_match(&p->arena, subject, line);
+    Stmt *node = stmt_match(&p->arena, subject, line, p->current.col);
     MANode *tail = NULL;
 
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -1836,9 +2077,55 @@ static Stmt *parse_stmt(Parser *p) {
             return cls;
         }
 
-        /* If we consumed annotations but no class follows, that's an error */
+        if (match(p, TOK_ENUM)) {
+            /* Enum preceded by annotations — parse inline rather than falling through */
+            Token enum_name = p->current;
+            consume(p, TOK_IDENT, "Expected enum name after 'enum'");
+            consume(p, TOK_LBRACE, "Expected '{' after enum name");
+            Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, p->current.col);
+            s->enum_decl.annotations = annotations;
+
+            typedef struct EnumMemberNode EMNode;
+            int next_value = 0; EMNode *tail = NULL;
+            while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                Token member_name = p->current;
+                consume(p, TOK_IDENT, "Expected enum member name");
+                int  value = next_value; bool has_explicit = false;
+                if (match(p, TOK_ASSIGN)) {
+                    bool neg = match(p, TOK_MINUS);
+                    Token val_tok = p->current;
+                    consume(p, TOK_INT_LIT, "Expected integer value after '='");
+                    int v = 0;
+                    for (int i = 0; i < val_tok.length; i++)
+                        v = v * 10 + (val_tok.start[i] - '0');
+                    value = neg ? -v : v; has_explicit = true;
+                }
+                next_value = value + 1;
+                if (!match(p, TOK_COMMA)) {
+                    /* Allow trailing comma — peek for closing brace */
+                    if (!check(p, TOK_RBRACE)) {
+                        if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                            ParseError *e = &p->errors[p->error_count++];
+                            snprintf(e->message, sizeof(e->message),
+                                     "Expected ',' or '}' in enum body");
+                            e->line = p->current.line; p->had_error = true;
+                        }
+                    }
+                }
+                EMNode *em = arena_alloc(&p->arena, sizeof(EMNode));
+                em->name = member_name.start; em->length = member_name.length;
+                em->value = value; em->has_explicit_value = has_explicit; em->next = NULL;
+                if (!s->enum_decl.members) s->enum_decl.members = em;
+                else tail->next = em;
+                tail = em; s->enum_decl.member_count++;
+            }
+            consume(p, TOK_RBRACE, "Expected '}' after enum body");
+            return s;
+        }
+
+        /* If we consumed annotations but no class or enum follows, that's an error */
         if (annotations) {
-            consume(p, TOK_CLASS, "Expected 'class' after annotation");
+            consume(p, TOK_CLASS, "Expected 'class' or 'enum' after annotation");
             return NULL;
         }
     }
@@ -1852,13 +2139,13 @@ static Stmt *parse_stmt(Parser *p) {
         return parse_interface_decl(p, line);
     }
 
-    /* Enum declaration */
+    /* Enum declaration (no leading annotations) */
     if (match(p, TOK_ENUM)) {
         Token enum_name = p->current;
         consume(p, TOK_IDENT, "Expected enum name after 'enum'");
         consume(p, TOK_LBRACE, "Expected '{' after enum name");
 
-        Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line);
+        Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, p->current.col);
 
         typedef struct EnumMemberNode EMNode;
         int next_value = 0;
@@ -1923,6 +2210,13 @@ static Stmt *parse_stmt(Parser *p) {
             Type type = parse_type(p);   /* consumes the class name */
             return parse_var_decl(p, type, line);
         }
+        /* Nullable class type: ClassName? varName = ...
+         * Pattern: IDENT ? IDENT (3-token lookahead) */
+        if (ct == TOK_IDENT && p->next.type == TOK_QUESTION &&
+            p->peek.type == TOK_IDENT) {
+            Type type = parse_type(p);   /* consumes ClassName? */
+            return parse_var_decl(p, type, line);
+        }
         /* Generic type variable: ClassName<TypeArg> varName = ...
          * OR generic function call: foo<TypeArg>(args);
          * We consume the type/call, then decide based on what follows. */
@@ -1985,20 +2279,20 @@ static Stmt *parse_stmt(Parser *p) {
                         memcpy(fn_name, base, strlen(base) + 1);
                         Expr *call_e = expr_call(&p->arena,
                                                   fn_name, (int)strlen(fn_name),
-                                                  args, arg_count, line);
+                                                  args, arg_count, line, p->current.col);
                         call_e->call.type_args      = targs;
                         call_e->call.type_arg_count = targ_count;
                         consume(p, TOK_SEMICOLON, "Expected ';' after expression");
-                        return stmt_expr(&p->arena, call_e, line);
+                        return stmt_expr(&p->arena, call_e, line, p->current.col);
                     }
                 }
 
                 /* Fallback: treat as non-generic call with the type's class name */
                 Expr *call_e = expr_call(&p->arena,
                                           saved_name.start, saved_name.length,
-                                          args, arg_count, line);
+                                          args, arg_count, line, p->current.col);
                 consume(p, TOK_SEMICOLON, "Expected ';' after expression");
-                return stmt_expr(&p->arena, call_e, line);
+                return stmt_expr(&p->arena, call_e, line, p->current.col);
             }
 
             /* Neither IDENT nor '(' after type — parse error */
@@ -2035,17 +2329,170 @@ static Stmt *parse_stmt(Parser *p) {
             val = parse_expr(p, BP_NONE);
         }
         consume(p, TOK_SEMICOLON, "Expected ';' after return value");
-        return stmt_return(&p->arena, val, line);
+        return stmt_return(&p->arena, val, line, p->current.col);
     }
 
     if (match(p, TOK_BREAK)) {
         consume(p, TOK_SEMICOLON, "Expected ';' after 'break'");
-        return stmt_break(&p->arena, line);
+        return stmt_break(&p->arena, line, p->current.col);
     }
 
     if (match(p, TOK_CONTINUE)) {
         consume(p, TOK_SEMICOLON, "Expected ';' after 'continue'");
-        return stmt_continue(&p->arena, line);
+        return stmt_continue(&p->arena, line, p->current.col);
+    }
+
+    /* event Name(params); — top-level or class-level event declaration */
+    if (match(p, TOK_EVENT)) {
+        if (!check(p, TOK_IDENT)) {
+            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                ParseError *e = &p->errors[p->error_count++];
+                snprintf(e->message, sizeof(e->message),
+                         "Expected event name after 'event'");
+                e->line = line; p->had_error = true;
+            }
+            return NULL;
+        }
+        const char *ename  = p->current.start;
+        int         elen   = p->current.length;
+        advance(p);
+        consume(p, TOK_LPAREN, "Expected '(' after event name");
+
+        /* Parse parameter list */
+        ParamNode *params = NULL, *ptail = NULL;
+        int param_count = 0;
+        if (!check(p, TOK_RPAREN)) {
+            do {
+                Type ptype = parse_type(p);
+                if (!check(p, TOK_IDENT)) {
+                    if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                        ParseError *e = &p->errors[p->error_count++];
+                        snprintf(e->message, sizeof(e->message),
+                                 "Expected parameter name");
+                        e->line = p->current.line; p->had_error = true;
+                    }
+                    break;
+                }
+                const char *pname = p->current.start;
+                int         plen  = p->current.length;
+                advance(p);
+                ParamNode *pn = arena_alloc(&p->arena, sizeof(ParamNode));
+                pn->name = pname; pn->length = plen;
+                pn->type = ptype; pn->next = NULL;
+                if (!params) { params = pn; ptail = pn; }
+                else         { ptail->next = pn; ptail = pn; }
+                param_count++;
+            } while (match(p, TOK_COMMA));
+        }
+        consume(p, TOK_RPAREN, "Expected ')' after event parameters");
+        consume(p, TOK_SEMICOLON, "Expected ';' after event declaration");
+
+        Stmt *s = arena_alloc(&p->arena, sizeof(Stmt));
+        memset((void *)s, 0, sizeof(Stmt));
+        s->kind = STMT_EVENT_DECL;
+        s->line = line;
+        s->event_decl.name        = ename;
+        s->event_decl.length      = elen;
+        s->event_decl.params      = params;
+        s->event_decl.param_count = param_count;
+        return s;
+    }
+
+    /* throw expr; */
+    if (match(p, TOK_THROW)) {
+        Expr *val = parse_expr(p, BP_NONE);
+        consume(p, TOK_SEMICOLON, "Expected ';' after throw expression");
+        Stmt *s = arena_alloc(&p->arena, sizeof(Stmt));
+        memset((void *)s, 0, sizeof(Stmt));
+        s->kind = STMT_THROW;
+        s->line = line;
+        s->throw_stmt.value = val;
+        return s;
+    }
+
+    /* try { } catch (Type var) { } [catch ...] [finally { }] */
+    if (match(p, TOK_TRY)) {
+        Stmt *try_body = parse_block(p);
+
+        /* Collect catch clauses — max 16 per try block */
+        #define MAX_CATCH_CLAUSES 16
+        const char *catch_types_buf    [MAX_CATCH_CLAUSES];
+        int         catch_type_lens_buf[MAX_CATCH_CLAUSES];
+        const char *catch_vars_buf     [MAX_CATCH_CLAUSES];
+        int         catch_var_lens_buf [MAX_CATCH_CLAUSES];
+        Stmt       *catch_bodies_buf   [MAX_CATCH_CLAUSES];
+        int         catch_count = 0;
+
+        while (check(p, TOK_CATCH)) {
+            advance(p); /* consume 'catch' */
+            consume(p, TOK_LPAREN, "Expected '(' after 'catch'");
+
+            /* Type name */
+            Token tname = p->current;
+            consume(p, TOK_IDENT, "Expected exception type name");
+
+            /* Variable name */
+            Token vname = p->current;
+            consume(p, TOK_IDENT, "Expected variable name after exception type");
+
+            consume(p, TOK_RPAREN, "Expected ')' after catch declaration");
+
+            Stmt *cbody = parse_block(p);
+
+            if (catch_count < MAX_CATCH_CLAUSES) {
+                catch_types_buf    [catch_count] = tname.start;
+                catch_type_lens_buf[catch_count] = tname.length;
+                catch_vars_buf     [catch_count] = vname.start;
+                catch_var_lens_buf [catch_count] = vname.length;
+                catch_bodies_buf   [catch_count] = cbody;
+                catch_count++;
+            }
+        }
+
+        /* Copy to arena */
+        const char **catch_types     = arena_alloc(&p->arena, catch_count * sizeof(char*));
+        int         *catch_type_lens = arena_alloc(&p->arena, catch_count * sizeof(int));
+        const char **catch_vars      = arena_alloc(&p->arena, catch_count * sizeof(char*));
+        int         *catch_var_lens  = arena_alloc(&p->arena, catch_count * sizeof(int));
+        Stmt       **catch_bodies    = arena_alloc(&p->arena, catch_count * sizeof(Stmt*));
+        for (int _ci = 0; _ci < catch_count; _ci++) {
+            catch_types    [_ci] = catch_types_buf    [_ci];
+            catch_type_lens[_ci] = catch_type_lens_buf[_ci];
+            catch_vars     [_ci] = catch_vars_buf     [_ci];
+            catch_var_lens [_ci] = catch_var_lens_buf [_ci];
+            catch_bodies   [_ci] = catch_bodies_buf   [_ci];
+        }
+
+        if (catch_count == 0) {
+            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                ParseError *_pe = &p->errors[p->error_count++];
+                snprintf(_pe->message, sizeof(_pe->message),
+                         "Expected at least one 'catch' clause after 'try'");
+                _pe->line     = p->current.line;
+                p->had_error  = true;
+                p->panic_mode = true;
+            }
+        }
+
+        /* Optional finally */
+        Stmt *finally_body = NULL;
+        if (match(p, TOK_FINALLY)) {
+            finally_body = parse_block(p);
+        }
+
+        Stmt *s = arena_alloc(&p->arena, sizeof(Stmt));
+        memset((void *)s, 0, sizeof(Stmt));
+        s->kind = STMT_TRY;
+        s->line = line;
+        s->try_stmt.body            = try_body;
+        s->try_stmt.finally_body    = finally_body;
+        s->try_stmt.catch_count     = catch_count;
+        s->try_stmt.catch_types     = catch_types;
+        s->try_stmt.catch_type_lens = catch_type_lens;
+        s->try_stmt.catch_vars      = catch_vars;
+        s->try_stmt.catch_var_lens  = catch_var_lens;
+        s->try_stmt.catch_bodies    = catch_bodies;
+        return s;
     }
 
     /* Block */
@@ -2053,12 +2500,84 @@ static Stmt *parse_stmt(Parser *p) {
         return parse_block(p);
     }
 
+    /* Event subscribe / unsubscribe:
+     *   EventName += handlerFn;              -- static handler
+     *   EventName -= handlerFn;
+     *   EventName += this.method;            -- bound delegate
+     *   EventName -= this.method;
+     *   obj.EventName += handlerFn;          -- member event (future)
+     *   obj.EventName -= handlerFn;
+     *
+     * Disambiguate using 3-token lookahead (current/next/peek). */
+    if (check(p, TOK_IDENT)) {
+        /* Could be: EventName += fn  OR  obj.EventName += fn */
+        bool is_sub = false;
+        Expr *object = NULL;
+        const char *event_name = NULL; int event_len = 0;
+        const char *handler_name = NULL; int handler_len = 0;
+
+        /* Simple: IDENT += IDENT_or_THIS_DOT_IDENT ; */
+        if (p->next.type == TOK_PLUS_ASSIGN || p->next.type == TOK_MINUS_ASSIGN) {
+            is_sub = true;
+            event_name = p->current.start; event_len = p->current.length;
+            advance(p); /* consume event name */
+            bool is_subscribe = (p->current.type == TOK_PLUS_ASSIGN);
+            advance(p); /* consume += or -= */
+
+            /* Handler is either:
+             *   plain IDENT           → static/top-level function
+             *   this.IDENT            → bound delegate (this as receiver)
+             *   IDENT.IDENT           → bound delegate (named obj as receiver) */
+            Expr *handler_obj = NULL;
+            if (check(p, TOK_THIS) && p->next.type == TOK_DOT) {
+                /* this.method — build a THIS expr as the receiver */
+                handler_obj = arena_alloc(&p->arena, sizeof(Expr));
+                memset(handler_obj, 0, sizeof(Expr));
+                handler_obj->kind = EXPR_THIS;
+                handler_obj->line = line;
+                advance(p); /* consume 'this' */
+                advance(p); /* consume '.' */
+                handler_name = p->current.start; handler_len = p->current.length;
+                consume(p, TOK_IDENT, "Expected method name after 'this.'");
+            } else if (check(p, TOK_IDENT) && p->next.type == TOK_DOT) {
+                /* obj.method — build an IDENT expr as the receiver */
+                handler_obj = arena_alloc(&p->arena, sizeof(Expr));
+                memset(handler_obj, 0, sizeof(Expr));
+                handler_obj->kind = EXPR_IDENT;
+                handler_obj->line = line;
+                handler_obj->ident.name   = p->current.start;
+                handler_obj->ident.length = p->current.length;
+                advance(p); /* consume obj name */
+                advance(p); /* consume '.' */
+                handler_name = p->current.start; handler_len = p->current.length;
+                consume(p, TOK_IDENT, "Expected method name after '.'");
+            } else {
+                handler_name = p->current.start; handler_len = p->current.length;
+                consume(p, TOK_IDENT, "Expected handler function name after '+=' or '-='");
+            }
+            consume(p, TOK_SEMICOLON, "Expected ';' after event subscription");
+
+            Expr *e = arena_alloc(&p->arena, sizeof(Expr));
+            memset(e, 0, sizeof(Expr));
+            e->kind = is_subscribe ? EXPR_EVENT_SUBSCRIBE : EXPR_EVENT_UNSUBSCRIBE;
+            e->line = line;
+            e->event_sub.object           = handler_obj;  /* NULL = static */
+            e->event_sub.event_name       = event_name;
+            e->event_sub.event_name_len   = event_len;
+            e->event_sub.handler_name     = handler_name;
+            e->event_sub.handler_name_len = handler_len;
+            return stmt_expr(&p->arena, e, line, p->current.col);
+        }
+        (void)is_sub; (void)object; (void)event_name; (void)event_len;
+        (void)handler_name; (void)handler_len;
+    }
+
     /* Expression statement — an expression followed by a semicolon.
      * The most common form is a function call used as a statement. */
     {
         Expr *e = parse_expr(p, BP_NONE);
         consume(p, TOK_SEMICOLON, "Expected ';' after expression");
-        Stmt *s = stmt_expr(&p->arena, e, line);
+        Stmt *s = stmt_expr(&p->arena, e, line, p->current.col);
 
         /* If we're in panic mode after the expression, synchronize */
         if (p->panic_mode) synchronize(p);
@@ -2081,7 +2600,7 @@ parse_foreach_stmt(Parser *p, int line) {
     char  *name_copy = arena_alloc(&p->arena, var_tok.length + 1);
     memcpy(name_copy, var_tok.start, var_tok.length);
     name_copy[var_tok.length] = '\0';
-    return stmt_foreach(&p->arena, elem_type, name_copy, var_tok.length, array, body, line);
+    return stmt_foreach(&p->arena, elem_type, name_copy, var_tok.length, array, body, line, p->current.col);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

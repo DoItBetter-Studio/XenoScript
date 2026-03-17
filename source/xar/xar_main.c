@@ -33,13 +33,22 @@
 #include "parser.h"
 #include "checker.h"
 #include "compiler.h"
+#include "stdlib_xar.h"
 #include "../../source/stdlib/stdlib_declare.h"
 #include "../../source/stdlib/stdlib_sources.h"
+#include "../../source/compiler/compile_pipeline.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+
+/* In bootstrap builds module_strip_stdlib.c is not linked — provide a no-op. */
+#ifdef XAR_BOOTSTRAP
+void module_strip_stdlib(Module *module, const Module *staging) {
+    (void)module; (void)staging;
+}
+#endif
 
 /* ── Utility ──────────────────────────────────────────────────────────── */
 
@@ -97,7 +106,7 @@ static void mark_seen(const char *key) {
 }
 
 static void dir_of(const char *path, char *out, size_t sz) {
-    snprintf(out, sz, "%.*s", (int)(sz - 1), path);
+    snprintf(out, sz, "%s", path);
     char *sep = strrchr(out, '/');
     if (!sep) sep = strrchr(out, '\\');
     if (sep) *(sep+1) = '\0'; else out[0] = '\0';
@@ -194,7 +203,7 @@ static char *resolve_imports(const char *source, const char *base_dir,
             }
         }
 
-        char sub_dir[512]="";
+        char sub_dir[1024]="";
         if (!is_sys) {
             char fpath[1024];
             snprintf(fpath,sizeof(fpath),"%s%s",base_dir,name);
@@ -220,7 +229,8 @@ typedef struct {
 } CompileResult;
 
 static CompileResult compile_xeno(const char *file_path,
-                                   const char *chunk_name) {
+                                   const char *chunk_name,
+                                   const Module *staging) {
     CompileResult res = {0};
     snprintf(res.chunk_name, sizeof(res.chunk_name), "%s", chunk_name);
 
@@ -249,12 +259,12 @@ static CompileResult compile_xeno(const char *file_path,
     Parser   parser;
     Checker *checker = malloc(sizeof(Checker));
     Compiler compiler;
-    Module   module;
+    Module  *module  = (Module*)calloc(1, sizeof(Module));
 
     lexer_init(&lexer, merged);
     parser_init(&parser, &lexer);
     checker_init(checker, &parser.arena);
-    module_init(&module);
+    module_init(module);
 
     Type void_t=type_void(), any_t=type_any();
     checker_declare_host(checker,"print",void_t,&any_t,1);
@@ -262,6 +272,7 @@ static CompileResult compile_xeno(const char *file_path,
     compiler_host_table_init(&host_table);
     compiler_host_table_add_any(&host_table,"print",0,1);
     stdlib_declare_host_fns(checker, &host_table);
+    if (staging) pipeline_declare_staging(checker, staging);
 
     Program program = parser_parse(&parser);
     if (parser.had_error) {
@@ -276,14 +287,17 @@ static CompileResult compile_xeno(const char *file_path,
         goto cleanup;
     }
 
-    if (!compiler_compile(&compiler, &program, &module, &host_table)) {
+    if (!compiler_compile(&compiler, &program, module, &host_table)) {
         fprintf(stderr,"xar: compile errors in '%s':\n", file_path);
         compiler_print_errors(&compiler);
         goto cleanup;
     }
 
+    /* Strip stdlib so the XAR only contains user-defined chunks/classes. */
+    if (staging && staging->class_count > 0) module_strip_stdlib(module, staging);
+
     {
-        XbcResult xr = xbc_write_mem(&module, &res.xbc_data, &res.xbc_size);
+        XbcResult xr = xbc_write_mem(module, &res.xbc_data, &res.xbc_size);
         if (xr != XBC_OK) {
             fprintf(stderr,"xar: bytecode serialization failed: %s\n",
                     xbc_result_str(xr));
@@ -293,7 +307,7 @@ static CompileResult compile_xeno(const char *file_path,
     }
 
 cleanup:
-    module_free(&module);
+    module_free(module); free(module);
     parser_free(&parser);
     free(checker);
     free(merged);
@@ -400,7 +414,35 @@ static int cmd_pack(int argc, char **argv) {
         fprintf(stderr, "xar pack: no .xeno files found in '%s'\n", dir_buf);
         return 1;
     }
+
+    /* Sort files alphabetically so XAR chunk order is deterministic and
+     * matches the order the compiler sees when it merges source files.
+     * Without this, readdir() returns filesystem order which varies by OS. */
+    for (int i = 0; i < g_file_count - 1; i++)
+        for (int j = i + 1; j < g_file_count; j++)
+            if (strcmp(g_files[i].rel, g_files[j].rel) > 0) {
+                FileEntry tmp = g_files[i];
+                g_files[i] = g_files[j];
+                g_files[j] = tmp;
+            }
+
     printf("xar: packing %d file(s) from '%s'\n", g_file_count, dir_buf);
+
+    /* Build a staging module from the embedded stdlib so compile_xeno can strip it. */
+    Module *staging = (Module*)calloc(1, sizeof(Module)); module_init(staging);
+    for (int i = 0; i < STDLIB_XAR_TOTAL_COUNT; i++) {
+        size_t sz = (size_t)(STDLIB_XAR_TABLE[i].end - STDLIB_XAR_TABLE[i].start);
+        XarArchive sa; memset(&sa, 0, sizeof(sa));
+        if (xar_read_mem(&sa, STDLIB_XAR_TABLE[i].start, sz) == XAR_OK) {
+            for (int j = 0; j < sa.chunk_count; j++) {
+                Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+                if (xbc_read_mem(cm, sa.chunks[j].data, sa.chunks[j].size) == XBC_OK)
+                    module_merge(staging, cm);
+                module_free(cm); free(cm);
+            }
+            xar_archive_free(&sa);
+        }
+    }
 
     /* Compile each file */
     XarChunk    chunks[MAX_FILES];
@@ -418,7 +460,7 @@ static int cmd_pack(int argc, char **argv) {
         strip_xeno_ext(chunk_name);
 
         printf("  compiling '%s' -> chunk '%s'\n", g_files[i].rel, chunk_name);
-        CompileResult r = compile_xeno(g_files[i].path, chunk_name);
+        CompileResult r = compile_xeno(g_files[i].path, chunk_name, staging);
         if (!r.ok) { any_error = true; continue; }
 
         chunks[n_chunks].data = r.xbc_data;
@@ -427,28 +469,30 @@ static int cmd_pack(int argc, char **argv) {
         n_chunks++;
 
         /* Harvest exports from the compiled module (read back from xbc) */
-        Module mod; module_init(&mod);
-        if (xbc_read_mem(&mod, r.xbc_data, r.xbc_size) == XBC_OK) {
-            for (int j = 0; j < mod.count && manifest.export_count < XAR_MAX_EXPORTS; j++) {
+        Module *mod = (Module*)calloc(1, sizeof(Module)); module_init(mod);
+        if (xbc_read_mem(mod, r.xbc_data, r.xbc_size) == XBC_OK) {
+            for (int j = 0; j < mod->count && manifest.export_count < XAR_MAX_EXPORTS; j++) {
                 snprintf(manifest.exports[manifest.export_count++],
-                         XAR_MAX_NAME, "%s", mod.names[j]);
+                         XAR_MAX_NAME, "%s", mod->names[j]);
             }
-            for (int j = 0; j < mod.class_count && manifest.export_count < XAR_MAX_EXPORTS; j++) {
+            for (int j = 0; j < mod->class_count && manifest.export_count < XAR_MAX_EXPORTS; j++) {
                 snprintf(manifest.exports[manifest.export_count++],
-                         XAR_MAX_NAME, "%s", mod.classes[j].name);
+                         XAR_MAX_NAME, "%s", mod->classes[j].name);
             }
-            module_free(&mod);
+            module_free(mod); free(mod);
         }
     }
 
     if (any_error) {
         fprintf(stderr, "xar: errors during compilation, aborting\n");
         for (int i = 0; i < n_chunks; i++) free(chunks[i].data);
+        module_free(staging); free(staging);
         return 1;
     }
 
     XarResult xr = xar_write(out_path, &manifest, chunks, n_chunks);
     for (int i = 0; i < n_chunks; i++) free(chunks[i].data);
+    module_free(staging); free(staging);
 
     if (xr != XAR_OK) {
         fprintf(stderr, "xar: failed to write '%s': %s\n",

@@ -30,8 +30,12 @@
  * ───────────────────────────────────────────────────────────────────────────*/
 #define MODULE_MAX_FUNCTIONS 256
 #define MODULE_MAX_CLASSES   64
+#define MODULE_MAX_EVENTS    32
 
-/* ── Mod metadata — populated from @Mod annotation, written to .xbc ────── */
+/* ── Mod metadata — derived from @Mod AttributeInstance on the entry class.
+ * Kept as a convenience struct so xar_main and xenovm_main don't need to
+ * walk ClassDef.attributes themselves.  Populated by
+ * module_extract_mod_metadata() after compilation. ─────────────────────── */
 #define MOD_STRING_MAX 128
 
 typedef struct {
@@ -53,9 +57,18 @@ typedef struct {
     ClassDef    classes[MODULE_MAX_CLASSES];
     int         class_count;
 
+    /* Top-level event definitions */
+    EventDef    events[MODULE_MAX_EVENTS];
+    int         event_count;
+
     /* Static initializer chunk index — runs before entry point.
      * -1 means no static initializers. Set by compiler_compile(). */
     int         sinit_index;
+
+    /* True if this module was compiled against stdlib and had stdlib class defs
+     * stripped. At VM load time, stdlib must be pre-seeded before this module
+     * is merged so class indices match compile-time layout. */
+    bool        uses_stdlib;
 
     /* Mod metadata — only populated if @Mod annotation was present */
     ModMetadata metadata;
@@ -68,6 +81,12 @@ int    module_find_class(const Module *m, const char *name);    /* returns index
 void   module_disassemble(const Module *m);   /* disassemble all chunks */
 int    module_add_chunk(Module *m);           /* add and init a new chunk slot */
 
+/* Scan ClassDef.attributes for an @Mod instance and populate module->metadata.
+ * Must be called after compilation and before writing the XBC/XAR manifest.
+ * Reads arg order from the Mod class constructor in staging (if available),
+ * falling back to positional order name/version/author/description. */
+void   module_extract_mod_metadata(Module *module, const Module *staging);
+
 /*
  * Merge all chunks and class definitions from `src` into `dst`.
  * Used to graft stdlib .xar content into a user module before execution.
@@ -75,6 +94,22 @@ int    module_add_chunk(Module *m);           /* add and init a new chunk slot *
  * Returns true on success, false on allocation failure.
  */
 bool   module_merge(Module *dst, const Module *src);
+
+/*
+ * module_strip — remove named chunks/classes from `module`, compact the
+ * arrays, and rewrite all fn_idx / class_idx operands in surviving bytecode.
+ * "__sinit__" is always preserved. At VM load time, module_merge re-adds
+ * stdlib content and remaps operands to the final layout.
+ */
+void   module_strip(Module *module,
+                    const char **strip_names,   int strip_fn_count,
+                    const char **strip_classes, int strip_cl_count);
+
+/* module_strip_stdlib — strip all embedded stdlib chunks/classes from module,
+ * set module->uses_stdlib, and remap remaining operands.
+ * `staging` provides the non-generic stdlib chunk names (core/math primitives).
+ * Requires stdlib_xar.h to be included before compiler.h. */
+void   module_strip_stdlib(Module *module, const Module *staging);
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -166,6 +201,15 @@ typedef struct {
     /* Host function table — set by compiler_compile(), used in EXPR_CALL */
     const CompilerHostTable *host_table;
 
+    /* Staging module — stdlib/dep ClassDefs for fallback class lookup.
+     * Used by module_find_class_any() when the class is a stdlib type
+     * not yet compiled into c->module (e.g. Exception). May be NULL. */
+    const Module *staging;
+
+    /* Program pointer — kept for annotation constant-folding (static field
+     * initializer lookup). Set at the start of compiler_compile(). */
+    const Program *program;
+
     /* Class compilation context.
      * current_class_idx is the index into module->classes[] of the class
      * currently being compiled. -1 when not inside a class.
@@ -193,6 +237,12 @@ typedef struct {
  */
 bool compiler_compile(Compiler *c, const Program *program, Module *module,
                       const CompilerHostTable *host_table);
+
+/* Variant that also provides a staging module for stdlib class fallback lookup.
+ * Pass NULL for staging to behave identically to compiler_compile. */
+bool compiler_compile_staged(Compiler *c, const Program *program, Module *module,
+                              const CompilerHostTable *host_table,
+                              const Module *staging);
 
 void compiler_print_errors(const Compiler *c);
 

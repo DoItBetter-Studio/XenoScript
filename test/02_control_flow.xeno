@@ -1,0 +1,35 @@
+// Tests: if/else, for, while, foreach, break, continue, match
+@Mod("control_flow", "1.0.0", "Test")
+class ControlFlow {
+    public:
+        ControlFlow() {
+            // if/else
+            int x = 10;
+            if (x > 5) { print("big"); } else { print("small"); }
+
+            // for + break
+            for (int i = 0; i < 5; i++) {
+                if (i == 3) { break; }
+                print(i);
+            }
+
+            // while + continue
+            int n = 0;
+            while (n < 5) {
+                n++;
+                if (n == 3) { continue; }
+                print(n);
+            }
+
+            // foreach over array literal
+            int[] arr = new int[] { 10, 20, 30 };
+            foreach (int v in arr) { print(v); }
+
+            // match on int
+            match (x) {
+                case 10: print("ten"); break;
+                case 20: print("twenty"); break;
+                default: print("other"); break;
+            }
+        }
+}

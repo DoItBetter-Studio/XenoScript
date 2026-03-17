@@ -1,0 +1,41 @@
+// Tests: class fields, methods, constructors, single inheritance, super
+class Animal {
+    string name;
+    Animal(string name) {
+        this.name = name;
+    }
+    function speak(): void {
+        print($"{name} says ...");
+    }
+    function getName(): string {
+        return name;
+    }
+}
+
+class Dog : Animal {
+    string breed;
+    Dog(string name, string breed) {
+        super(name);
+        this.breed = breed;
+    }
+    function speak(): void {
+        print($"Dog says woof!");
+    }
+    function getBreed(): string {
+        return breed;
+    }
+}
+
+@Mod("classes_inheritance", "1.0.0", "Test")
+class ClassesInheritance {
+    public:
+        ClassesInheritance() {
+            Animal a = new Animal("Cat");
+            a.speak();
+            print(a.getName());
+
+            Dog d = new Dog("Rex", "Labrador");
+            d.speak();
+            print(d.getBreed());
+        }
+}

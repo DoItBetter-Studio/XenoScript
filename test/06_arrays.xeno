@@ -1,0 +1,25 @@
+// Tests: array creation, indexing, length, foreach, array of objects
+@Mod("arrays", "1.0.0", "Test")
+class Arrays {
+    public:
+        Arrays() {
+            // fixed size
+            int[] nums = new int[5];
+            nums[0] = 10; nums[1] = 20; nums[2] = 30;
+            print(nums[0]);
+            print(nums[2]);
+            print(nums.length);
+
+            // literal init
+            string[] words = new string[] { "alpha", "beta", "gamma" };
+            foreach (string w in words) { print(w); }
+
+            // array of floats
+            float[] fs = new float[] { 1.1, 2.2, 3.3 };
+            print(fs[1]);
+
+            // ushort array
+            ushort[] shorts = new ushort[] { 100, 200, 300 };
+            print(shorts[2]);
+        }
+}

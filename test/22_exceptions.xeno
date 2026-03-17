@@ -1,0 +1,92 @@
+// Test 22: Exceptions — try/catch/throw, multi-clause, inheritance
+
+class NetworkError : Exception {
+    public:
+        int code;
+
+        NetworkError(string msg, int c) {
+            super(msg);
+            code = c;
+        }
+}
+
+class ValidationError : Exception {
+    public:
+        ValidationError(string msg) {
+            super(msg);
+        }
+}
+
+@Mod("Exceptions", "1.0.0", "Test")
+class Exceptions {
+    static function throw_one(int which): void {
+        if (which == 1) {
+            throw new NetworkError("conn refused", 503);
+        }
+        if (which == 2) {
+            throw new ValidationError("bad input");
+        }
+        throw new Exception("generic");
+    }
+
+    public:
+        Exceptions() {
+            // Basic throw and catch
+            try {
+                throw new Exception("oops");
+            } catch (Exception e) {
+                print("caught: " + e.message);
+            }
+
+            // Custom exception class
+            try {
+                throw new NetworkError("timeout", 408);
+            } catch (NetworkError e) {
+                print("network error " + e.code + ": " + e.message);
+            }
+
+            // Multi-clause catch
+            int i = 1;
+            while (i <= 3) {
+                try {
+                    Exceptions.throw_one(i);
+                } catch (NetworkError e) {
+                    print("net: " + e.message);
+                } catch (ValidationError e) {
+                    print("val: " + e.message);
+                } catch (Exception e) {
+                    print("ex: " + e.message);
+                }
+                i = i + 1;
+            }
+
+            // Exception does not propagate past handler
+            try {
+                throw new Exception("contained");
+            } catch (Exception e) {
+                // swallow
+            }
+            print("after try");
+
+            // Nested try/catch with rethrow
+            try {
+                try {
+                    throw new Exception("inner");
+                } catch (Exception e) {
+                    print("inner caught: " + e.message);
+                    throw new Exception("rethrown");
+                }
+            } catch (Exception e) {
+                print("outer caught: " + e.message);
+            }
+
+            // Finally block
+            try {
+                throw new Exception("boom");
+            } catch (Exception e) {
+                print("caught in finally test");
+            } finally {
+                print("finally ran");
+            }
+        }
+}

@@ -1,0 +1,73 @@
+import <math>;
+
+enum Rarity { Common = 0, Rare = 1, Legendary = 2 }
+
+interface IItem {
+    function getName(): string;
+    function getValue(): int;
+}
+
+class Item : IItem {
+    string itemName;
+    int    baseValue;
+    int    rarityVal;
+
+    Item(string name, int value, int r) {
+        this.itemName  = name;
+        this.baseValue = value;
+        this.rarityVal = r;
+    }
+
+    function getName(): string { return itemName; }
+    function getValue(): int {
+        if (rarityVal == 2) { return baseValue * 10; }
+        if (rarityVal == 1) { return baseValue * 3; }
+        return baseValue;
+    }
+    function getRarityVal(): int { return rarityVal; }
+}
+
+class Inventory {
+    static int totalItems = 0;
+    static final int MAX_ITEMS = 50;
+
+    static function register(): void {
+        Inventory.totalItems = Inventory.totalItems + 1;
+    }
+    static function getCount(): int { return Inventory.totalItems; }
+}
+
+@Mod("integration", "1.0.0", "Test", "Full integration test")
+class Integration {
+    Rarity currentRarity;
+    public:
+        Integration() {
+            Item sword   = new Item("Sword",  100, 0);
+            Item shield  = new Item("Shield", 200, 1);
+            Item amulet  = new Item("Amulet", 500, 2);
+
+            Inventory.register();
+            Inventory.register();
+            Inventory.register();
+
+            print(sword.getName());
+            print(sword.getValue());
+            print(shield.getValue());
+            print(amulet.getValue());
+            print(Inventory.getCount());
+            print(Inventory.MAX_ITEMS);
+
+            IItem item = new Item("Dagger", 50, 1);
+            print(item.getName());
+            print(item.getValue());
+
+            currentRarity = Rarity.Legendary;
+            match (currentRarity) {
+                case Rarity.Common:    print("common");    break;
+                case Rarity.Rare:      print("rare");      break;
+                case Rarity.Legendary: print("legendary"); break;
+            }
+
+            print(Float.sqrt(Int.toFloat(amulet.getValue())));
+        }
+}

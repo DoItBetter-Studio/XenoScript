@@ -1,0 +1,16 @@
+// Tests: math stdlib — sqrt, pow, trig, floor/ceil via math module
+import <math>;
+
+@Mod("stdlib_math", "1.0.0", "Test")
+class StdlibMath {
+    public:
+        StdlibMath() {
+            print(Float.sqrt(4.0));
+            print(Float.floor(3.7));
+            print(Float.ceil(3.2));
+            print(Int.abs(-10));
+            print(Int.min(5, 3));
+            print(Int.max(5, 3));
+            print(Int.clamp(15, 0, 10));
+        }
+}

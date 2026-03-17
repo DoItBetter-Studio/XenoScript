@@ -1,0 +1,23 @@
+import <collections>;
+
+@Mod("collection_stack_queue", "1.0.0", "Test")
+class CollectionsStackQueue {
+    public:
+        CollectionsStackQueue() {
+            Stack<int> stk = new Stack<int>();
+            stk.push(100);
+            stk.push(200);
+            stk.push(300);
+            print(stk.peek());
+            print(stk.pop());
+            print(stk.count());
+
+            Queue<string> q = new Queue<string>();
+            q.enqueue("first");
+            q.enqueue("second");
+            q.enqueue("third");
+            print(q.peek());
+            print(q.dequeue());
+            print(q.count());
+        }
+}

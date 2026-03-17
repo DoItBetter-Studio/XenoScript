@@ -11,6 +11,7 @@
 
 #include "lexer.h"
 
+#include <stdlib.h>  /* atoi             */
 #include <string.h>  /* strncmp         */
 #include <stdint.h>  /* uint32_t        */
 #include <stdbool.h> /* bool, true, false */
@@ -31,7 +32,14 @@ static bool is_at_end(const Lexer *lexer)
 /* Consume the current character and advance the pointer. Returns the char. */
 static char advance(Lexer *lexer)
 {
-    return *lexer->current++;
+    char c = *lexer->current++;
+    if (c == '\n') {
+        lexer->line++;
+        lexer->col = 1;
+    } else {
+        lexer->col++;
+    }
+    return c;
 }
 
 /* Look at the current character WITHOUT consuming it. */
@@ -72,6 +80,7 @@ static Token make_token(const Lexer *lexer, TokenType type)
     t.start = lexer->start;
     t.length = (int)(lexer->current - lexer->start);
     t.line = lexer->line;
+    t.col  = lexer->token_start_col;
     return t;
 }
 
@@ -85,6 +94,7 @@ static Token error_token(const Lexer *lexer, const char *message)
     t.start = message;
     t.length = (int)strlen(message);
     t.line = lexer->line;
+    t.col  = lexer->token_start_col;
     return t;
 }
 
@@ -104,10 +114,7 @@ static void skip_whitespace_and_comments(Lexer *lexer)
             break;
 
         case '\n':
-            /* Increment line BEFORE consuming so the newline itself
-             * is attributed to the line it ends, not the next one. */
-            lexer->line++;
-            advance(lexer);
+            advance(lexer); /* advance() handles line++/col reset */
             break;
 
         case '/':
@@ -115,6 +122,17 @@ static void skip_whitespace_and_comments(Lexer *lexer)
              * We check peek_next to avoid consuming a lone '/'. */
             if (peek_next(lexer) == '/')
             {
+                /* Check for @xeno:line N directive — resets the line counter.
+                 * Used by the compiler pipeline to correct line numbers after
+                 * prepending stdlib source to user source. */
+                const char *p = lexer->current + 2; /* skip both '/' chars */
+                while (*p == ' ' || *p == '\t') p++;
+                if (strncmp(p, "@xeno:line ", 11) == 0) {
+                    int new_line = atoi(p + 11);
+                    /* Set to new_line - 1 because the newline at end of this
+                     * comment will be consumed and increment line by 1. */
+                    if (new_line > 0) { lexer->line = new_line - 1; lexer->col = 1; }
+                }
                 /* Consume everything until newline or EOF.
                  * We DON'T consume the newline itself — the outer loop
                  * will catch it on the next iteration and increment the
@@ -133,8 +151,7 @@ static void skip_whitespace_and_comments(Lexer *lexer)
                 {
                     if (peek(lexer) == '\n')
                     {
-                        lexer->line++;
-                        advance(lexer);
+                        advance(lexer); /* advance() handles line++/col reset */
                     }
                     else if (peek(lexer) == '*' && peek_next(lexer) == '/')
                     {
@@ -244,9 +261,7 @@ static Token scan_interp_text(Lexer *lexer)
         }
         else
         {
-            if (ch == '\n')
-                lexer->line++;
-            advance(lexer);
+            advance(lexer); /* advance() handles line++/col reset */
             if (interp_text_buf_pos < INTERP_TEXT_BUF_SIZE - 1)
                 interp_text_buf[interp_text_buf_pos++] = ch;
         }
@@ -257,6 +272,7 @@ static Token scan_interp_text(Lexer *lexer)
     t.start = interp_text_buf + buf_start;
     t.length = interp_text_buf_pos - buf_start;
     t.line = lexer->line;
+    t.col  = lexer->token_start_col;
     return t;
 }
 
@@ -268,9 +284,7 @@ static Token scan_string(Lexer *lexer)
 {
     while (peek(lexer) != '"' && !is_at_end(lexer))
     {
-        if (peek(lexer) == '\n')
-            lexer->line++;
-        advance(lexer);
+        advance(lexer); /* advance() handles line++/col reset */
     }
 
     if (is_at_end(lexer))
@@ -430,6 +444,16 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
         return make_token(lexer, TOK_TRUE);
     if (len == 5 && strncmp(word, "false", 5) == 0)
         return make_token(lexer, TOK_FALSE);
+    if (len == 4 && strncmp(word, "null", 4) == 0)
+        return make_token(lexer, TOK_NULL);
+    if (len == 3 && strncmp(word, "try", 3) == 0)
+        return make_token(lexer, TOK_TRY);
+    if (len == 5 && strncmp(word, "catch", 5) == 0)
+        return make_token(lexer, TOK_CATCH);
+    if (len == 5 && strncmp(word, "throw", 5) == 0)
+        return make_token(lexer, TOK_THROW);
+    if (len == 7 && strncmp(word, "finally", 7) == 0)
+        return make_token(lexer, TOK_FINALLY);
 
     /* Control flow */
     if (len == 2 && strncmp(word, "if", 2) == 0)
@@ -486,6 +510,14 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
         return make_token(lexer, TOK_PROTECTED);
     if (len == 6 && strncmp(word, "static", 6) == 0)
         return make_token(lexer, TOK_STATIC);
+    if (len == 5 && strncmp(word, "final", 5) == 0)
+        return make_token(lexer, TOK_FINAL);
+    if (len == 7 && strncmp(word, "virtual", 7) == 0)
+        return make_token(lexer, TOK_VIRTUAL);
+    if (len == 8 && strncmp(word, "override", 8) == 0)
+        return make_token(lexer, TOK_OVERRIDE);
+    if (len == 5 && strncmp(word, "event", 5) == 0)
+        return make_token(lexer, TOK_EVENT);
     if (len == 9 && strncmp(word, "interface", 9) == 0)
         return make_token(lexer, TOK_INTERFACE);
     if (len == 5 && strncmp(word, "where", 5) == 0)
@@ -506,6 +538,8 @@ void lexer_init(Lexer *lexer, const char *source)
     lexer->start = source;
     lexer->current = source;
     lexer->line = 1;
+    lexer->col = 1;
+    lexer->token_start_col = 1;
     lexer->interp_depth = 0;
     lexer->brace_depth = 0;
     lexer->in_expr = false;
@@ -525,6 +559,7 @@ Token lexer_next_token(Lexer *lexer)
     if (lexer->interp_depth > 0 && !lexer->in_expr)
     {
         lexer->start = lexer->current;
+        lexer->token_start_col = lexer->col;
 
         if (is_at_end(lexer))
             return error_token(lexer, "Unterminated interpolated string.");
@@ -564,6 +599,7 @@ Token lexer_next_token(Lexer *lexer)
     /* Mark the start of this token AFTER skipping whitespace.
      * This is why start and current are separate fields. */
     lexer->start = lexer->current;
+    lexer->token_start_col = lexer->col;
 
     if (is_at_end(lexer))
         return make_token(lexer, TOK_EOF);
@@ -617,9 +653,13 @@ Token lexer_next_token(Lexer *lexer)
 
     /* Arithmetic — always single character at this stage */
     case '+':
-        return make_token(lexer, match(lexer, '+') ? TOK_PLUS_PLUS : TOK_PLUS);
+        if (match(lexer, '+')) return make_token(lexer, TOK_PLUS_PLUS);
+        if (match(lexer, '=')) return make_token(lexer, TOK_PLUS_ASSIGN);
+        return make_token(lexer, TOK_PLUS);
     case '-':
-        return make_token(lexer, match(lexer, '-') ? TOK_MINUS_MINUS : TOK_MINUS);
+        if (match(lexer, '-')) return make_token(lexer, TOK_MINUS_MINUS);
+        if (match(lexer, '=')) return make_token(lexer, TOK_MINUS_ASSIGN);
+        return make_token(lexer, TOK_MINUS);
     case '*':
         return make_token(lexer, TOK_STAR);
     case '/':
@@ -647,6 +687,12 @@ Token lexer_next_token(Lexer *lexer)
         if (match(lexer, '|'))
             return make_token(lexer, TOK_OR);
         return error_token(lexer, "Expected '||'. Single '|' not supported.");
+    case '?':
+        if (match(lexer, '?'))
+            return make_token(lexer, TOK_QUESTION_QUESTION);  /* ?? */
+        if (match(lexer, '.'))
+            return make_token(lexer, TOK_QUESTION_DOT);       /* ?. */
+        return make_token(lexer, TOK_QUESTION);               /* ?  */
 
     /* String literals — plain and interpolated */
     case '$':
@@ -687,6 +733,18 @@ const char *token_type_name(TokenType type)
         return "true";
     case TOK_FALSE:
         return "false";
+    case TOK_NULL:
+        return "null";
+    case TOK_TRY:     return "try";
+    case TOK_CATCH:   return "catch";
+    case TOK_THROW:   return "throw";
+    case TOK_FINALLY: return "finally";
+    case TOK_QUESTION:
+        return "?";
+    case TOK_QUESTION_DOT:
+        return "?.";
+    case TOK_QUESTION_QUESTION:
+        return "??";
     case TOK_INTERP_BEGIN:
         return "$\"";
     case TOK_INTERP_TEXT:
@@ -749,8 +807,11 @@ const char *token_type_name(TokenType type)
         return "private";
     case TOK_PROTECTED:
         return "protected";
-    case TOK_STATIC:
-        return "static";
+    case TOK_STATIC:  return "static";
+    case TOK_FINAL:   return "final";
+    case TOK_VIRTUAL:  return "virtual";
+    case TOK_OVERRIDE: return "override";
+    case TOK_EVENT:    return "event";
     case TOK_INTERFACE:
         return "interface";
     case TOK_WHERE:
@@ -763,6 +824,10 @@ const char *token_type_name(TokenType type)
         return "++";
     case TOK_MINUS_MINUS:
         return "--";
+    case TOK_PLUS_ASSIGN:
+        return "+=";
+    case TOK_MINUS_ASSIGN:
+        return "-=";
     case TOK_STAR:
         return "*";
     case TOK_SLASH:

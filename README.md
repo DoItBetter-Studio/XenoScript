@@ -10,15 +10,23 @@ XenoScript is being developed for use in a custom game engine and is designed fr
 
 ## ✨ Design Goals
 
-- Strong static typing
-- Deterministic bytecode execution
-- Explicit module linking
-- Controlled host capability exposure
-- No implicit system access
-- Predictable runtime behavior
-
 XenoScript is not intended to be a general-purpose replacement for existing languages.  
-It is purpose-built for embedding.
+It is a focused, domain-specific language engineered for one purpose: **safe, deterministic, and accessible modding**.
+
+Only the virtual machine is embedded into the host application.  
+Scripts, packages, and projects remain fully external — loaded from the filesystem, sandboxed, and isolated from the host unless explicitly granted capabilities. This separation is intentional: it ensures that modding remains open, transparent, and under the control of both the developer and the community, not hidden inside the engine or locked behind proprietary systems.
+
+XenoScript's design emphasizes:
+
+- **Strong static typing** for clarity and safety  
+- **Deterministic bytecode execution** for predictable behavior  
+- **Explicit module linking** to avoid hidden dependencies  
+- **Controlled capability exposure** so the host decides what scripts can do  
+- **No implicit system access** — nothing is allowed unless explicitly granted  
+- **Predictable runtime behavior** through a minimal, well-defined VM  
+
+XenoScript is built for environments where trust, safety, and determinism matter more than raw power.  
+It is a language for creators, modders, and developers who want expressive scripting without sacrificing control or security.
 
 ---
 
@@ -43,53 +51,114 @@ This makes XenoScript ideal for secure modding environments.
 
 ## 🧠 Language Features
 
-- Classes, interfaces, enums
-- Generics (`List<T>`, `Dictionary<K, V>`)
-- Access modifiers (`public`, `private`, `protected`)
-- Static classes and static functions
-- Strongly-typed casting (`as` throws on failure)
-- Type checks (`is`, `typeof`)
-- Match expressions
-- Structured control flow (`if`, `for`, `foreach`)
-- String interpolation
-- Module imports
-- Bytecode compilation with linker stage
+- Classes, single inheritance, interfaces, enums  
+- **Erased generics** (`List<T>`, `Dictionary<K, V>`, user-defined generic classes) — distributed as compiled `.xar` binaries, no source shipping required  
+- Access modifiers (`public`, `private`, `protected`)  
+- Virtual dispatch (`virtual` / `override`)  
+- Nullable types (`string?`, `int?`, `??`, `!`, `?.`)  
+- Exception handling (`try` / `catch` / `finally` / `throw`)  
+- Events with static and **bound delegate** handlers (`EventName += this.method`)  
+- `foreach` over arrays and any `IEnumerable<T>` implementation  
+- Static fields and methods  
+- `final` fields (compile-time immutability)  
+- User-defined annotations with `@AttributeUsage` enforcement  
+- Strongly-typed casting (`as` throws on failure)  
+- Type checks (`is`, `typeof`)  
+- Structured control flow (`if`, `for`, `foreach`, `while`)  
+- String interpolation  
+- Module imports and `.xar` package archives  
+- Project model (`xeno.project`) with dependency resolution  
+- Bytecode compilation (XBC v16) with linker stage  
 
 ---
 
 ## 📦 Imports & Modules
 
 ```xeno
-import <System>
-import "local.xeno"
+import <core>
+import <collections>
+import "local_file.xeno"
 ```
 
-- `<System>` imports standard library modules
-- `"local.xeno"` imports project-local files (resolved from project root)
-- Circular imports are not allowed
+- `<name>` imports a package from the global package cache
+(core stdlib, game-extended stdlib, or any resolved dependency `.xar`)  
+- `"file.xeno"` imports project-local files (resolved from project root)  
+- Circular imports are not allowed  
 
-Standard libraries are compiled to bytecode and linked during build.
+The standard library — including both the core language packages and the game's extended API — is embedded into the compiler, VM, packer, and LSP.
+External packages are resolved from `.xar` archives at build time and loaded into the global package cache.
+
+### Standard Library Packages
+
+| Package | Contents |
+|--------|----------|
+| `<core>` | `Exception`, `Attribute`, `IEnumerable<T>`, `IEnumerator<T>`, `string`, `int`, `float`, `bool` helpers |
+| `<math>` | `Math` static class |
+| `<collections>` | `List<T>`, `Dictionary<K,V>`, `Stack<T>`, `Queue<T>` |
 
 ---
 
-## 🛠️ Building
+## 🛠️ Toolchain
 
-Using Make:
+### `xenoc` — Compiler
+
+Compile a single file:
+```
+./bin/xenoc source.xeno -o output.xbc
+```
+
+Dump bytecode disassembly:
+```
+./bin/xenoc source.xeno --dump
+```
+
+Build a project:
+```
+./bin/xenoc build [project-dir] -o output.xar
+```
+
+### `xenovm` — Virtual Machine
+
+Run compiled bytecode:
+```
+./bin/xenovm output.xbc
+```
+
+Run a `.xar` package:
+```
+./bin/xenovm output.xar
+```
+
+### `xar` — Package Tool
+
+Pack a directory into a `.xar` archive:
+```
+./bin/xar pack src/ -o output.xar -n name -v 1.0.0
+```
+
+### `xenolsp` — Language Server
+
+Run the LSP server for IDE integration:
+```
+./bin/xenolsp
+```
+
+### Building from Source
 
 ```
 make
 ```
 
-Compile a script:
+### Rebuilding stdlib from Source
 
 ```
-./bin/xenoc examples/example.xeno
+make stdlib
 ```
 
-Dump bytecode:
+### Running the test suite
 
 ```
-./bin/xenoc examples/example.xeno --dump
+make xeno_tests
 ```
 
 ---
@@ -98,11 +167,90 @@ Dump bytecode:
 
 ```
 source/             Compiler and VM source
+  core/             Lexer, parser, checker, bytecode
+  compiler/         xenoc compiler, XBC serialization, XAR packer
+  vm/               xenovm virtual machine
+  stdlib/           Core stdlib bootstrap sources (embedded)
+  tools/            Test runner and utilities
+  lsp/              xenolsp language server
 includes/           Shared headers
-examples/           Example XenoScript files
+stdlib/             Example game-extended stdlib sources
+  core/             Exception, Attribute, IEnumerable, primitives
+  math/             Math
+  collections/      List, Dictionary, Stack, Queue
+build/              Intermediate build files (XARs, object files)
 bin/                Compiled binaries
-build/              Intermediate build files (ignored)
-xenoscript-vscode/  VS Code extension
+test/               Language test suite (27 tests)
+xenoscript.vscode-xenoscript/  VS Code extension
+```
+
+---
+
+## 🧩 Project Model
+
+A `xeno.project` file defines a project:
+
+```toml
+[project]
+name = "my_mod"
+version = "1.0.0"
+description = "My mod"
+
+[dependencies]
+utilities = "v3.5.1"
+playerInteractions = "v1.2.0"
+```
+
+The compiler resolves dependencies from `.xar` archives and links them at build time.
+
+XenoScript uses a layered standard library model:
+
+- **Core standard library** — foundational language features (`core`, `math`, `collections`).  
+  This layer is shared across games and embedded into the compiler, VM, packer, and LSP.
+
+- **Game-extended standard library** — additional `.xeno` files written by the game developer.  
+  Each game ships its own extended stdlib as a `.xar` archive, defining engine APIs, events,
+  host-facing types, and helpers. This extended stdlib is treated as part of the standard
+  library for that game and is embedded into the compiler, VM, packer, LSP, and the game
+  itself. Each game ships its own XenoScript environment.
+
+- **External mod packages** — community or project-local `.xar` files.  
+  These live outside the game (for example, in a `/mods` directory) and are resolved from
+  the project's dependency list. Mods are never embedded into the game; they remain external.
+
+Every mod must define an entrypoint class annotated with `@Mod`.  
+The current XenoScript toolchain (compiler, VM, and packer) is configured to look for
+this specific annotation name when identifying a mod's entrypoint.
+
+The `@Mod` attribute itself is defined in the game-extended standard library as a normal
+XenoScript class derived from `Attribute`. The attribute supports both positional and
+named arguments, with defaults provided by the game's implementation. Developers may
+extend or modify the fields of this attribute as needed. While the structure of the
+attribute is customizable, the annotation name (`@Mod`) is the default entrypoint
+mechanism unless the toolchain is intentionally modified.
+
+#### Positional arguments
+
+```xeno
+@Mod("my_mod", "1.0.0", "Author", "Description")
+class MyMod {
+    public:
+        MyMod() {
+            // entry point
+        }
+}
+```
+
+#### Named arguments (optional)
+
+```xeno
+@Mod("my_mod", version="1.0.0")
+class MyMod {
+    public:
+        MyMod() {
+            // entry point
+        }
+}
 ```
 
 ---
@@ -111,12 +259,12 @@ xenoscript-vscode/  VS Code extension
 
 XenoScript is designed for:
 
-- Game engines
-- Modding platforms
-- Controlled runtime scripting
-- Embedded VM environments
+- Game engines  
+- Modding platforms  
+- Controlled runtime scripting  
+- Embedded VM environments  
 
-The host defines what scripts are allowed to do.
+Each game defines its own XenoScript environment through its extended standard library and exposed capabilities.
 
 ---
 
@@ -126,104 +274,114 @@ Actively in development.
 
 The language, VM, and standard library are evolving together.
 
+**Implemented:**
+- ✅ Full type system (primitives, classes, interfaces, enums, generics)  
+- ✅ Virtual dispatch (`virtual` / `override`)  
+- ✅ Nullable types (`string?`, `int?`, `??`, `!`, `?.`)  
+- ✅ Exception handling (`try` / `catch` / `finally` / `throw`)  
+- ✅ Events with static and bound delegate handlers  
+- ✅ `foreach` over arrays and `IEnumerable<T>` implementations  
+- ✅ Annotations and `@AttributeUsage`  
+- ✅ Standard library (`core`, `math`, `collections`)  
+- ✅ Erased generics — stdlib generic classes distributed as compiled `.xar` binaries  
+- ✅ `.xar` packaging and project model  
+- ✅ Attribute reflection (reading annotation data at runtime)  
+- ✅ LSP server (`xenolsp`) for IDE integration  
+- ✅ VS Code extension with diagnostics, hover, and completions  
+- ✅ 27-test suite passing  
+
+**In progress / planned:**
+- 🔲 [Future features to be added]  
+
 ---
 
 ## 📜 License
 
-XenoScript Community & Commercial License (XCCL)
-Version 1.0
-Copyright (c) 2026 DoItBetter Studio
-All Rights Reserved.
-
-1. Ownership
-
-XenoScript, including its compiler, virtual machine, standard libraries,
-and associated tooling (collectively, the "Software"), is the exclusive
-property of DoItBetter Studio.
-
-This license grants limited rights to use the Software under the terms below.
-All rights not expressly granted are reserved.
+# XenoScript Community & Commercial License (XCCL)  
+**Version 1.1**  
+Copyright (c) 2026  
+DoItBetter Studio  
+All Rights Reserved  
 
 ---
 
-2. Non-Commercial Use
+## 1. Ownership
+
+XenoScript, including its compiler, virtual machine, standard libraries, extended standard libraries, and associated tooling (collectively, the "Software"), is the exclusive property of DoItBetter Studio.  
+
+This license grants limited rights to use the Software under the terms below. All rights not expressly granted are reserved.
+
+---
+
+## 2. Non-Commercial Use
 
 You are granted a non-exclusive, non-transferable, revocable license to:
 
-- Use the Software for personal, educational, hobby, or non-commercial projects.
-- Modify the Software for internal use.
-- Distribute games or applications created using the Software,
-  provided they are not sold or monetized.
+- Use the Software for personal, educational, hobby, or non-commercial projects.  
+- Modify the Software for internal use.  
+- Distribute games or applications created using the Software, provided they are not sold or monetized.  
 
 No fee is required for non-commercial use.
 
 ---
 
-3. Commercial Use
+## 3. Commercial Use
 
 A Commercial License from DoItBetter Studio is required if:
 
-- You sell, license, or otherwise monetize a product that includes or depends
-  on XenoScript.
-- The Software is used in a product that generates revenue.
+- You sell, license, or otherwise monetize a product that includes or depends on XenoScript.  
+- The Software is used in a product that generates revenue.  
 
-Commercial terms, pricing, and agreements are provided separately
-by DoItBetter Studio.
+Commercial terms, pricing, and agreements are provided separately by DoItBetter Studio.
 
 ---
 
-4. Modding Access Requirement
+## 4. Modding Access Requirement
 
 If you distribute a product using XenoScript:
 
-- You may not require an additional fee, subscription, DLC purchase,
-  or other monetary charge to enable scripting or modding functionality
-  powered by XenoScript.
-- Access to XenoScript-based modding features must not be artificially
-  restricted behind a paywall separate from the base product.
+- You may not require an additional fee, subscription, DLC purchase, or other monetary charge to enable scripting or modding functionality powered by XenoScript.  
+- Access to XenoScript-based modding features must not be artificially restricted behind a paywall separate from the base product.  
 
-You may charge for your game.
-You may not charge users specifically to unlock XenoScript modding.
+You may charge for your game, but you may not charge users specifically to unlock XenoScript modding.
 
 ---
 
-5. Redistribution
+## 5. Redistribution
 
-You may not:
+**You may:**
 
-- Redistribute the Software source code.
-- Rebrand the Software.
-- Claim authorship of the Software.
-- Sell the Software independently.
+- Clone, fork, modify, and build the Software from source for personal, educational, hobby, or internal use.  
+- Distribute products (games, tools, applications, or mods) that embed or depend on the XenoScript virtual machine, compiler, XAR packer, standard library, extended standard library, or compiled bytecode. This is the normal and intended use of the Software.  
 
-Distribution of compiled products that embed the Software is permitted
-under the terms of this license.
+**You may not:**
 
----
+- Redistribute the Software, in whole or in part, in source or binary form as a standalone product.  
+- Distribute modified versions of the Software under a different name or brand.  
+- Claim authorship of the Software or present it as your own work.  
+- Sell, license, or otherwise monetize the Software independently of a larger product that embeds or depends on it.  
 
-6. Warranty Disclaimer
-
-The Software is provided "AS IS", without warranty of any kind,
-express or implied, including but not limited to the warranties
-of merchantability, fitness for a particular purpose, and noninfringement.
-
-In no event shall DoItBetter Studio be liable for any claim, damages,
-or other liability arising from the use of the Software.
+**Note:** Embedding the XenoScript virtual machine, compiler, XAR packer, or standard library into a product **does not** count as redistribution under this section.
 
 ---
 
-7. Termination
+## 6. Warranty Disclaimer
 
-Failure to comply with the terms of this license automatically
-terminates your rights under it.
+The Software is provided "AS IS," without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.  
+
+In no event shall DoItBetter Studio be liable for any claim, damages, or other liability arising from the use of the Software.
+
+---
+
+## 7. Termination
+
+Failure to comply with the terms of this license automatically terminates your rights under it.  
 
 Upon termination, you must cease use of the Software.
 
 ---
 
-8. Contact
+## 8. Contact
 
-For commercial licensing inquiries, contact:
+For commercial licensing inquiries, contact:  
 sportsnut2020@gmail.com
-
----

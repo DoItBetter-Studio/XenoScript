@@ -1,8 +1,11 @@
 class Utils
 {
+    private:
+        static final string ECHO = "echo";
+
     public:
         function echo(string s): string
         {
-            return s;
+            return $"{Utils.ECHO}: {s}";
         }
 }

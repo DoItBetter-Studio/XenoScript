@@ -1,95 +1,88 @@
-XenoScript Community & Commercial License (XCCL)
-Version 1.0
-Copyright (c) 2026 DoItBetter Studio
-All Rights Reserved.
-
-1. Ownership
-
-XenoScript, including its compiler, virtual machine, standard libraries,
-and associated tooling (collectively, the "Software"), is the exclusive
-property of DoItBetter Studio.
-
-This license grants limited rights to use the Software under the terms below.
-All rights not expressly granted are reserved.
+# XenoScript Community & Commercial License (XCCL)  
+**Version 1.1**  
+Copyright (c) 2026  
+DoItBetter Studio  
+All Rights Reserved  
 
 ---
 
-2. Non-Commercial Use
+## 1. Ownership
+
+XenoScript, including its compiler, virtual machine, standard libraries, extended standard libraries, and associated tooling (collectively, the "Software"), is the exclusive property of DoItBetter Studio.  
+
+This license grants limited rights to use the Software under the terms below. All rights not expressly granted are reserved.
+
+---
+
+## 2. Non-Commercial Use
 
 You are granted a non-exclusive, non-transferable, revocable license to:
 
-- Use the Software for personal, educational, hobby, or non-commercial projects.
-- Modify the Software for internal use.
-- Distribute games or applications created using the Software,
-  provided they are not sold or monetized.
+- Use the Software for personal, educational, hobby, or non-commercial projects.  
+- Modify the Software for internal use.  
+- Distribute games or applications created using the Software, provided they are not sold or monetized.  
 
 No fee is required for non-commercial use.
 
 ---
 
-3. Commercial Use
+## 3. Commercial Use
 
 A Commercial License from DoItBetter Studio is required if:
 
-- You sell, license, or otherwise monetize a product that includes or depends
-  on XenoScript.
-- The Software is used in a product that generates revenue.
+- You sell, license, or otherwise monetize a product that includes or depends on XenoScript.  
+- The Software is used in a product that generates revenue.  
 
-Commercial terms, pricing, and agreements are provided separately
-by DoItBetter Studio.
+Commercial terms, pricing, and agreements are provided separately by DoItBetter Studio.
 
 ---
 
-4. Modding Access Requirement
+## 4. Modding Access Requirement
 
 If you distribute a product using XenoScript:
 
-- You may not require an additional fee, subscription, DLC purchase,
-  or other monetary charge to enable scripting or modding functionality
-  powered by XenoScript.
-- Access to XenoScript-based modding features must not be artificially
-  restricted behind a paywall separate from the base product.
+- You may not require an additional fee, subscription, DLC purchase, or other monetary charge to enable scripting or modding functionality powered by XenoScript.  
+- Access to XenoScript-based modding features must not be artificially restricted behind a paywall separate from the base product.  
 
-You may charge for your game.
-You may not charge users specifically to unlock XenoScript modding.
+You may charge for your game, but you may not charge users specifically to unlock XenoScript modding.
 
 ---
 
-5. Redistribution
+## 5. Redistribution
 
-You may not:
+**You may:**
 
-- Redistribute the Software source code.
-- Rebrand the Software.
-- Claim authorship of the Software.
-- Sell the Software independently.
+- Clone, fork, modify, and build the Software from source for personal, educational, hobby, or internal use.  
+- Distribute products (games, tools, applications, or mods) that embed or depend on the XenoScript virtual machine, compiler, XAR packer, standard library, extended standard library, or compiled bytecode. This is the normal and intended use of the Software.  
 
-Distribution of compiled products that embed the Software is permitted
-under the terms of this license.
+**You may not:**
 
----
+- Redistribute the Software, in whole or in part, in source or binary form as a standalone product.  
+- Distribute modified versions of the Software under a different name or brand.  
+- Claim authorship of the Software or present it as your own work.  
+- Sell, license, or otherwise monetize the Software independently of a larger product that embeds or depends on it.  
 
-6. Warranty Disclaimer
-
-The Software is provided "AS IS", without warranty of any kind,
-express or implied, including but not limited to the warranties
-of merchantability, fitness for a particular purpose, and noninfringement.
-
-In no event shall DoItBetter Studio be liable for any claim, damages,
-or other liability arising from the use of the Software.
+**Note:** Embedding the XenoScript virtual machine, compiler, XAR packer, or standard library into a product **does not** count as redistribution under this section.
 
 ---
 
-7. Termination
+## 6. Warranty Disclaimer
 
-Failure to comply with the terms of this license automatically
-terminates your rights under it.
+The Software is provided "AS IS," without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.  
+
+In no event shall DoItBetter Studio be liable for any claim, damages, or other liability arising from the use of the Software.
+
+---
+
+## 7. Termination
+
+Failure to comply with the terms of this license automatically terminates your rights under it.  
 
 Upon termination, you must cease use of the Software.
 
 ---
 
-8. Contact
+## 8. Contact
 
-For commercial licensing inquiries, contact:
+For commercial licensing inquiries, contact:  
 sportsnut2020@gmail.com

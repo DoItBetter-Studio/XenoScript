@@ -59,7 +59,7 @@ compile_commands.json
 # ============================
 # VS Code Extension
 # ============================
-xenoscript-vscode/
+xenoscript.vscode-xenoscript/
 
 # ============================
 # Test Artifacts

@@ -1,0 +1,76 @@
+// Test 25: IEnumerable<T> / IEnumerator<T> — user-defined foreach
+
+// A simple string bag — iterates in insertion order
+class StringBagEnumerator : IEnumerator<string> {
+    public:
+        string[] _items;
+        int      _index;
+
+        StringBagEnumerator(string[] items) {
+            _items = items;
+            _index = -1;
+        }
+
+        function moveNext(): bool {
+            _index = _index + 1;
+            return _index < _items.length;
+        }
+
+        function current(): string {
+            return _items[_index];
+        }
+}
+
+class StringBag : IEnumerable<string> {
+    public:
+        string[] _data;
+        int      _count;
+
+        StringBag() {
+            _data  = new string[8];
+            _count = 0;
+        }
+
+        function add(string s): void {
+            _data[_count] = s;
+            _count = _count + 1;
+        }
+
+        function getEnumerator(): IEnumerator<string> {
+            string[] slice = new string[_count];
+            int i = 0;
+            while (i < _count) {
+                slice[i] = _data[i];
+                i = i + 1;
+            }
+            return new StringBagEnumerator(slice);
+        }
+}
+
+@Mod("ienumerable", "1.0.0", "Test")
+class IEnumerable {
+    public:
+        IEnumerable() {
+            // Stdlib Range — lazy, never materializes an array
+            foreach (int n in new Range(1, 6)) {
+                print(n);
+            }
+
+            // User-defined IEnumerable<string>
+            StringBag bag = new StringBag();
+            bag.add("alpha");
+            bag.add("beta");
+            bag.add("gamma");
+
+            foreach (string s in bag) {
+                print(s);
+            }
+
+            // Nested foreach (each call to getEnumerator returns a fresh enumerator)
+            foreach (int x in new Range(1, 3)) {
+                foreach (int y in new Range(10, 13)) {
+                    print(x + ":" + y);
+                }
+            }
+        }
+}

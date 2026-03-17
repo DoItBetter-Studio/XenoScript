@@ -21,6 +21,7 @@
 #include "xar.h"
 #include "toml.h"
 #include "stdlib_xar.h"
+#include "compiler.h"
 #include "../../source/stdlib/stdlib_register.h"
 #include "../../source/compiler/compile_pipeline.h"
 #include <stdio.h>
@@ -28,12 +29,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <time.h>
 
 /* ── Host functions ───────────────────────────────────────────────────── */
 
 static XenoResult std_print(XenoVM *vm, int argc, Value *argv, Value *out) {
     (void)vm; (void)argc; (void)out;
-    printf("%s\n", argv[0].s ? argv[0].s : "");
+    if (argv[0].is_null) { printf("null\n"); return XENO_OK; }
+    if (!argv[0].s) { printf("(null)\n"); return XENO_OK; }
+    printf("%s\n", argv[0].s);
     return XENO_OK;
 }
 
@@ -67,16 +71,45 @@ static bool path_is_dir(const char *path) {
 /* ── Run modes ────────────────────────────────────────────────────────── */
 
 static int run_xbc(XenoVM *vm, const char *path) {
-    Module *module = malloc(sizeof(Module));
-    if (!module) return 1;
-
-    XbcResult xr = xbc_read(module, path);
+    Module *user = (Module*)calloc(1, sizeof(Module)); module_init(user);
+    XbcResult xr = xbc_read(user, path);
     if (xr != XBC_OK) {
-        fprintf(stderr, "xenovm: failed to load '%s': %s\n",
-                path, xbc_result_str(xr));
-        free(module);
+        fprintf(stderr, "xenovm: failed to load '%s': %s\n", path, xbc_result_str(xr));
+        module_free(user); free(user);
         return 2;
     }
+
+    Module *module = malloc(sizeof(Module));
+    if (!module) { module_free(user); free(user); return 1; }
+    module_init(module);
+
+    /* Always pre-seed stdlib in fixed order (core → collections → math → ...).
+     * The compiler stages stdlib in this same order, so OP_CALL/OP_NEW indices
+     * baked into the stripped XBC are always valid. Unconditional — no
+     * uses_stdlib check — determinism is the guarantee, not savings. */
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        module_merge(module, vm->stdlib_modules[i]);
+
+    /* Copy sinit chunk before merging user */
+    if (user->sinit_index >= 0 && user->sinit_index < user->count) {
+        Chunk *src = &user->chunks[user->sinit_index];
+        int si = module_add_chunk(module);
+        if (si >= 0) {
+            Chunk *dst = &module->chunks[si];
+            for (int bi = 0; bi < src->count; bi++) chunk_write(dst, src->code[bi], 0);
+            for (int ci = 0; ci < src->constants.count; ci++)
+                chunk_add_constant(dst, src->constants.values[ci]);
+            dst->local_count = src->local_count;
+            dst->param_count = src->param_count;
+            strncpy(module->names[si], "__sinit__", 63);
+            module->sinit_index = si;
+        }
+    }
+    module_merge(module, user);
+    module_free(user); free(user);
+
+    /* Extract ModMetadata now that user classes are fully merged in */
+    module_extract_mod_metadata(module, NULL);
 
     XenoResult r = xeno_vm_run(vm, module);
     module_free(module);
@@ -102,8 +135,8 @@ static int run_xar(XenoVM *vm, const char *path) {
         return 2;
     }
 
-    /* Load each declared dependency from deps/<name>.xar
-     * (relative to the .xar's own directory) */
+    /* Determine the directory containing this .xar, used as a fallback dep
+     * search location when vm->mod_path is not set. */
     char base_dir[512] = "";
     const char *last_sep = strrchr(path, '/');
 #ifdef _WIN32
@@ -118,23 +151,72 @@ static int run_xar(XenoVM *vm, const char *path) {
         }
     }
 
-    /* Load dep archives into the VM pool */
+    /* Load declared dependencies into the VM pool.
+     * Once compiled to .xar, a dependency is just another mod — it lives in
+     * the same flat pool as every other .xar, not in a special deps/ subfolder.
+     * Search order: 1) vm->mod_path  2) same directory as this .xar */
     for (int i = 0; i < ar.manifest.dep_count; i++) {
-        char dep_path[512];
-        snprintf(dep_path, sizeof(dep_path), "%sdeps/%s.xar",
-                 base_dir, ar.manifest.dependencies[i]);
+        const char *dep_name = ar.manifest.dependencies[i];
+
+        /* Skip if already in the pool */
+        bool already_loaded = false;
+        for (int j = 0; j < vm->stdlib_module_count; j++) {
+            if (strcmp(vm->stdlib_loaded_names[j], dep_name) == 0) {
+                already_loaded = true; break;
+            }
+        }
+        if (already_loaded) continue;
+
+        char dep_path[1024];
+        bool found = false;
+        if (vm->mod_path[0]) {
+            snprintf(dep_path, sizeof(dep_path), "%s%s.xar", vm->mod_path, dep_name);
+            FILE *p = fopen(dep_path, "rb");
+            if (p) { fclose(p); found = true; }
+        }
+        if (!found) {
+            snprintf(dep_path, sizeof(dep_path), "%s%s.xar", base_dir, dep_name);
+            FILE *p = fopen(dep_path, "rb");
+            if (p) { fclose(p); found = true; }
+        }
+        if (!found) {
+            /* Also check a deps/ subdirectory relative to the XAR location
+             * (useful during development when running from a project folder) */
+            snprintf(dep_path, sizeof(dep_path), "%sdeps/%s.xar", base_dir, dep_name);
+            FILE *p = fopen(dep_path, "rb");
+            if (p) { fclose(p); found = true; }
+        }
+        if (!found) {
+            /* Check deps/ relative to parent of XAR's directory */
+            char parent[512] = "";
+            snprintf(parent, sizeof(parent), "%s", base_dir);
+            size_t plen = strlen(parent);
+            /* strip trailing slash, then go up one level */
+            if (plen > 0 && (parent[plen-1]=='/'||parent[plen-1]=='\\')) parent[--plen]='\0';
+            char *last = strrchr(parent, '/');
+            if (!last) last = strrchr(parent, '\\');
+            if (last) {
+                *(last+1) = '\0';
+                snprintf(dep_path, sizeof(dep_path), "%sdeps/%s.xar", parent, dep_name);
+                FILE *p = fopen(dep_path, "rb");
+                if (p) { fclose(p); found = true; }
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "xenovm: missing dependency '%s'\n", dep_name);
+            xar_archive_free(&ar);
+            return 2;
+        }
 
         XarArchive dep;
-        XarResult dr = xar_read(&dep, dep_path);
-        if (dr != XAR_OK) {
-            fprintf(stderr, "xenovm: missing dependency '%s' (looked in '%s')\n",
-                    ar.manifest.dependencies[i], dep_path);
+        if (xar_read(&dep, dep_path) != XAR_OK) {
+            fprintf(stderr, "xenovm: failed to read dep '%s' from '%s'\n",
+                    dep_name, dep_path);
             xar_archive_free(&ar);
             return 2;
         }
         if (!xeno_vm_load_xar(vm, &dep)) {
-            fprintf(stderr, "xenovm: failed to load dep '%s'\n",
-                    ar.manifest.dependencies[i]);
+            fprintf(stderr, "xenovm: failed to load dep '%s'\n", dep_name);
             xar_archive_free(&dep);
             xar_archive_free(&ar);
             return 1;
@@ -142,21 +224,30 @@ static int run_xar(XenoVM *vm, const char *path) {
         xar_archive_free(&dep);
     }
 
-    /* Load the main archive as a standalone runnable module */
+    /* Load the main archive as a standalone runnable module.
+     * Build in load order: stdlib → deps → user mod, matching compile-time
+     * staging so all class indices are naturally correct. */
     Module *module = malloc(sizeof(Module));
     if (!module) { xar_archive_free(&ar); return 1; }
     module_init(module);
 
+    /* Always pre-seed stdlib in fixed order. Stdlib indices are baked into
+     * every XBC at compile time in this same order, so module_merge
+     * deduplicates by name and user indices stay stable. */
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        module_merge(module, vm->stdlib_modules[i]);
+
+    /* Merge user XAR chunks on top */
     for (int i = 0; i < ar.chunk_count; i++) {
-        Module cm; module_init(&cm);
-        if (xbc_read_mem(&cm, ar.chunks[i].data, ar.chunks[i].size) == XBC_OK) {
-            /* Propagate @Mod metadata from the first chunk that has it */
-            if (!module->metadata.has_mod && cm.metadata.has_mod)
-                module->metadata = cm.metadata;
-            module_merge(module, &cm);
-            module_free(&cm);
+        Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+        if (xbc_read_mem(cm, ar.chunks[i].data, ar.chunks[i].size) == XBC_OK) {
+            module_merge(module, cm);
+            module_free(cm); free(cm);
         }
     }
+
+    /* Extract ModMetadata from @Mod attribute on merged classes */
+    module_extract_mod_metadata(module, NULL);
 
     XenoResult r = xeno_vm_run(vm, module);
     module_free(module);
@@ -164,6 +255,7 @@ static int run_xar(XenoVM *vm, const char *path) {
     xar_archive_free(&ar);
     return (r == XENO_OK) ? 0 : 1;
 }
+
 
 /* Collect .xeno files recursively from a directory. Returns 0 on success. */
 static int vm_collect_sources(const char *dir,
@@ -248,7 +340,7 @@ static int run_project(XenoVM *vm, const char *project_dir) {
     merged_all[0] = '\0';
 
     /* Use a shared staging module across all files */
-    Module staging; module_init(&staging);
+    Module *staging = (Module*)calloc(1, sizeof(Module)); module_init(staging);
     bool any_err = false;
 
     for (int i = 0; i < source_count && !any_err; i++) {
@@ -257,7 +349,7 @@ static int run_project(XenoVM *vm, const char *project_dir) {
 
         bool imp_err = false;
         char *file_merged = pipeline_prepare_project(src, source_paths[i],
-                                                     deps_dir, &staging, &imp_err);
+                                                     deps_dir, staging, &imp_err);
         free(src);
         if (imp_err || !file_merged) { free(file_merged); any_err = true; break; }
 
@@ -275,7 +367,7 @@ static int run_project(XenoVM *vm, const char *project_dir) {
         free(file_merged);
     }
     for (int i = 0; i < source_count; i++) free(source_paths[i]);
-    module_free(&staging);
+    module_free(staging); free(staging);
 
     if (any_err) { free(merged_all); return 1; }
 
@@ -299,6 +391,8 @@ int main(int argc, char **argv) {
     register_std_fns(vm);
     xeno_vm_load_stdlib(vm);
 
+    clock_t start = clock();        // start timing
+
     int exit_code;
 
     if (path_is_dir(path)) {
@@ -317,6 +411,11 @@ int main(int argc, char **argv) {
         free(vm);
         return 3;
     }
+
+    clock_t end = clock();          // stop timing
+
+    double ms = (double)(end - start) * 1000.0 / CLOCKS_PER_SEC;
+    fprintf(stdout, "Execution time: %.6f ms \n", ms);
 
     if (exit_code != 0 && exit_code != 2) {
         xeno_vm_print_error(vm);

@@ -73,6 +73,7 @@ typedef enum {
     TYPE_ANY,           /* Wildcard -- used only for host fn param declarations */
     TYPE_ARRAY,         /* Homogeneous array — element_type holds the elem type */
     TYPE_PARAM,         /* Generic type parameter — e.g. T, K, V              */
+    TYPE_NULL,          /* The null literal — assignable to any nullable type  */
 } TypeKind;
 
 /* Human-readable type names for error messages */
@@ -96,6 +97,7 @@ typedef struct Type {
     const char    *enum_name;     /* Non-null only when kind == TYPE_ENUM.    */
     struct Type   *element_type;  /* Non-null only when kind == TYPE_ARRAY.   */
     const char    *param_name;    /* Non-null only when kind == TYPE_PARAM.   */
+    bool           is_nullable;   /* true when declared with ?, e.g. string?  */
 } Type;
 
 /*
@@ -141,16 +143,17 @@ Type type_char(void);
 Type type_any(void);
 Type type_array(struct Type *element_type);
 Type type_param(const char *param_name);   /* kind=TYPE_PARAM, param_name set */
+Type type_null(void);                       /* kind=TYPE_NULL — the null literal type */
 bool type_is_int_family(Type t);
 bool type_is_unsigned(Type t);
 struct ArgNode;  /* forward decl for expr_array_lit */
-Expr *expr_array_lit    (Arena *a, struct ArgNode *elements, int count, int line);
-Expr *expr_index        (Arena *a, Expr *array, Expr *index, int line);
-Expr *expr_index_assign (Arena *a, Expr *array, Expr *index, Expr *value, int line);
-Expr *expr_new_array    (Arena *a, Type element_type, Expr *length, int line);
-Expr *expr_is         (Arena *a, Expr *operand, Type check_type, int line);
-Expr *expr_as         (Arena *a, Expr *operand, Type check_type, int line);
-Expr *expr_typeof     (Arena *a, Expr *operand, int line);
+Expr *expr_array_lit    (Arena *a, struct ArgNode *elements, int count, int line, int col);
+Expr *expr_index        (Arena *a, Expr *array, Expr *index, int line, int col);
+Expr *expr_index_assign (Arena *a, Expr *array, Expr *index, Expr *value, int line, int col);
+Expr *expr_new_array    (Arena *a, Type element_type, Expr *length, int line, int col);
+Expr *expr_is         (Arena *a, Expr *operand, Type check_type, int line, int col);
+Expr *expr_as         (Arena *a, Expr *operand, Type check_type, int line, int col);
+Expr *expr_typeof     (Arena *a, Expr *operand, int line, int col);
 Type type_class_ref(const char *class_name);  /* kind=TYPE_CLASS_REF, name set */
 
 /* Are two types the same? */
@@ -214,6 +217,17 @@ typedef enum {
     EXPR_AS,            /* expr as TypeName      — runtime cast            */
     EXPR_TYPEOF,        /* typeof(expr)          — type descriptor         */
 
+    /* Nullable operators */
+    EXPR_NULL_LIT,       /* null                  — the null literal             */
+    EXPR_NULL_ASSERT,    /* expr!                 — non-null assertion unwrap     */
+    EXPR_NULL_COALESCE,  /* expr ?? expr          — null coalescing operator      */
+    EXPR_NULL_SAFE_GET,  /* obj?.field            — null-safe field read          */
+    EXPR_NULL_SAFE_CALL, /* obj?.method(args)     — null-safe method call         */
+
+    EXPR_EVENT_SUBSCRIBE,   /* event += handler   */
+    EXPR_EVENT_UNSUBSCRIBE, /* event -= handler   */
+    EXPR_EVENT_FIRE,        /* event(args)        — fires all handlers            */
+
 } ExprKind;
 
 /*
@@ -241,11 +255,12 @@ struct Expr {
     ExprKind kind;
     Type     resolved_type;   /* Filled in by the type checker */
     int      line;            /* Source line for error messages */
+    int      col;             /* Source column for LSP (1-based) */
 
     union {
         /* EXPR_INT_LIT */
         struct {
-            int64_t value;
+            __int128_t value;
         } int_lit;
 
         /* EXPR_CHAR_LIT -- Unicode codepoint, stored as uint32_t */
@@ -482,6 +497,61 @@ struct Expr {
             Expr *operand;
         } type_of;
 
+        /* EXPR_NULL_LIT — carries no data; type is TYPE_NULL */
+
+        /* EXPR_NULL_ASSERT — expr!
+         * operand: the expression being asserted non-null */
+        struct {
+            Expr *operand;
+        } null_assert;
+
+        /* EXPR_NULL_COALESCE — left ?? right
+         * Evaluates to left if non-null, else right */
+        struct {
+            Expr *left;
+            Expr *right;
+        } null_coalesce;
+
+        /* EXPR_NULL_SAFE_GET — obj?.field */
+        struct {
+            Expr       *object;
+            const char *field_name;
+            int         field_name_len;
+        } null_safe_get;
+
+        /* EXPR_NULL_SAFE_CALL — obj?.method(args) */
+        struct {
+            Expr       *object;
+            const char *method_name;
+            int         method_name_len;
+            ArgNode    *args;
+            int         arg_count;
+        } null_safe_call;
+
+        /* EXPR_EVENT_SUBSCRIBE / EXPR_EVENT_UNSUBSCRIBE
+         * event_name += handler_name  /  event_name -= handler_name
+         * object may be NULL for top-level events, non-NULL for member events */
+        struct {
+            Expr       *object;         /* NULL for top-level, obj for member  */
+            const char *event_name;
+            int         event_name_len;
+            const char *handler_name;   /* name of function to subscribe       */
+            int         handler_name_len;
+        } event_sub;
+
+        /* EXPR_EVENT_FIRE
+         * event_name(args)  /  obj.event_name(args)
+         * object may be NULL for top-level events
+         * NOTE: event_name MUST be the first field so that the in-place rewrite
+         * from EXPR_CALL (where call.name is at offset 0) is layout-compatible. */
+        struct {
+            const char *event_name; /* first — aligns with call.name at offset 0 */
+            int         event_name_len;
+            ArgNode    *args;
+            int         arg_count;
+            Expr       *object;     /* NULL for top-level, non-NULL for member   */
+        } event_fire;
+
     };
 };
 
@@ -542,6 +612,9 @@ typedef enum {
     STMT_RETURN,        /* return expr;            */
     STMT_BREAK,         /* break;                  */
     STMT_CONTINUE,      /* continue;               */
+    STMT_THROW,         /* throw expr;             */
+    STMT_TRY,           /* try { } catch (T e) { } finally { } */
+    STMT_EVENT_DECL,    /* event OnFoo(int x, string y);        */
 
     /* A block is a sequence of statements with its own scope.
      * Declared variables inside a block are not visible outside it. */
@@ -589,6 +662,7 @@ typedef struct StmtNode {
 struct Stmt {
     StmtKind kind;
     int      line;
+    int      col;             /* Source column for LSP (1-based) */
 
     union {
         /* STMT_VAR_DECL
@@ -670,6 +744,36 @@ struct Stmt {
 
         /* STMT_BREAK / STMT_CONTINUE — no extra data needed */
 
+        /* STMT_THROW */
+        struct {
+            Expr *value;    /* The exception object to throw */
+        } throw_stmt;
+
+        /* STMT_TRY
+         * Supports multiple catch clauses, each with a type filter.
+         * catch_count == 0  means  catch (Exception e) — catch all. */
+        struct {
+            Stmt       *body;           /* The try { } block          */
+            Stmt       *finally_body;   /* The finally { } block or NULL */
+            /* Catch clauses stored as parallel arrays */
+            int         catch_count;
+            const char **catch_types;   /* catch type name per clause  */
+            int         *catch_type_lens;
+            const char **catch_vars;    /* bound variable name          */
+            int         *catch_var_lens;
+            Stmt       **catch_bodies;  /* body block per clause        */
+        } try_stmt;
+
+        /* STMT_EVENT_DECL
+         * event OnFoo(int x, string y);
+         * Declares a named event with a typed parameter list. */
+        struct {
+            const char *name;       /* event name                          */
+            int         length;
+            ParamNode  *params;     /* parameter list (types only matter)  */
+            int         param_count;
+        } event_decl;
+
         /* STMT_BLOCK */
         struct {
             StmtNode *stmts;  /* Linked list of statements in this block */
@@ -699,36 +803,63 @@ struct Stmt {
             const char *parent_name;
             int         parent_length;
 
+            /* When parent is a generic instantiation (class Foo : Bar<int>),
+             * parent_name is the bare name "Bar" and these hold the concrete args.
+             * NULL / 0 when not a generic parent. */
+            Type       *parent_type_args;      /* borrowed from IFNode, arena lifetime */
+            int         parent_type_arg_count;
+
             /* Generic type parameters — NULL if not a generic class */
             TypeParamNode *type_params;
             int            type_param_count;
 
             /* Fields: stored as a simple array (arena-allocated) */
             struct ClassFieldNode {
-                Type        type;
-                const char *name;
-                int         length;
-                bool        is_static;
-                AccessLevel access;   /* public / private / protected */
-                Expr       *initializer;  /* NULL if no initializer, e.g. int x = 42; */
+                Type            type;
+                const char     *name;
+                int             length;
+                bool            is_static;
+                bool            is_final;
+                AccessLevel     access;   /* public / private / protected */
+                Expr           *initializer;
+                AnnotationNode *annotations; /* @Serialize etc. */
                 struct ClassFieldNode *next;
             } *fields;
             int field_count;
 
             /* Methods and constructors stored as fn_decl statements */
             struct ClassMethodNode {
-                Stmt       *fn;          /* STMT_FN_DECL */
-                bool        is_static;
-                AccessLevel access;      /* public / private / protected */
-                bool        is_constructor;
+                Stmt           *fn;          /* STMT_FN_DECL */
+                bool            is_static;
+                AccessLevel     access;      /* public / private / protected */
+                bool            is_constructor;
+                bool            is_virtual;  /* virtual — overridable         */
+                bool            is_override; /* override — must match parent  */
+                AnnotationNode *annotations; /* @Event(...) etc.             */
                 struct ClassMethodNode *next;
             } *methods;
             int method_count;
 
+            /* Class-level event declarations */
+            struct ClassEventNode {
+                const char *name;
+                int         length;
+                ParamNode  *params;
+                int         param_count;
+                AccessLevel access;
+                struct ClassEventNode *next;
+            } *events;
+            int event_count;
+
             /* Implemented interfaces — linked list of names */
+            /* Implemented interfaces / parent class -- linked list of names.
+             * type_args/type_arg_count are set when name is a generic
+             * instantiation, e.g. class Foo : Bar<int> or class Foo : Bar<K,V> */
             struct IfaceNameNode {
                 const char         *name;
                 int                 length;
+                Type                type_args[8];   /* concrete args for generic parent */
+                int                 type_arg_count;
                 struct IfaceNameNode *next;
             } *interfaces;
             int interface_count;
@@ -736,8 +867,9 @@ struct Stmt {
 
         /* STMT_ENUM_DECL */
         struct {
-            const char *name;       /* Enum type name, e.g. "Direction"  */
-            int         length;
+            const char     *name;
+            int             length;
+            AnnotationNode *annotations;
 
             /* Members stored as a linked list */
             struct EnumMemberNode {
@@ -787,6 +919,7 @@ struct Stmt {
             int         path_len;
             bool        is_system;  /* true = <name>, false = "path" */
         } import_decl;
+
     };
 };
 
@@ -818,51 +951,51 @@ typedef struct {
 #include "arena.h"
 
 /* Expressions */
-Expr *expr_int_lit   (Arena *a, int64_t value,           int line);
-Expr *expr_char_lit  (Arena *a, uint32_t value,          int line);
-Expr *expr_float_lit (Arena *a, double value,            int line);
-Expr *expr_bool_lit  (Arena *a, bool value,              int line);
-Expr *expr_string_lit(Arena *a, const char *chars, int len, int line);
-Expr *expr_interp_string(Arena *a, int line);
-Expr *expr_ident     (Arena *a, const char *name,  int len, int line);
-Expr *expr_unary     (Arena *a, TokenType op, Expr *operand,        int line);
-Expr *expr_postfix   (Arena *a, TokenType op, const char *name, int length, int line);
+Expr *expr_int_lit   (Arena *a, __int128_t value,        int line, int col);
+Expr *expr_char_lit  (Arena *a, uint32_t value,          int line, int col);
+Expr *expr_float_lit (Arena *a, double value,            int line, int col);
+Expr *expr_bool_lit  (Arena *a, bool value,              int line, int col);
+Expr *expr_string_lit(Arena *a, const char *chars, int len, int line, int col);
+Expr *expr_interp_string(Arena *a, int line, int col);
+Expr *expr_ident     (Arena *a, const char *name,  int len, int line, int col);
+Expr *expr_unary     (Arena *a, TokenType op, Expr *operand,        int line, int col);
+Expr *expr_postfix   (Arena *a, TokenType op, const char *name, int length, int line, int col);
 Expr *expr_postfix_field(Arena *a, TokenType op, bool is_prefix,
-                         Expr *object, const char *field_name, int field_name_len, int line);
-Expr *expr_prefix    (Arena *a, TokenType op, const char *name, int length, int line);
-Expr *expr_binary    (Arena *a, TokenType op, Expr *left, Expr *right, int line);
-Expr *expr_assign    (Arena *a, const char *name, int len, Expr *value, int line);
-Expr *expr_call      (Arena *a, const char *name, int len, ArgNode *args, int count, int line);
+                         Expr *object, const char *field_name, int field_name_len, int line, int col);
+Expr *expr_prefix    (Arena *a, TokenType op, const char *name, int length, int line, int col);
+Expr *expr_binary    (Arena *a, TokenType op, Expr *left, Expr *right, int line, int col);
+Expr *expr_assign    (Arena *a, const char *name, int len, Expr *value, int line, int col);
+Expr *expr_call      (Arena *a, const char *name, int len, ArgNode *args, int count, int line, int col);
 Expr *expr_new       (Arena *a, const char *class_name, int class_len,
-                      ArgNode *args, int count, int line);
-Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line);
-Expr *expr_field_get (Arena *a, Expr *object, const char *field, int field_len, int line);
+                      ArgNode *args, int count, int line, int col);
+Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line, int col);
+Expr *expr_field_get (Arena *a, Expr *object, const char *field, int field_len, int line, int col);
 Expr *expr_field_set (Arena *a, Expr *object, const char *field, int field_len,
-                      Expr *value, int line);
+                      Expr *value, int line, int col);
 Expr *expr_method_call(Arena *a, Expr *object, const char *method, int method_len,
-                       ArgNode *args, int count, int line);
-Expr *expr_this      (Arena *a, int line);
+                       ArgNode *args, int count, int line, int col);
+Expr *expr_this      (Arena *a, int line, int col);
 
 /* Statements */
-Stmt *stmt_var_decl  (Arena *a, Type type, const char *name, int len, Expr *init, int line);
-Stmt *stmt_expr      (Arena *a, Expr *expr, int line);
-Stmt *stmt_if        (Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line);
-Stmt *stmt_while     (Arena *a, Expr *cond, Stmt *body,   int line);
-Stmt *stmt_for       (Arena *a, Stmt *init, Expr *cond, Expr *step, Stmt *body, int line);
+Stmt *stmt_var_decl  (Arena *a, Type type, const char *name, int len, Expr *init, int line, int col);
+Stmt *stmt_expr      (Arena *a, Expr *expr, int line, int col);
+Stmt *stmt_if        (Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line, int col);
+Stmt *stmt_while     (Arena *a, Expr *cond, Stmt *body,   int line, int col);
+Stmt *stmt_for       (Arena *a, Stmt *init, Expr *cond, Expr *step, Stmt *body, int line, int col);
 Stmt *stmt_foreach  (Arena *a, Type elem_type, const char *var_name, int var_len,
-                     Expr *array, Stmt *body, int line);
-Stmt *stmt_match     (Arena *a, Expr *subject, int line);
-Stmt *stmt_return    (Arena *a, Expr *value, int line);
-Stmt *stmt_break     (Arena *a, int line);
-Stmt *stmt_continue  (Arena *a, int line);
-Stmt *stmt_block     (Arena *a, StmtNode *stmts, int line);
+                     Expr *array, Stmt *body, int line, int col);
+Stmt *stmt_match     (Arena *a, Expr *subject, int line, int col);
+Stmt *stmt_return    (Arena *a, Expr *value, int line, int col);
+Stmt *stmt_break     (Arena *a, int line, int col);
+Stmt *stmt_continue  (Arena *a, int line, int col);
+Stmt *stmt_block     (Arena *a, StmtNode *stmts, int line, int col);
 Stmt *stmt_fn_decl   (Arena *a, Type ret, const char *name, int len,
-                      ParamNode *params, int param_count, Stmt *body, int line);
+                      ParamNode *params, int param_count, Stmt *body, int line, int col);
 Stmt *stmt_class_decl(Arena *a, const char *name, int len,
                       const char *parent_name, int parent_len,
-                      int line);
-Stmt *stmt_enum_decl (Arena *a, const char *name, int len, int line);
-Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line);
+                      int line, int col);
+Stmt *stmt_enum_decl (Arena *a, const char *name, int len, int line, int col);
+Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line, int col);
 
 /* List node helpers */
 StmtNode  *stmt_node  (Arena *a, Stmt *stmt,  StmtNode *next);

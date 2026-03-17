@@ -1,0 +1,33 @@
+// Test: attribute reflection via typeof().hasAttribute() and .getAttributeArg()
+import <core>;
+
+@Mod("attribute_reflection", "2.1.0", "TestAuthor", "A test mod")
+class AttributeReflection {
+    public:
+        AttributeReflection() {
+            // hasAttribute - positive case
+            bool hasMod = typeof(AttributeReflection).hasAttribute("Mod");
+            bool hasNope = typeof(AttributeReflection).hasAttribute("NonExistent");
+            print("hasMod: " + hasMod);
+            print("hasNope: " + hasNope);
+
+            // getAttributeArg - read positional args
+            string? name    = typeof(AttributeReflection).getAttributeArg("Mod", 0);
+            string? version = typeof(AttributeReflection).getAttributeArg("Mod", 1);
+            string? author  = typeof(AttributeReflection).getAttributeArg("Mod", 2);
+            string? desc    = typeof(AttributeReflection).getAttributeArg("Mod", 3);
+
+            print("name: " + name!);
+            print("version: " + version!);
+            print("author: " + author!);
+            print("desc: " + desc!);
+
+            // out-of-range index returns null
+            string? oob = typeof(AttributeReflection).getAttributeArg("Mod", 99);
+            print("oob null: " + (oob == null));
+
+            // missing attribute returns null
+            string? missing = typeof(AttributeReflection).getAttributeArg("NonExistent", 0);
+            print("missing null: " + (missing == null));
+        }
+}

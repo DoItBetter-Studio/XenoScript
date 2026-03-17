@@ -1,7 +1,8 @@
-enum Target
-{
-    Class,
-    Method,
-    Field,
-    Enum
+// Specifies the valid placement targets for a custom attribute.
+enum AttributeTarget {
+    Class,       // attribute may be placed on a class declaration
+    Method,      // attribute may be placed on a method
+    Field,       // attribute may be placed on a field
+    Constructor, // attribute may be placed on a constructor
+    Enum         // attribute may be placed on an enum declaration
 }

@@ -1,60 +1,101 @@
 // XenoScript Standard Library — core/float
-// Extension methods for the float primitive type.
-// These are free functions; x.floor() desugars to float_floor(x).
+// Utility methods for the float primitive type.
 
-function float_abs(float n): float {
-    if (n < 0.0) { return 0.0 - n; }
-    return n;
-}
+class Float {
+    public:
+        // ───────────────────────────────────────────────
+        // Basic arithmetic wrappers
+        // ───────────────────────────────────────────────
 
-function float_min(float a, float b): float {
-    if (a < b) { return a; }
-    return b;
-}
+        static function abs(float n): float {
+            return __absf(n); // host function
+        }
 
-function float_max(float a, float b): float {
-    if (a > b) { return a; }
-    return b;
-}
+        static function min(float a, float b): float {
+            return __minf(a, b); // host function
+        }
 
-function float_clamp(float value, float lo, float hi): float {
-    if (value < lo) { return lo; }
-    if (value > hi) { return hi; }
-    return value;
-}
+        static function max(float a, float b): float {
+            return __maxf(a, b); // host function
+        }
 
-function float_sign(float n): float {
-    if (n > 0.0) { return 1.0; }
-    if (n < 0.0) { return -1.0; }
-    return 0.0;
-}
+        static function clamp(float value, float lo, float hi): float {
+            return __clampf(value, lo, hi); // host function
+        }
 
-function float_floor(float n): float {
-    return floor(n);
-}
+        static function sign(float n): float {
+            if (n > 0.0) { return 1.0; }
+            if (n < 0.0) { return -1.0; }
+            return 0.0;
+        }
 
-function float_ceil(float n): float {
-    return ceil(n);
-}
+        // ───────────────────────────────────────────────
+        // Math functions (host-backed)
+        // ───────────────────────────────────────────────
 
-function float_round(float n): float {
-    return round(n);
-}
+        static function sqrt(float n): float {
+            return __sqrt(n); // host function
+        }
 
-function float_sqrt(float n): float {
-    return sqrt(n);
-}
+        static function pow(float a, float b): float {
+            return __pow(a, b); // host function
+        }
 
-function float_toInt(float n): int {
-    return toInt(n);
-}
+        static function floor(float n): float {
+            return __floor(n); // host function
+        }
 
-function float_toString(float n): string {
-    return n as string;
-}
+        static function ceil(float n): float {
+            return __ceil(n); // host function
+        }
 
-function float_isNear(float a, float b, float epsilon): bool {
-    float d = a - b;
-    if (d < 0.0) { d = 0.0 - d; }
-    return d <= epsilon;
+        static function round(float n): float {
+            return __round(n); // host function
+        }
+
+        static function sin(float n): float {
+            return __sin(n); // host function
+        }
+
+        static function cos(float n): float {
+            return __cos(n); // host function
+        }
+
+        static function tan(float n): float {
+            return __tan(n); // host function
+        }
+
+        static function log(float n): float {
+            return __log(n); // host function
+        }
+
+        static function log2(float n): float {
+            return __log2(n); // host function
+        }
+
+        static function log10(float n): float {
+            return __log10(n); // host function
+        }
+
+        // ───────────────────────────────────────────────
+        // Conversions
+        // ───────────────────────────────────────────────
+
+        static function toInt(float n): int {
+            return __toInt(n); // host function
+        }
+
+        static function toString(float n): string {
+            return n as string; // pure XenoScript
+        }
+
+        // ───────────────────────────────────────────────
+        // Utility helpers
+        // ───────────────────────────────────────────────
+
+        static function isNear(float a, float b, float epsilon): bool {
+            float d = a - b;
+            if (d < 0.0) { d = 0.0 - d; }
+            return d <= epsilon;
+        }
 }

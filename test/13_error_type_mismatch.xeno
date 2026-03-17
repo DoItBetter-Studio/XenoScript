@@ -1,0 +1,8 @@
+// Tests: type mismatch errors are caught at compile time
+@Mod("error_type_mismatch", "1.0.0", "Test")
+class ErrorTypeMismatch {
+    public:
+        ErrorTypeMismatch() {
+            int x = "hello";
+        }
+}

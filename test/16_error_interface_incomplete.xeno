@@ -1,0 +1,14 @@
+// Tests: class that doesn't implement all interface methods is rejected
+interface IFoo {
+    function bar(): void;
+    function baz(): int;
+}
+class Bad : IFoo {
+    function bar(): void { }
+    // missing baz()
+}
+@Mod("error_interface_incomplete", "1.0.0", "Test")
+class ErrorInterfaceIncomplete {
+    public:
+        ErrorInterfaceIncomplete() { }
+}

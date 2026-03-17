@@ -1,0 +1,19 @@
+// Tests: final fields — inline init and constructor assignment
+class Config {
+    final string name;
+    final int version = 1;
+
+    Config(string name) {
+        this.name = name;
+    }
+}
+
+@Mod("final_fields", "1.0.0", "Test")
+class FinalFields {
+    public:
+        FinalFields() {
+            Config c = new Config("MyGame");
+            print(c.name);
+            print(c.version);
+        }
+}

@@ -1,4 +1,0 @@
-function main(): void {
-    int x = 5;
-    float y = x as float; // runtime error
-}

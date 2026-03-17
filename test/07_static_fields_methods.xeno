@@ -1,0 +1,24 @@
+// Tests: static fields, static methods, static final constants
+class Counter {
+    static int count = 0;
+    static final int MAX = 100;
+
+    static function increment(): void { Counter.count = Counter.count + 1; }
+    static function reset(): void     { Counter.count = 0; }
+    static function get(): int        { return Counter.count; }
+}
+
+@Mod("static_fields_methods", "1.0.0", "Test")
+class StaticFieldsMethods {
+    public:
+        StaticFieldsMethods() {
+            print(Counter.get());
+            Counter.increment();
+            Counter.increment();
+            Counter.increment();
+            print(Counter.get());
+            Counter.reset();
+            print(Counter.get());
+            print(Counter.MAX);
+        }
+}

@@ -1,0 +1,80 @@
+// Test 23: virtual / override
+// Expected output:
+// Generic makes a sound
+// Rex says: Woof!
+// Tiny says: Yip!
+// Whiskers makes a sound
+// Dog: Rex
+// Dog: Tiny
+
+@Mod("virtual_override", "1.0.0", "virtual and override test")
+class VirtualOverride {
+    public:
+        VirtualOverride() {
+            Animal a = new Animal("Generic");
+            Animal d = new Dog("Rex");
+            Animal p = new Puppy("Tiny");
+            Animal c = new Cat("Whiskers");
+
+            print(a.speak());
+            print(d.speak());
+            print(p.speak());
+            print(c.speak());
+            print(d.describe());
+            print(p.describe());
+        }
+}
+
+class Animal {
+    private:
+        string name;
+    public:
+        Animal(string n) {
+            this.name = n;
+        }
+
+        function getName(): string {
+            return this.name;
+        }
+
+        virtual function speak(): string {
+            return this.name + " makes a sound";
+        }
+
+        virtual function describe(): string {
+            return "Animal: " + this.name;
+        }
+}
+
+class Dog : Animal {
+    public:
+        Dog(string n) {
+            super(n);
+        }
+
+        override function speak(): string {
+            return this.getName() + " says: Woof!";
+        }
+
+        override function describe(): string {
+            return "Dog: " + this.getName();
+        }
+}
+
+class Puppy : Dog {
+    public:
+        Puppy(string n) {
+            super(n);
+        }
+
+        override function speak(): string {
+            return this.getName() + " says: Yip!";
+        }
+}
+
+class Cat : Animal {
+    public:
+        Cat(string n) {
+            super(n);
+        }
+}

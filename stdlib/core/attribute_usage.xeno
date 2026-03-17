@@ -1,12 +1,15 @@
-import "attribute.xeno"
-import "attribute_target.xeno"
-
-class AttributeUsage: Attribute
-{
+// Controls which targets a custom attribute class may be applied to.
+// Place @AttributeUsage on your attribute class to restrict its usage.
+//
+// Example:
+//   @AttributeUsage([AttributeTarget.Method])
+//   class Event : Attribute { ... }
+@AttributeUsage([AttributeTarget.Class])
+class AttributeUsage : Attribute {
     public:
-        Target[] targets;
-        AttributeUsage(Target[] t)
-        {
-            targets = t;
+        AttributeTarget[] targets;
+
+        AttributeUsage(AttributeTarget[] targets) {
+            this.targets = targets;
         }
 }

@@ -33,6 +33,8 @@ typedef struct {
     const char *start;    /* Start of the current token being scanned */
     const char *current;  /* Next character to be consumed            */
     int         line;     /* Current line number (1-based)            */
+    int         col;      /* Current column number (1-based)          */
+    int         token_start_col; /* Column at start of current token  */
 
     /* ── Interpolated string state ──────────────────────────────────────
      * interp_depth > 0 means we are inside a $"..." string.

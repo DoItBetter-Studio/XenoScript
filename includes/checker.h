@@ -36,7 +36,7 @@
  * ───────────────────────────────────────────────────────────────────────────*/
 
 #define MAX_PARAMS      16    /* Maximum parameters per function             */
-#define SCOPE_MAX_SYMS  64   /* Maximum symbols per scope level             */
+#define SCOPE_MAX_SYMS  256   /* Maximum symbols per scope level             */
 #define MAX_SCOPE_DEPTH 32    /* Maximum nesting depth (scopes on the stack) */
 #define CHECKER_MAX_ERRORS 64
 
@@ -46,6 +46,7 @@ typedef enum {
     SYM_CLASS,      /* A class name: type is TYPE_OBJECT               */
     SYM_ENUM,       /* An enum name: type is TYPE_ENUM                 */
     SYM_INTERFACE,  /* An interface name: compile-time only            */
+    SYM_EVENT,      /* A top-level event declaration                   */
 } SymbolKind;
 
 typedef struct {
@@ -72,7 +73,11 @@ typedef struct {
     /* For SYM_CLASS only — pointer back to the STMT_CLASS_DECL AST node.
      * Used by field/method lookup in the type checker.
      * NULL for non-class symbols. */
-    struct Stmt *class_decl;
+    struct Stmt    *class_decl;
+
+    /* For SYM_CLASS only — pointer to the compiled ClassDef (from staging).
+     * Set by checker_declare_class_from_def; NULL for source-compiled classes. */
+    void           *class_def;  /* actually ClassDef* — cast at use sites */
 
     /* For SYM_CLASS only — null-terminated copy of the class name, safe
      * to pass to strlen/strcmp. Source tokens are NOT null-terminated. */
@@ -90,6 +95,16 @@ typedef struct {
 
     /* For SYM_INTERFACE only — null-terminated copy of the interface name. */
     char iface_name_buf[64];
+
+    /* For SYM_EVENT only — pointer back to the STMT_EVENT_DECL AST node. */
+    struct Stmt *event_decl_node;
+
+    /* Definition location — set when the symbol is declared.
+     * Used by the LSP for go-to-definition.
+     * def_file is a heap-allocated path string (or NULL for built-ins). */
+    char       *def_file;
+    int         def_line;
+    int         def_col;
 } Symbol;
 
 /*
@@ -102,6 +117,20 @@ typedef struct {
     Symbol symbols[SCOPE_MAX_SYMS];
     int    count;
 } Scope;
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * USAGE RECORDS — every resolved symbol reference, for find-references / LSP
+ * ───────────────────────────────────────────────────────────────────────────*/
+
+#define CHECKER_MAX_USAGES 16384
+
+typedef struct {
+    const char *file;    /* Borrowed from checker->source_file — do not free */
+    int         line;
+    int         col;
+    int         length;  /* Token length, for highlight range                */
+    Symbol     *sym;     /* The symbol being referenced (points into scopes) */
+} UsageRecord;
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * CHECKER STATE
@@ -142,6 +171,25 @@ typedef struct {
     /* Set to true while type-checking the body of a static method.
      * Prevents implicit 'this' rewrites and blocks 'this' expressions. */
     bool  in_static_method;
+
+    /* Set to true while type-checking a constructor body.
+     * Allows assignment to final fields; outside constructor it is forbidden. */
+    bool  in_constructor;
+
+    /* Definite-assignment tracking for final fields in the constructor.
+     * final_field_assigned[i] is true if fields[i] (from current_class) has
+     * been definitely assigned. Supports up to CLASS_MAX_FIELDS fields. */
+    bool  final_field_assigned[64];
+
+    /* Source file path — set before checker_check() is called.
+     * Used to populate def_file on symbols and usage records.
+     * Borrowed — do not free. */
+    const char *source_file;
+
+    /* Usage collection — every resolved symbol reference in this file.
+     * Populated during check_expr / check_stmt; read by the LSP. */
+    UsageRecord usages[CHECKER_MAX_USAGES];
+    int         usage_count;
 
     /* Error accumulation */
     CheckError errors[CHECKER_MAX_ERRORS];
@@ -189,5 +237,22 @@ bool checker_check(Checker *checker, Program *program);
 
 /* Print all type errors to stderr */
 void checker_print_errors(const Checker *checker);
+
+/* ── LSP support ─────────────────────────────────────────────────────────────
+ *
+ * checker_find_symbol_at — given a source location, return the Symbol that
+ * the expression at (line, col) resolves to, or NULL if none.
+ * Searches the usage records recorded during checker_check().
+ *
+ * checker_find_definition — convenience: returns the definition location
+ * of the symbol at (line, col).
+ *
+ * checker_usages_of — fills `out` with up to `max` UsageRecords that refer
+ * to the same symbol as the one at (line, col). Returns the count filled.
+ */
+Symbol       *checker_find_symbol_at(const Checker *c, int line, int col);
+const Symbol *checker_find_definition(const Checker *c, int line, int col);
+int           checker_usages_of(const Checker *c, int line, int col,
+                                UsageRecord *out, int max);
 
 #endif /* CHECKER_H */

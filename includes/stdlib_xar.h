@@ -50,12 +50,19 @@ typedef struct {
 #define STDLIB_XAR_EXPLICIT_COUNT 2
 #define STDLIB_XAR_TOTAL_COUNT (STDLIB_XAR_AUTO_COUNT + STDLIB_XAR_EXPLICIT_COUNT)
 
+#ifndef XAR_BOOTSTRAP
 static const StdlibXarEntry STDLIB_XAR_TABLE[] = {
     /* Auto-loaded (index 0..STDLIB_XAR_AUTO_COUNT-1) */
     { "core",        xar_core_start,        xar_core_end        },
-    /* Explicit import <name> */
+    /* Explicit import <n> */
     { "math",        xar_math_start,        xar_math_end        },
     { "collections", xar_collections_start, xar_collections_end },
 };
+#else
+/* Bootstrap build: no stdlib embedded yet */
+#undef  STDLIB_XAR_TOTAL_COUNT
+#define STDLIB_XAR_TOTAL_COUNT 0
+static const StdlibXarEntry STDLIB_XAR_TABLE[] = {{0}};
+#endif
 
 #endif /* STDLIB_XAR_H */

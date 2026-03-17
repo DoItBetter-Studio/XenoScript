@@ -1,0 +1,12 @@
+// Tests: reassigning a final field is a compile error
+class Foo {
+    final int x = 10;
+    function bad(): void {
+        x = 20;
+    }
+}
+@Mod("error_final_reassign", "1.0.0", "Test")
+class ErrorFinalReassign {
+    public:
+        ErrorFinalReassign() { }
+}

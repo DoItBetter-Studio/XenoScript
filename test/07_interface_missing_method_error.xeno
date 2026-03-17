@@ -1,9 +1,0 @@
-interface IFoo {
-    function bar(): void;
-}
-
-class Bad : IFoo {
-    // missing bar() → should be compile error
-}
-
-function main(): void {}

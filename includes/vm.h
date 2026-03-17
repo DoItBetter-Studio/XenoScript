@@ -81,16 +81,34 @@ typedef struct {
  * One frame per active function invocation.
  * Frames are stored in a fixed-size stack inside the VM.
  * ───────────────────────────────────────────────────────────────────────────*/
+#define XENO_MAX_TYPE_ARGS 8   /* Maximum generic type params per instantiation */
+
 typedef struct {
     Chunk   *chunk;              /* The chunk being executed                */
     uint8_t *ip;                 /* Instruction pointer into chunk->code    */
     Value    slots[XENO_LOCALS_MAX]; /* Local variable slots for this call  */
+    /* Concrete type arguments for generic instantiation (e.g. T=string, K=int).
+     * Populated by OP_NEW when constructing a generic class.
+     * Indexed by type param position (T=0, K=0, V=1, etc.). */
+    uint8_t  type_args[XENO_MAX_TYPE_ARGS];
+    uint8_t  type_arg_count;
 } CallFrame;
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * THE VM
  * ───────────────────────────────────────────────────────────────────────────*/
+/* ── Exception handler frame ─────────────────────────────────────────────── */
+#define XENO_HANDLER_MAX 64   /* Maximum nesting depth of try blocks */
+
+typedef struct {
+    int      frame_count;   /* call-frame depth when TRY_BEGIN was hit        */
+    Value   *sp;            /* value-stack pointer when TRY_BEGIN was hit     */
+    uint8_t *catch_ip;      /* instruction pointer to jump to on throw        */
+    Chunk   *catch_chunk;   /* chunk the catch_ip lives in                    */
+    char     class_name[64];/* exception class name filter ("" = catch all)   */
+} ExceptionHandler;
+
 struct XenoVM {
     /* Execution state */
     CallFrame   frames[XENO_FRAME_MAX];   /* Call frame stack               */
@@ -108,16 +126,61 @@ struct XenoVM {
 
     /* Stdlib module pool — merged into every compiled module before execution.
      * Populated by xeno_vm_load_stdlib() from embedded .xar blobs. */
-    Module      stdlib_modules[64];
+    Module     *stdlib_modules[64];   /* heap-allocated stdlib modules         */
     int         stdlib_module_count;
     char        stdlib_loaded_names[64][XAR_MAX_NAME]; /* dedup by name */
 
     /* Mod search path — directory scanned for user .xar files at startup */
     char        mod_path[512];
 
+    /* Generic element-kind register — set by OP_ARRAY_GET, read by OP_CMP_EQ_VAL */
+    uint8_t     elem_kind_reg;
+
+    /* Exception handler stack */
+    ExceptionHandler handlers[XENO_HANDLER_MAX];
+    int              handler_count;
+    Value            caught_exception; /* the object caught by current catch block */
+
     /* Error state */
     char        error[256];               /* Last runtime error message      */
     bool        had_error;
+
+    /* Event handler table — maps event names to lists of subscribed handlers.
+     * Each handler is either a static/top-level function (receiver.obj == NULL /
+     * is_null == true) or a bound delegate (receiver holds the instance). */
+#define XENO_MAX_EVENTS        64
+#define XENO_MAX_EVENT_HANDLERS 32
+    struct {
+        char  name[64];
+        struct {
+            char  fn_name[64];  /* function/method name to resolve at fire time */
+            Value receiver;     /* val_null() for static, object for bound      */
+        } handlers[XENO_MAX_EVENT_HANDLERS];
+        int   handler_count;
+        bool  active;
+    } event_table[XENO_MAX_EVENTS];
+    int event_count;
+
+    /* Pending event fire state — used to fire handlers iteratively without
+     * recursive calls to xeno_execute. When OP_EVENT_FIRE starts firing:
+     *   pending_event_idx    = index into event_table
+     *   pending_handler      = next handler to call (0-based)
+     *   pending_fire_args       = saved argument values
+     *   pending_fire_argc       = number of saved arguments
+     *   pending_fire_resolved[i]  = resolved chunk index for handler i
+     *   pending_fire_receivers[i] = receiver for handler i (val_null if static)
+     *   pending_fire_active     = true while a fire is in progress */
+#define XENO_MAX_EVENT_ARGS 16
+    bool  pending_fire_active;
+    int   pending_event_idx;
+    int   pending_handler;
+    int   pending_fire_argc;
+    Value pending_fire_args[XENO_MAX_EVENT_ARGS];
+    int   pending_fire_resolved[XENO_MAX_EVENT_HANDLERS];  /* chunk indices    */
+    Value pending_fire_receivers[XENO_MAX_EVENT_HANDLERS]; /* bound receivers  */
+    int   pending_fire_handler_count;
+    /* frame count when the event fire was initiated — used to detect handler return */
+    int   pending_fire_base_frame;
 
     /* Dev/hot-reload state — compiler owned by VM for source mode */
     Module      source_module;            /* Module compiled from source     */

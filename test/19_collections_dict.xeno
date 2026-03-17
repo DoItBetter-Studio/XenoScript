@@ -1,0 +1,22 @@
+import <collections>;
+
+@Mod("collections_dict", "1.0.0", "Test")
+class CollectionsDict {
+    public:
+        CollectionsDict() {
+            Dictionary<int, string> d = new Dictionary<int, string>();
+            d.Add(1, "sword");
+            d.Add(2, "shield");
+            d.Add(3, "potion");
+            print(d.Count());
+            print(d.ContainsKey(2));
+            print(d.ContainsKey(99));
+            print(d.get(1));
+            print(d.get(3));
+            d.set(2, "tower shield");
+            print(d.get(2));
+            d.Remove(1);
+            print(d.Count());
+            print(d.ContainsKey(1));
+        }
+}

@@ -1,0 +1,13 @@
+class SomethingElse
+{
+    private:
+        int number;
+        string text;
+
+    public:
+        SomethingElse(int number, string text)
+        {
+            this.number = number;
+            this.text = text;
+        }
+}

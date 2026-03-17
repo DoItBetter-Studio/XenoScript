@@ -7,7 +7,7 @@
  *
  *   xenoc build [project-dir] [-o out.xar]
  *       Project mode: reads xeno.project, recursively compiles all
- *       .xeno files under src/, loads deps from deps\*.xar, validates
+ *       .xeno files under src/, loads deps from deps/ *.xar, validates
  *       @Mod id matches xeno.project id, writes a single .xar output.
  *
  * Project directory layout expected by `xenoc build`:
@@ -18,8 +18,11 @@
  */
 #define _DEFAULT_SOURCE
 #include "compile_pipeline.h"
+
 #include "xar.h"
 #include "toml.h"
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,16 +73,16 @@ static int compile_single(const char *input_path,
         return 2;
     }
 
-    Module staging; module_init(&staging);
+    Module *staging = (Module*)calloc(1, sizeof(Module)); module_init(staging);
     bool import_err = false;
-    char *merged = pipeline_prepare(main_source, input_path, &staging, &import_err);
+    char *merged = pipeline_prepare(main_source, input_path, staging, &import_err);
     free(main_source);
-    if (import_err || !merged) { free(merged); module_free(&staging); return 1; }
+    if (import_err || !merged) { free(merged); module_free(staging); return 1; }
 
     Lexer lexer; Parser parser; Checker *checker = malloc(sizeof(Checker));
-    Compiler compiler; Module module;
+    Compiler compiler; Module *module = (Module*)calloc(1, sizeof(Module));
     lexer_init(&lexer, merged); parser_init(&parser, &lexer);
-    checker_init(checker, &parser.arena); module_init(&module);
+    checker_init(checker, &parser.arena); module_init(module);
 
     int exit_code = 0;
 
@@ -89,8 +92,8 @@ static int compile_single(const char *input_path,
     compiler_host_table_init(&host_table);
     compiler_host_table_add_any(&host_table, "print", 0, 1);
     stdlib_declare_host_fns(checker, &host_table);
-    pipeline_declare_staging(checker, &staging);
-    module_merge(&module, &staging);
+    pipeline_declare_staging(checker, staging);
+    module_merge(module, staging);
 
     Program program = parser_parse(&parser);
     if (parser.had_error) {
@@ -107,20 +110,21 @@ static int compile_single(const char *input_path,
         if (!ok) { exit_code = 1; goto cleanup_single; }
     }
 
-    if (!compiler_compile(&compiler, &program, &module, &host_table)) {
+    if (!compiler_compile(&compiler, &program, module, &host_table)) {
         fprintf(stderr, "xenoc: compile errors in '%s':\n", input_path);
         compiler_print_errors(&compiler); exit_code = 1; goto cleanup_single;
     }
+    module_strip_stdlib(module, staging);  /* strip stdlib from output XBC */
 
     if (dump_only) {
-        module_disassemble(&module);
+        module_disassemble(module);
     } else {
         char default_out[512];
         if (!output_path) {
             make_xbc_path(input_path, default_out, sizeof(default_out));
             output_path = default_out;
         }
-        XbcResult r = xbc_write(&module, output_path);
+        XbcResult r = xbc_write(module, output_path);
         if (r != XBC_OK) {
             fprintf(stderr, "xenoc: failed to write '%s': %s\n",
                     output_path, xbc_result_str(r));
@@ -130,7 +134,7 @@ static int compile_single(const char *input_path,
     }
 
 cleanup_single:
-    module_free(&module); module_free(&staging);
+    module_free(module); free(module); module_free(staging);
     parser_free(&parser); free(checker); free(merged);
     return exit_code;
 }
@@ -178,10 +182,10 @@ static bool load_dep_into_staging(const char *xar_path, Module *staging) {
         return false;
     }
     for (int i = 0; i < ar.chunk_count; i++) {
-        Module cm; module_init(&cm);
-        if (xbc_read_mem(&cm, ar.chunks[i].data, ar.chunks[i].size) == XBC_OK) {
-            module_merge(staging, &cm);
-            module_free(&cm);
+        Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+        if (xbc_read_mem(cm, ar.chunks[i].data, ar.chunks[i].size) == XBC_OK) {
+            module_merge(staging, cm);
+            module_free(cm);
         }
     }
     xar_archive_free(&ar);
@@ -260,21 +264,57 @@ static int build_project(const char *project_dir, const char *output_path) {
     }
     printf("xenoc: found %d source file(s)\n", source_count);
 
-    /* 3. Load deps from deps/<id>.xar into staging */
-    Module staging;
-    module_init(&staging);
+    /* 3. Pre-seed staging with stdlib in the same order the VM loads it.
+     * This must happen before deps so class indices match at runtime:
+     *   stdlib (core → math → collections) → deps → user code. */
     char deps_dir[512];
     snprintf(deps_dir, sizeof(deps_dir), "%s/deps", project_dir);
+    Module *staging = (Module*)calloc(1, sizeof(Module)); module_init(staging);
+    PipelineState seed_state; pipeline_state_init(&seed_state);
+    snprintf(seed_state.deps_dir, sizeof(seed_state.deps_dir), "%s", deps_dir);
+    for (int i = 0; i < STDLIB_XAR_TOTAL_COUNT; i++)
+        pipeline_load_sys_module(&seed_state, STDLIB_XAR_TABLE[i].name, staging);
+    int stdlib_class_count = staging->class_count; /* classes from stdlib only — kept for dep filtering below */
+    (void)stdlib_class_count;
+
+    /* 4. Load deps from deps/<id>.xar into staging (after stdlib) */
 
     for (int i = 0; i < manifest.dep_count; i++) {
+        const char *dep_name = manifest.dependencies[i];
         char dep_path[1024];
-        snprintf(dep_path, sizeof(dep_path), "%s/%s.xar",
-                 deps_dir, manifest.dependencies[i]);
-        printf("xenoc: loading dep '%s'\n", manifest.dependencies[i]);
-        if (!load_dep_into_staging(dep_path, &staging)) {
-            for (int j = 0; j < source_count; j++) free(source_paths[j]);
-            module_free(&staging);
-            return 1;
+        snprintf(dep_path, sizeof(dep_path), "%s/%s.xar", deps_dir, dep_name);
+
+        /* Check if this dep is satisfied by the embedded stdlib (by name match) */
+        bool is_stdlib_dep = false;
+        for (int xi = 0; xi < STDLIB_XAR_TOTAL_COUNT; xi++) {
+            if (strcmp(STDLIB_XAR_TABLE[xi].name, dep_name) == 0) {
+                is_stdlib_dep = true; break;
+            }
+        }
+        /* Also check if the dep provides the same classes as any stdlib XAR —
+         * e.g. a "libraries" dep that bundles collections. We detect this by
+         * checking if the dep file exists at all; if not and it's not an
+         * explicit stdlib name, warn but don't fail (the embedded stdlib covers it). */
+        FILE *dep_fp = fopen(dep_path, "rb");
+        if (dep_fp) {
+            fclose(dep_fp);
+            printf("xenoc: loading dep '%s'\n", dep_name);
+            if (!load_dep_into_staging(dep_path, staging)) {
+                for (int j = 0; j < source_count; j++) free(source_paths[j]);
+                module_free(staging);
+                return 1;
+            }
+            /* Mark this dep as pre-loaded so pipeline won't try to re-inline it */
+            if (seed_state.sys_loaded_count < PIPELINE_MAX_SYS)
+                strncpy(seed_state.sys_loaded[seed_state.sys_loaded_count++],
+                        dep_name, 63);
+        } else if (is_stdlib_dep) {
+            /* Stdlib dep by name — already embedded, skip file load */
+        } else {
+            /* Unknown dep not found in deps/ — warn but continue.
+             * The embedded stdlib may cover it (e.g. "libraries" = collections). */
+            printf("xenoc: note: dep '%s' not found in deps/ (assuming stdlib-compatible)\n",
+                   dep_name);
         }
     }
 
@@ -282,7 +322,7 @@ static int build_project(const char *project_dir, const char *output_path) {
     size_t merged_cap = 131072;
     char  *merged_all = malloc(merged_cap);
     size_t merged_len = 0;
-    if (!merged_all) { module_free(&staging); return 1; }
+    if (!merged_all) { module_free(staging); return 1; }
     merged_all[0] = '\0';
 
     for (int i = 0; i < source_count; i++) {
@@ -291,24 +331,19 @@ static int build_project(const char *project_dir, const char *output_path) {
             fprintf(stderr, "xenoc: cannot open '%s'\n", source_paths[i]);
             free(merged_all);
             for (int j = 0; j < source_count; j++) free(source_paths[j]);
-            module_free(&staging);
+            module_free(staging);
             return 2;
         }
         printf("xenoc:   + %s\n", source_paths[i]);
 
         bool imp_err = false;
-        char *file_merged = strdup(src);
-        // char *file_merged = pipeline_prepare_project(
-        //     src, 
-        //     source_paths[i],
-        //     deps_dir,
-        //     &staging,
-        //     &imp_err);
+        char *file_merged = pipeline_prepare_project_seeded(src, source_paths[i],
+                                              deps_dir, staging, &seed_state, &imp_err);
         free(src);
         if (imp_err || !file_merged) {
             free(file_merged); free(merged_all);
             for (int j = 0; j < source_count; j++) free(source_paths[j]);
-            module_free(&staging);
+            module_free(staging);
             return 1;
         }
 
@@ -319,7 +354,7 @@ static int build_project(const char *project_dir, const char *output_path) {
             if (!tmp) {
                 free(file_merged); free(merged_all);
                 for (int j = 0; j < source_count; j++) free(source_paths[j]);
-                module_free(&staging);
+                module_free(staging);
                 return 1;
             }
             merged_all = tmp;
@@ -339,7 +374,7 @@ static int build_project(const char *project_dir, const char *output_path) {
             fprintf(stderr,
                     "xenoc: @Mod id '%s' does not match xeno.project id '%s'\n",
                     found_id, manifest.name);
-            free(merged_all); module_free(&staging);
+            free(merged_all); module_free(staging);
             return 1;
         }
         printf("xenoc: @Mod id '%s' verified\n", found_id);
@@ -352,12 +387,12 @@ static int build_project(const char *project_dir, const char *output_path) {
     Parser   parser;
     Checker *checker = malloc(sizeof(Checker));
     Compiler compiler;
-    Module   module;
+    Module  *module  = (Module*)calloc(1, sizeof(Module));
 
     lexer_init(&lexer, merged_all);
     parser_init(&parser, &lexer);
     checker_init(checker, &parser.arena);
-    module_init(&module);
+    module_init(module);
 
     int exit_code = 0;
 
@@ -367,8 +402,10 @@ static int build_project(const char *project_dir, const char *output_path) {
     compiler_host_table_init(&host_table);
     compiler_host_table_add_any(&host_table, "print", 0, 1);
     stdlib_declare_host_fns(checker, &host_table);
-    pipeline_declare_staging(checker, &staging);
-    // module_merge(&module, &staging);
+    /* Declare only dep classes to checker — stdlib classes are declared from
+     * inlined source so the checker gets full generic/field type information. */
+    pipeline_declare_staging(checker, staging);
+    module_merge(module, staging);
 
     Program program = parser_parse(&parser);
     if (parser.had_error) {
@@ -385,24 +422,29 @@ static int build_project(const char *project_dir, const char *output_path) {
         if (!ok) { exit_code = 1; goto cleanup_build; }
     }
 
-    if (!compiler_compile(&compiler, &program, &module, &host_table)) {
+    if (!compiler_compile(&compiler, &program, module, &host_table)) {
         fprintf(stderr, "xenoc: compile errors:\n");
         compiler_print_errors(&compiler); exit_code = 1; goto cleanup_build;
     }
+    module_strip_stdlib(module, staging);  /* strip stdlib from output XAR */
+
+    /* Extract ModMetadata from @Mod attribute on the compiled classes.
+     * staging provides the Mod class field order for arg→field mapping. */
+    module_extract_mod_metadata(module, staging);
 
     /* 7. Serialise module to .xbc bytes and wrap in .xar */
     {
         uint8_t *xbc_data = NULL;
         size_t   xbc_size = 0;
-        XbcResult xr = xbc_write_mem(&module, &xbc_data, &xbc_size);
+        XbcResult xr = xbc_write_mem(module, &xbc_data, &xbc_size);
         if (xr != XBC_OK) {
             fprintf(stderr, "xenoc: serialise failed: %s\n", xbc_result_str(xr));
             exit_code = 2; goto cleanup_build;
         }
 
         /* Export = the actual @Mod entry class name from the compiled module */
-        const char *entry_class = module.metadata.entry_class[0]
-                                  ? module.metadata.entry_class
+        const char *entry_class = module->metadata.entry_class[0]
+                                  ? module->metadata.entry_class
                                   : manifest.name;
         snprintf(manifest.exports[0], XAR_MAX_NAME, "%s", entry_class);
         manifest.export_count = 1;
@@ -426,7 +468,6 @@ static int build_project(const char *project_dir, const char *output_path) {
         snprintf(chunk.name, sizeof(chunk.name), "%s", manifest.name);
         chunk.data = xbc_data;
         chunk.size = xbc_size;
-
         XarResult wr = xar_write(output_path, &manifest, &chunk, 1);
         free(xbc_data);
 
@@ -439,7 +480,7 @@ static int build_project(const char *project_dir, const char *output_path) {
     }
 
 cleanup_build:
-    module_free(&module); module_free(&staging);
+    module_free(module); free(module); module_free(staging);
     parser_free(&parser); free(checker); free(merged_all);
     return exit_code;
 }

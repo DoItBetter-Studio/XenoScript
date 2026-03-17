@@ -22,6 +22,7 @@
 #include <stdint.h>   /* uint8_t       */
 #include <stdlib.h>   /* malloc, free  */
 #include <string.h>   /* memset        */
+#include <stdalign.h> /* _Alignof      */
 
 #define ARENA_DEFAULT_SIZE (1024 * 1024)  /* 1 MB — more than enough for scripts */
 
@@ -50,7 +51,7 @@ static inline int arena_init(Arena *arena, size_t size) {
  * architectures. */
 static inline void *arena_alloc(Arena *arena, size_t size) {
     /* Round up to the next pointer-aligned boundary */
-    size_t align    = sizeof(void *);
+    size_t align    = _Alignof(max_align_t);
     size_t aligned  = (size + align - 1) & ~(align - 1);
 
     if (arena->offset + aligned > arena->size) return NULL;  /* out of space */

@@ -1,0 +1,121 @@
+// XenoScript Standard Library — Dictionary<K,V>
+// A key-value map modelled after C# Dictionary<K,V>.
+// Backed by parallel arrays with linear search — suitable for mod use cases.
+
+class Dictionary<K, V> {
+    private:
+        K[]  keys;
+        V[]  values;
+        int  size;
+        int  capacity;
+
+    public:
+        Dictionary() {
+            capacity = 8;
+            keys     = new K[8];
+            values   = new V[8];
+            size     = 0;
+        }
+
+        // Add a new key/value pair. Runtime error if key already exists.
+        function Add(K key, V value): void {
+            if (ContainsKey(key)) {
+                print("Dictionary: key already exists");
+                return;
+            }
+            if (size >= capacity) {
+                capacity = capacity * 2;
+                keys     = __array_grow(keys,   capacity);
+                values   = __array_grow(values, capacity);
+            }
+            keys[size]   = key;
+            values[size] = value;
+            size = size + 1;
+        }
+
+        // Get value by key. Runtime error if key does not exist.
+        function get(K key): V {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] == key) { return values[i]; }
+            }
+            print("Dictionary: key not found");
+            return values[0];
+        }
+
+        // Set value for existing key, or add if not present.
+        function set(K key, V value): void {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] == key) {
+                    values[i] = value;
+                    return;
+                }
+            }
+            Add(key, value);
+        }
+
+        // Returns true if the key exists.
+        function ContainsKey(K key): bool {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] == key) { return true; }
+            }
+            return false;
+        }
+
+        // Remove a key/value pair. No-op if key does not exist.
+        function Remove(K key): void {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] == key) {
+                    for (int j = i; j < size - 1; j++) {
+                        keys[j]   = keys[j + 1];
+                        values[j] = values[j + 1];
+                    }
+                    size = size - 1;
+                    return;
+                }
+            }
+        }
+
+        // Try to get a value — returns false and leaves outValue unchanged if missing.
+        function TryGetValue(K key, V outValue): bool {
+            for (int i = 0; i < size; i++) {
+                if (keys[i] == key) {
+                    outValue = values[i];
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Number of entries in the dictionary.
+        function Count(): int {
+            return size;
+        }
+
+        // Returns true if the dictionary has no entries.
+        function isEmpty(): bool {
+            return size == 0;
+        }
+
+        // Remove all entries.
+        function Clear(): void {
+            size = 0;
+        }
+
+        // Returns all keys as an array.
+        function Keys(): K[] {
+            K[] result = new K[size];
+            for (int i = 0; i < size; i++) {
+                result[i] = keys[i];
+            }
+            return result;
+        }
+
+        // Returns all values as an array.
+        function Values(): V[] {
+            V[] result = new V[size];
+            for (int i = 0; i < size; i++) {
+                result[i] = values[i];
+            }
+            return result;
+        }
+}

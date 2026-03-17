@@ -1,0 +1,42 @@
+// Test 24: event keyword — pub/sub
+
+@Mod("Events", "1.0.0", "Test")
+class Events {
+    event OnDamage(int amount, string source);
+    event OnHeal(int amount);
+
+    static function handleDamage(int amount, string source): void {
+        print("Damaged: " + amount + " from " + source);
+    }
+
+    static function handleDamage2(int amount, string source): void {
+        print("Also handled: " + amount);
+    }
+
+    static function handleHeal(int amount): void {
+        print("Healed: " + amount);
+    }
+
+    public:
+        Events() {
+            // Subscribe
+            OnDamage += handleDamage;
+            OnDamage += handleDamage2;
+            OnHeal += handleHeal;
+
+            // Fire — both handlers called in order
+            OnDamage(50, "fire");
+            OnHeal(20);
+
+            // Unsubscribe one handler
+            OnDamage -= handleDamage;
+
+            // Fire again — only handleDamage2 called
+            OnDamage(10, "poison");
+
+            // Fire event with no subscribers — no-op
+            OnDamage -= handleDamage2;
+            OnDamage(99, "void");
+            print("Done");
+        }
+}

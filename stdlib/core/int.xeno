@@ -1,42 +1,37 @@
 // XenoScript Standard Library — core/int
 // Extension methods for the int primitive type.
-// These are free functions; x.abs() desugars to int_abs(x).
 
-function int_abs(int n): int {
-    if (n < 0) { return 0 - n; }
-    return n;
-}
+class Int {
+    public:
+        static function abs(int n): int {
+            return __abs(n); // host function
+        }
 
-function int_min(int a, int b): int {
-    if (a < b) { return a; }
-    return b;
-}
+        static function min(int a, int b): int {
+            return __min(a, b); // host function
+        }
 
-function int_max(int a, int b): int {
-    if (a > b) { return a; }
-    return b;
-}
+        static function max(int a, int b): int {
+            return __max(a, b); // host function
+        }
 
-function int_clamp(int value, int lo, int hi): int {
-    if (value < lo) { return lo; }
-    if (value > hi) { return hi; }
-    return value;
-}
+        static function clamp(int value, int lo, int hi): int {
+            return __clamp(value, lo, hi); // host function
+        }
 
-function int_sign(int n): int {
-    if (n > 0) { return 1; }
-    if (n < 0) { return -1; }
-    return 0;
-}
+        static function sign(int n): int {
+            return __sign(n); // host function
+        }
 
-function int_toFloat(int n): float {
-    return toFloat(n);
-}
+        static function toFloat(int n): float {
+            return __toFloat(n); // host function
+        }
 
-function int_toString(int n): string {
-    return n as string;
-}
+        static function toString(int n): string {
+            return n as string; // pure XenoScript
+        }
 
-function int_inRange(int value, int lo, int hi): bool {
-    return value >= lo && value <= hi;
+        static function inRange(int value, int lo, int hi): bool {
+            return value >= lo && value <= hi; // pure XenoScript
+        }
 }

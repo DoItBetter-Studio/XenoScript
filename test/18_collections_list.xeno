@@ -1,0 +1,28 @@
+import <collections>;
+
+@Mod("collections_list", "1.0.0", "Test")
+class CollectionsList {
+    public:
+        CollectionsList() {
+            List<string> names = new List<string>();
+            names.add("Alice");
+            names.add("Bob");
+            names.add("Carol");
+            print(names.count());
+            print(names.get(0));
+            print(names.get(2));
+            print(names.contains("Bob"));
+            print(names.contains("Dave"));
+            print(names.indexOf("Carol"));
+            names.removeAt(1);
+            print(names.count());
+            print(names.get(1));
+
+            List<int> nums = new List<int>();
+            nums.add(10);
+            nums.add(20);
+            nums.add(30);
+            print(nums.get(1));
+            print(nums.count());
+        }
+}

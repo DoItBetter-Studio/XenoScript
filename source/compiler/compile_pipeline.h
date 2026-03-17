@@ -13,8 +13,8 @@
 #ifndef XENOSCRIPT_COMPILE_PIPELINE_H
 #define XENOSCRIPT_COMPILE_PIPELINE_H
 
-#ifndef _DEFAULT_SOURCE
-#define _DEFAULT_SOURCE
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #endif
 #include "lexer.h"
 #include "parser.h"
@@ -33,8 +33,7 @@
 /* ── Path helpers ─────────────────────────────────────────────────────── */
 
 static void pipeline_dir_of(const char *path, char *out, size_t sz) {
-    snprintf(out, sz, "%.*s", (int)(sz - 1), path);
-    out[sz-1] = '\0';
+    snprintf(out, sz, "%s", path);
     char *sl = strrchr(out, '/');
 #ifdef _WIN32
     char *bs = strrchr(out, '\\');
@@ -129,10 +128,10 @@ static bool pipeline_load_sys_module(PipelineState *s, const char *name,
                     XarArchive dep; memset(&dep, 0, sizeof(dep));
                     if (xar_read_mem(&dep, buf, (size_t)sz) == XAR_OK) {
                         for (int j = 0; j < dep.chunk_count; j++) {
-                            Module cm; module_init(&cm);
-                            if (xbc_read_mem(&cm, dep.chunks[j].data,
+                            Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+                            if (xbc_read_mem(cm, dep.chunks[j].data,
                                              dep.chunks[j].size) == XBC_OK) {
-                                module_merge(staging, &cm); module_free(&cm);
+                                module_merge(staging, cm); module_free(cm); free(cm);
                             }
                         }
                         xar_archive_free(&dep);
@@ -156,9 +155,9 @@ static bool pipeline_load_sys_module(PipelineState *s, const char *name,
             return false;
         }
         for (int j = 0; j < ar.chunk_count; j++) {
-            Module cm; module_init(&cm);
-            if (xbc_read_mem(&cm, ar.chunks[j].data, ar.chunks[j].size) == XBC_OK) {
-                module_merge(staging, &cm); module_free(&cm);
+            Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+            if (xbc_read_mem(cm, ar.chunks[j].data, ar.chunks[j].size) == XBC_OK) {
+                module_merge(staging, cm); module_free(cm); free(cm);
             }
         }
         xar_archive_free(&ar);
@@ -259,7 +258,7 @@ static char *pipeline_resolve_imports(PipelineState *s,
                             fpath, label);
                     *err = true; return out;
                 }
-                char sub[512] = "";
+                char sub[1024] = "";
                 pipeline_dir_of(fpath, sub, sizeof(sub));
                 out = pipeline_resolve_imports(s, src, sub, fpath,
                                                out, len, cap, staging, err);
@@ -267,6 +266,11 @@ static char *pipeline_resolve_imports(PipelineState *s,
                 if (*err || !out) return out;
             }
         }
+        /* Emit a blank line in place of the consumed import statement so that
+         * checker line numbers stay aligned with user-source line numbers.
+         * This matters for LSP hover/definition/references accuracy. */
+        out = pipeline_buf_append(out, len, cap, "\n", 1);
+        if (!out) { *err = true; return out; }
     }
     out = pipeline_buf_append(out, len, cap, p, strlen(p));
     out = pipeline_buf_append(out, len, cap, "\n", 1);
@@ -286,7 +290,9 @@ static Type pipeline_kind_to_type(int kind) {
     }
 }
 
-static inline void pipeline_declare_staging(Checker *checker, const Module *staging) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+static void pipeline_declare_staging(Checker *checker, const Module *staging) {
     for (int i = 0; i < staging->count; i++) {
         const char *nm = staging->names[i];
         if (strcmp(nm, "__sinit__") == 0) continue;
@@ -303,6 +309,30 @@ static inline void pipeline_declare_staging(Checker *checker, const Module *stag
         checker_declare_class_from_def(checker, &staging->classes[i]);
 }
 
+/* Like pipeline_declare_staging but only declares classes at indices >= skip_first.
+ * Used in project builds to skip stdlib classes (which will be declared from
+ * source inlining) and only declare dep classes to the checker. */
+static void pipeline_declare_staging_deps_only(Checker *checker,
+                                                const Module *staging,
+                                                int skip_first) {
+    /* Functions: always declare all (stdlib fns are host-declared separately) */
+    for (int i = 0; i < staging->count; i++) {
+        const char *nm = staging->names[i];
+        if (strcmp(nm, "__sinit__") == 0) continue;
+        if (strchr(nm, '.') != NULL) continue;
+        Chunk *ch = &staging->chunks[i];
+        Type ret = pipeline_kind_to_type(ch->return_type_kind);
+        int pc = ch->param_count < 16 ? ch->param_count : 16;
+        Type params[16];
+        for (int j = 0; j < pc; j++)
+            params[j] = pipeline_kind_to_type(ch->param_type_kinds[j]);
+        checker_declare_host(checker, nm, ret, pc > 0 ? params : NULL, pc);
+    }
+    /* Classes: only declare those from deps (after the stdlib classes) */
+    for (int i = skip_first; i < staging->class_count; i++)
+        checker_declare_class_from_def(checker, &staging->classes[i]);
+}
+
 /* ── Top-level entry point ────────────────────────────────────────────── */
 
 /*
@@ -310,13 +340,16 @@ static inline void pipeline_declare_staging(Checker *checker, const Module *stag
  * populate `staging` with stdlib modules, and return the fully-merged source
  * string (heap-allocated, caller must free). Returns NULL on error.
  */
-static inline char *pipeline_prepare(const char *source, const char *source_path,
+static char *pipeline_prepare(const char *source, const char *source_path,
                                Module *staging, bool *err) {
     PipelineState ps;
     pipeline_state_init(&ps);
 
-    /* Always load core */
+    /* Always load all stdlib so compile-time class indices match
+     * the runtime layout produced by xenovm (which loads all stdlib). */
     pipeline_load_sys_module(&ps, "core", staging);
+    pipeline_load_sys_module(&ps, "math", staging);
+    pipeline_load_sys_module(&ps, "collections", staging);
 
     char base_dir[512] = "";
     if (source_path && *source_path)
@@ -327,6 +360,19 @@ static inline char *pipeline_prepare(const char *source, const char *source_path
     if (!merged) { *err = true; return NULL; }
     merged[0] = '\0';
 
+    /* IEnumerable/IEnumerator interfaces are declared by injecting the source
+     * text so the checker knows about them without an explicit import.
+     * RangeEnumerator and Range are compiled into core.xar and loaded above
+     * via pipeline_load_sys_module — no source re-declaration needed for them. */
+    merged = pipeline_buf_append(merged, &len, &cap,
+                                 xenostd_enumerable_source,
+                                 strlen(xenostd_enumerable_source));
+    if (!merged) { *err = true; return NULL; }
+
+    /* Reset line counter so user source errors report correct line numbers */
+    merged = pipeline_buf_append(merged, &len, &cap, "// @xeno:line 1\n", 16);
+    if (!merged) { *err = true; return NULL; }
+
     *err = false;
     merged = pipeline_resolve_imports(&ps, source, base_dir,
                                        source_path ? source_path : "<source>",
@@ -334,13 +380,12 @@ static inline char *pipeline_prepare(const char *source, const char *source_path
     if (*err || !merged) { free(merged); return NULL; }
     return merged;
 }
-
 /*
  * pipeline_prepare_project — like pipeline_prepare but with a deps_dir so
  * `import <name>` resolves against deps/name.xar before falling back to stdlib.
  * Used by xenoc build and xenovm project mode.
  */
-static inline char *pipeline_prepare_project(const char *source,
+static char *pipeline_prepare_project(const char *source,
                                        const char *source_path,
                                        const char *deps_dir,
                                        Module *staging, bool *err) {
@@ -367,5 +412,57 @@ static inline char *pipeline_prepare_project(const char *source,
     if (*err || !merged) { free(merged); return NULL; }
     return merged;
 }
+
+/* Like pipeline_prepare_project but accepts a pre-initialised PipelineState
+ * so stdlib names already in seed_state are not re-inlined. */
+static char *pipeline_prepare_project_seeded(const char *source,
+                                              const char *source_path,
+                                              const char *deps_dir,
+                                              Module *staging,
+                                              const PipelineState *seed_state,
+                                              bool *err) {
+    PipelineState ps = *seed_state;  /* copy — inherits sys_loaded names */
+    if (deps_dir && *deps_dir)
+        snprintf(ps.deps_dir, sizeof(ps.deps_dir), "%s", deps_dir);
+
+    char base_dir[512] = "";
+    if (source_path && *source_path)
+        pipeline_dir_of(source_path, base_dir, sizeof(base_dir));
+
+    size_t len = 0, cap = 65536;
+    char *merged = malloc(cap);
+    if (!merged) { *err = true; return NULL; }
+    merged[0] = '\0';
+
+    /* Prepend exception source if not already inlined (seed state might have it) */
+    if (!pipeline_local_seen(&ps, "__exception_inlined__")) {
+        pipeline_local_mark(&ps, "__exception_inlined__");
+        merged = pipeline_buf_append(merged, &len, &cap,
+                                     xenostd_exception_source,
+                                     strlen(xenostd_exception_source));
+        if (!merged) { *err = true; return NULL; }
+    }
+    /* Prepend IEnumerable/IEnumerator interfaces */
+    if (!pipeline_local_seen(&ps, "__enumerable_inlined__")) {
+        pipeline_local_mark(&ps, "__enumerable_inlined__");
+        merged = pipeline_buf_append(merged, &len, &cap,
+                                     xenostd_enumerable_source,
+                                     strlen(xenostd_enumerable_source));
+        if (!merged) { *err = true; return NULL; }
+    }
+    /* Reset line counter so user source errors report correct line numbers */
+    merged = pipeline_buf_append(merged, &len, &cap,
+                                 "// @xeno:line 1\n", 16);
+    if (!merged) { *err = true; return NULL; }
+
+    *err = false;
+    merged = pipeline_resolve_imports(&ps, source, base_dir,
+                                       source_path ? source_path : "<source>",
+                                       merged, &len, &cap, staging, err);
+    if (*err || !merged) { free(merged); return NULL; }
+    return merged;
+}
+
+#pragma GCC diagnostic pop
 
 #endif /* XENOSCRIPT_COMPILE_PIPELINE_H */

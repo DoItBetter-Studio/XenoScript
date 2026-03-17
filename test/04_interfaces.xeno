@@ -1,0 +1,38 @@
+// Tests: interfaces, multiple interface implementation, interface dispatch
+interface IGreeter {
+    function greet(): void;
+}
+
+interface INamed {
+    function getName(): string;
+}
+
+class Person : IGreeter, INamed {
+    string name;
+    Person(string name) { this.name = name; }
+    function greet(): void { print($"Hello, I am {name}"); }
+    function getName(): string { return name; }
+}
+
+class Robot : IGreeter {
+    function greet(): void { print("BEEP BOOP"); }
+}
+
+@Mod("interfaces", "1.0.0", "Test")
+class Interfaces {
+    public:
+        Interfaces() {
+            Person p = new Person("Alice");
+            p.greet();
+            print(p.getName());
+
+            IGreeter g = new Robot();
+            g.greet();
+
+            IGreeter g2 = new Person("Bob");
+            g2.greet();
+
+            INamed n = new Person("Carol");
+            print(n.getName());
+        }
+}

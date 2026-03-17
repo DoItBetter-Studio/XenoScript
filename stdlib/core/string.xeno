@@ -1,11 +1,24 @@
 // XenoScript Standard Library — core/string
-// Extension methods for the string primitive type.
-// x.toString() desugars to string_toString(x) etc.
-//
-// Note: string operations like length, contains, split etc. require
-// host functions registered by the game engine. This module provides
-// only the pure-XenoScript subset.
+// Utility methods for the string primitive type.
 
-function string_toString(string s): string {
-    return s;
+class String {
+    public:
+        static function toString(string s): string {
+            return s; // identity
+        }
+
+        // Length, contains, split, etc. will eventually call host functions
+        // once the engine registers them. For now, only pure-XenoScript helpers.
+
+        static function isEmpty(string s): bool {
+            return s == "";
+        }
+
+        static function isNotEmpty(string s): bool {
+            return s != "";
+        }
+
+        static function equals(string a, string b): bool {
+            return a == b;
+        }
 }

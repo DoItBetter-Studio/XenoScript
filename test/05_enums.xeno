@@ -1,0 +1,32 @@
+// Tests: enums, explicit values, match on enum, enum in fields
+enum Direction { North, South, East, West }
+enum Status { Idle = 0, Active = 1, Dead = 99 }
+
+@Mod("enums", "1.0.0", "Test")
+class Enums {
+    Status status;
+    public:
+        Enums() {
+            Direction d = Direction.East;
+            match (d) {
+                case Direction.North: print("north"); break;
+                case Direction.East:  print("east");  break;
+                case Direction.South: print("south"); break;
+                case Direction.West:  print("west");  break;
+            }
+
+            status = Status.Idle;
+            match (status) {
+                case Status.Idle:   print("idle");   break;
+                case Status.Active: print("active"); break;
+                case Status.Dead:   print("dead");   break;
+            }
+
+            status = Status.Active;
+            match (status) {
+                case Status.Idle:   print("idle");   break;
+                case Status.Active: print("active"); break;
+                case Status.Dead:   print("dead");   break;
+            }
+        }
+}

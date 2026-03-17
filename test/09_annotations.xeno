@@ -1,0 +1,10 @@
+// Tests: @Mod annotation with static final constant reference in annotation arg
+@Mod(Annotations.MOD_ID, "1.0.0", "TestAuthor", "Tests annotation system")
+class Annotations {
+    public:
+        static final string MOD_ID = "annotations";
+
+        Annotations() {
+            print("annotations ok");
+        }
+}

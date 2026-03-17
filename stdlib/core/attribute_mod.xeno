@@ -1,20 +1,21 @@
-import "attribute.xeno"
-import "attribute_usage.xeno"
-
-@AttributeUsage([Target.Class])
-class Mod : Attribute
-{
+// Marks a class as the mod entry point.
+// Exactly one class per file must carry @Mod for the mod to be loadable.
+//
+// Example:
+//   @Mod("my-mod", "1.0.0", "Author", "A description of the mod.")
+//   class MyMod { ... }
+@AttributeUsage([AttributeTarget.Class])
+class Mod : Attribute {
     public:
         string name;
         string version;
         string author;
         string description;
 
-        Mod(string name, string version, string author, string description)
-        {
-            this.name = name;
-            this.version = version;
-            this.author = author;
+        Mod(string name, string version, string author, string description) {
+            this.name        = name;
+            this.version     = version;
+            this.author      = author;
             this.description = description;
         }
 }

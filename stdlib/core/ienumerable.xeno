@@ -1,0 +1,64 @@
+// XenoScript Standard Library — IEnumerable / IEnumerator
+// Defines the iteration protocol for foreach on user-defined types.
+
+interface IEnumerator<T> {
+    function moveNext(): bool;
+    function current(): T;
+}
+
+interface IEnumerable<T> {
+    function getEnumerator(): IEnumerator<T>;
+}
+
+// RangeEnumerator: iterates integers [start, end)
+class RangeEnumerator : IEnumerator<int> {
+    private:
+        int _start;
+        int _end;
+        int _current;
+        bool _started;
+
+    public:
+        RangeEnumerator(int s, int e) {
+            _start   = s;
+            _end     = e;
+            _current = s - 1;
+            _started = false;
+        }
+
+        function moveNext(): bool {
+            if (!_started) {
+                _current = _start;
+                _started = true;
+            } else {
+                _current = _current + 1;
+            }
+            return _current < _end;
+        }
+
+        function current(): int {
+            return _current;
+        }
+}
+
+// Range: IEnumerable<int> over [start, end)
+class Range : IEnumerable<int> {
+    private:
+        int _start;
+        int _end;
+
+    public:
+        Range(int s, int e) {
+            _start = s;
+            _end   = e;
+        }
+
+        function getEnumerator(): IEnumerator<int> {
+            return new RangeEnumerator(_start, _end);
+        }
+
+        function length(): int {
+            if (_end > _start) { return _end - _start; }
+            return 0;
+        }
+}

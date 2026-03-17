@@ -28,10 +28,44 @@
  * in the class. The compiler resolves field names to indices at compile time
  * so field access at runtime is just an array lookup with no name lookup.
  * ═════════════════════════════════════════════════════════════════════════════*/
-#define CLASS_MAX_FIELDS   64
-#define CLASS_MAX_METHODS  64
-#define CLASS_NAME_MAX     64
-#define FIELD_NAME_MAX     64
+#define CLASS_MAX_FIELDS      64
+#define CLASS_MAX_METHODS     64
+#define CLASS_MAX_EVENTS      16
+#define CLASS_NAME_MAX        64
+#define FIELD_NAME_MAX        64
+#define CLASS_MAX_ATTRIBUTES  8
+#define ATTR_MAX_ARGS         16
+
+/* ── Compile-time attribute argument value ──────────────────────────────── */
+typedef enum {
+    ATTR_ARG_STRING = 0,
+    ATTR_ARG_INT,
+    ATTR_ARG_FLOAT,
+    ATTR_ARG_BOOL,
+    ATTR_ARG_ARRAY,          /* nested AttrArg[] — for [Target.Class, ...] */
+} AttrArgKind;
+
+typedef struct AttrArg AttrArg;
+struct AttrArg {
+    AttrArgKind kind;
+    union {
+        char   *s;            /* ATTR_ARG_STRING — heap-allocated            */
+        __int128_t i;         /* ATTR_ARG_INT (includes enum values)         */
+        double  f;            /* ATTR_ARG_FLOAT                              */
+        bool    b;            /* ATTR_ARG_BOOL                               */
+        struct {
+            AttrArg *elems;   /* heap-allocated                              */
+            int      count;
+        } arr;                /* ATTR_ARG_ARRAY                              */
+    };
+};
+
+/* ── One applied attribute instance ─────────────────────────────────────── */
+typedef struct {
+    char    class_name[CLASS_NAME_MAX]; /* e.g. "Mod", "AttributeUsage"     */
+    AttrArg args[ATTR_MAX_ARGS];
+    int     arg_count;
+} AttributeInstance;
 
 /* Value and XenoObject need to be declared before ClassDef because
  * ClassDef contains a Value array (static_values). */
@@ -40,39 +74,50 @@ typedef struct XenoArray  XenoArray;
 typedef struct XenoType   XenoType;
 
 
-typedef union Value {
-    int64_t      i;
-    double       f;
-    bool         b;
-    char        *s;
-    XenoObject  *obj;
-    XenoArray   *arr;
-    XenoType    *type;
+/* Value: tagged union representing any XenoScript runtime value.
+ * is_null == 1 means this is the null value regardless of the union contents.
+ * This gives us an unambiguous null distinct from 0, false, 0.0, etc. */
+typedef struct Value {
+    uint8_t      is_null;   /* 1 = null literal, 0 = real value */
+    union {
+        __int128_t   i;
+        double       f;
+        bool         b;
+        char        *s;
+        XenoObject  *obj;
+        XenoArray   *arr;
+        XenoType    *type;
+    };
 } Value;
 
-static inline Value val_int  (int64_t     v) { Value r; r.i   = 0; r.i   = v; return r; }
-static inline Value val_float(double      v) { Value r; r.i   = 0; r.f   = v; return r; }
-static inline Value val_bool (bool        v) { Value r; r.i   = 0; r.b   = v; return r; }
-static inline Value val_str  (char       *v) { Value r; r.i   = 0; r.s   = v; return r; }
-static inline Value val_obj  (XenoObject *v) { Value r; r.i   = 0; r.obj = v; return r; }
-static inline Value val_arr  (XenoArray  *v) { Value r; r.i   = 0; r.arr  = v; return r; }
-static inline Value val_type (XenoType   *v) { Value r; r.i   = 0; r.type = v; return r; }
+static inline Value val_int  (__int128_t  v) { Value r; r.is_null=0; r.i   = v; return r; }
+static inline Value val_float(double      v) { Value r; r.is_null=0; r.f   = v; return r; }
+static inline Value val_bool (bool        v) { Value r; r.is_null=0; r.b   = v; return r; }
+static inline Value val_str  (char       *v) { Value r; r.is_null=0; r.s   = v; return r; }
+static inline Value val_obj  (XenoObject *v) { Value r; r.is_null=0; r.obj = v; return r; }
+static inline Value val_arr  (XenoArray  *v) { Value r; r.is_null=0; r.arr = v; return r; }
+static inline Value val_type (XenoType   *v) { Value r; r.is_null=0; r.type= v; return r; }
+/* Null: is_null flag set, union cleared */
+static inline Value val_null (void)          { Value r; r.is_null=1; r.i   = 0; return r; }
+static inline bool  is_val_null(Value v)     { return v.is_null != 0; }
 
 /* XenoArray: heap-allocated homogeneous array.
  * Defined after Value so the flexible elements[] member works. */
 typedef struct XenoArray {
-    int   length;
-    Value elements[];
+    int     length;
+    uint8_t elem_kind;  /* TypeKind of elements — set at allocation, used by OP_CMP_EQ_VAL */
+    Value   elements[];
 } XenoArray;
 
 /* XenoType: runtime type descriptor returned by typeof().
  * Minimal by design — just enough for diagnostics and scripting. */
 typedef struct XenoType {
-    const char *name;       /* e.g. "int", "MyMod", "ushort[]", "Phase" */
-    bool        is_array;
-    bool        is_primitive;
-    bool        is_enum;
-    bool        is_class;
+    const char       *name;       /* e.g. "int", "MyMod", "ushort[]", "Phase" */
+    bool              is_array;
+    bool              is_primitive;
+    bool              is_enum;
+    bool              is_class;
+    const struct ClassDef *class_def; /* non-NULL for class/enum types -- enables attribute reflection */
 } XenoType;
 
 
@@ -81,15 +126,45 @@ typedef struct {
     int      type_kind;    /* TypeKind of this field                        */
     char     class_name[CLASS_NAME_MAX]; /* if type_kind == TYPE_OBJECT     */
     bool     is_static;
+    bool     is_final;
+    bool     is_nullable;  /* true if declared with ?, e.g. string?         */
     int      instance_slot; /* For instance fields: slot in obj->fields[].
                              * For static fields: -1 (use static_values[]) */
 } FieldDef;
+
+#define METHOD_MAX_PARAMS 16
+#define METHOD_PARAM_CLASS_MAX 32
 
 typedef struct {
     char     name[FIELD_NAME_MAX];
     int      fn_index;     /* Index into Module->chunks                     */
     bool     is_static;
+    bool     is_virtual;   /* true if declared virtual in parent            */
+    int      return_type_kind;              /* TypeKind of return value      */
+    bool     return_is_nullable;            /* true if return type is T?     */
+    char     return_class_name[CLASS_NAME_MAX]; /* if TYPE_OBJECT            */
+    /* Parameter signature — stored here so stubs can be generated from
+     * the ClassDef alone without access to Chunk internals. v17+ */
+    int      param_count;
+    int      param_type_kinds[METHOD_MAX_PARAMS];
+    char     param_class_names[METHOD_MAX_PARAMS][METHOD_PARAM_CLASS_MAX];
+    bool     param_is_nullable[METHOD_MAX_PARAMS];
+    AttributeInstance *attributes;          /* heap-allocated, may be NULL  */
+    int                attribute_count;
 } MethodDef;
+
+/* EventDef — describes a declared event and its parameter signature.
+ * param_type_kinds[i] / param_class_names[i] describe each parameter.
+ * At runtime, each event has a handler list stored separately (not here). */
+#define EVENT_MAX_PARAMS  8
+#define EVENT_CLASS_NAME_MAX 32
+typedef struct {
+    char name[FIELD_NAME_MAX];
+    int  param_count;
+    int  param_type_kinds[EVENT_MAX_PARAMS];
+    char param_class_names[EVENT_MAX_PARAMS][EVENT_CLASS_NAME_MAX];
+    bool param_is_nullable[EVENT_MAX_PARAMS];
+} EventDef;
 
 typedef struct ClassDef {
     char       name[CLASS_NAME_MAX];
@@ -97,6 +172,8 @@ typedef struct ClassDef {
     FieldDef   fields[CLASS_MAX_FIELDS];
     int        method_count;
     MethodDef  methods[CLASS_MAX_METHODS];
+    int        event_count;
+    EventDef   events[CLASS_MAX_EVENTS];
     int        constructor_index; /* fn_index of constructor, or -1         */
     int        parent_index;      /* ClassDef index of parent, or -1        */
 
@@ -111,6 +188,25 @@ typedef struct ClassDef {
     int         enum_member_count;
     char       *enum_member_names[64];
     int         enum_member_values[64]; /* parallel array: integer value per member */
+
+    /* Compile-time attributes applied to this class, e.g. @Mod(...) */
+    AttributeInstance attributes[CLASS_MAX_ATTRIBUTES];
+    int               attribute_count;
+
+    /* Generic type parameter names, e.g. {"T"} for List<T>, {"K","V"} for Dict<K,V>.
+     * Empty (type_param_count == 0) for non-generic classes.
+     * Used by checker_declare_class_from_def to reconstruct TypeParamNodes
+     * for classes loaded from .xar so generic substitution works correctly. */
+    int  type_param_count;
+    char type_param_names[8][8]; /* up to 8 params, each name up to 7 chars */
+
+    /* Interface list — names of interfaces this class implements, including
+     * any type argument suffix, e.g. "IEnumerable<int>", "IEnumerator<string>".
+     * Populated by the compiler; serialized in XBC so xar-loaded classes
+     * still expose their interface contracts to the checker. */
+    bool is_interface;
+    int  interface_count;
+    char interface_names[8][64]; /* up to 8 interfaces, name+typearg up to 63 chars */
 } ClassDef;
 
 
@@ -235,6 +331,8 @@ typedef enum {
     OP_JUMP,              /* [int16_t offset]  ( -- )      unconditional jump  */
     OP_JUMP_IF_FALSE,     /* [int16_t offset]  ( bool -- ) jump if top is false,
                            * always pops the bool regardless              */
+    OP_JUMP_IF_TRUE,      /* [int16_t offset]  ( bool -- ) jump if top is true,
+                           * always pops the bool regardless              */
 
     /* ── Function calls ──────────────────────────────────────────────────
      * OP_CALL: calls a script-defined function.
@@ -262,7 +360,9 @@ typedef enum {
     OP_TRUNC_CHAR,  /* ( int -- int )  wrap to uint32_t codepoint */
 
     /* Array opcodes */
-    OP_NEW_ARRAY,   /* [uint8_t count]  ( len -- arr )  alloc zero-filled array  */
+    OP_NEW_ARRAY,   /* [uint8_t elem_kind]  ( len -- arr )  alloc zero-filled array  */
+    OP_CMP_EQ_VAL,  /* ( val val -- bool )  generic ==, uses vm->elem_kind_reg       */
+    OP_CMP_NEQ_VAL, /* ( val val -- bool )  generic !=, uses vm->elem_kind_reg       */
     OP_ARRAY_LIT,   /* [uint8_t count]  ( v0..vN -- arr )  build from stack vals */
     OP_ARRAY_GET,   /* ( arr idx -- val )  bounds-checked element read           */
     OP_ARRAY_SET,   /* ( arr idx val -- )  bounds-checked element write          */
@@ -327,6 +427,39 @@ typedef enum {
     OP_AS_TYPE,           /* [uint8_t type_tag]  ( val -- val )   expr as T   */
     OP_TYPEOF,            /* [uint8_t type_tag][uint8_t name_len][name_bytes] */
     OP_TYPE_FIELD,        /* [uint8_t field_id]  ( Type -- val )              */
+    OP_TYPE_HAS_ATTR,     /* ( Type string -- bool )  hasAttribute(name)      */
+    OP_TYPE_GET_ATTR_ARG, /* ( Type string int -- string? ) getAttributeArg   */
+
+    /* ── Nullable operators ─────────────────────────────────────────────── */
+    OP_PUSH_NULL,         /*                     ( -- null )  push null value */
+    OP_IS_NULL,           /*                     ( val -- bool ) null check   */
+    OP_NULL_ASSERT,       /* [uint16_t line]     ( val -- val ) assert != null, RuntimeError if null */
+    OP_NULL_COALESCE,     /*                     ( val val -- val ) pop right then left; push left if non-null else right */
+
+    /* ── Exception handling ─────────────────────────────────────────────── */
+    OP_TRY_BEGIN,         /* [uint16_t catch_offset]  push exception handler  */
+    OP_TRY_END,           /*                           pop exception handler (normal exit) */
+    OP_THROW,             /*                     ( obj -- ) throw exception; unwind to nearest handler */
+    OP_LOAD_EXCEPTION,    /*                     ( -- obj ) push caught exception inside catch block */
+    OP_EXCEPTION_IS_TYPE, /* [u8 name_len][name_bytes]  ( -- bool ) test caught exception class */
+
+    /* ── Event opcodes ──────────────────────────────────────────────────── */
+    OP_EVENT_SUBSCRIBE,   /* [u8 event_name_len][event_name_bytes][u8 handler_name_len][handler_name_bytes]
+                             ( -- ) subscribe static/top-level function to named event */
+    OP_EVENT_UNSUBSCRIBE, /* [u8 event_name_len][event_name_bytes][u8 handler_name_len][handler_name_bytes]
+                             ( -- ) unsubscribe static/top-level function from named event */
+    OP_EVENT_FIRE,        /* [u8 name_len][name_bytes][u8 arg_count]
+                             ( arg0..argN -- ) fire top-level event */
+    OP_EVENT_SUBSCRIBE_BOUND,   /* [u8 event_name_len][event_name_bytes][u8 method_name_len][method_name_bytes]
+                                   ( receiver -- ) subscribe bound instance method to named event */
+    OP_EVENT_UNSUBSCRIBE_BOUND, /* [u8 event_name_len][event_name_bytes][u8 method_name_len][method_name_bytes]
+                                   ( receiver -- ) unsubscribe bound instance method from named event */
+    OP_EVENT_SUBSCRIBE_MEMBER,   /* [u8 name_len][name_bytes][u8 handler_name_len][handler_name_bytes]
+                                    ( obj -- ) subscribe fn to member event on obj */
+    OP_EVENT_UNSUBSCRIBE_MEMBER, /* [u8 name_len][name_bytes][u8 handler_name_len][handler_name_bytes]
+                                    ( obj -- ) unsubscribe fn from member event on obj */
+    OP_EVENT_FIRE_MEMBER,        /* [u8 name_len][name_bytes][u8 arg_count]
+                                    ( obj arg0..argN -- ) fire member event on obj */
 
 } OpCode;
 

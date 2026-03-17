@@ -46,11 +46,11 @@ const char *type_kind_name(TypeKind kind) {
     }
 }
 
-Type type_void(void)   { Type t; t.kind = TYPE_VOID;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_bool(void)   { Type t; t.kind = TYPE_BOOL;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_int(void)    { Type t; t.kind = TYPE_INT;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_float(void)  { Type t; t.kind = TYPE_FLOAT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_string(void) { Type t; t.kind = TYPE_STRING; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_void(void)   { Type t; t.kind = TYPE_VOID;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_bool(void)   { Type t; t.kind = TYPE_BOOL;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_int(void)    { Type t; t.kind = TYPE_INT;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_float(void)  { Type t; t.kind = TYPE_FLOAT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_string(void) { Type t; t.kind = TYPE_STRING; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
 Type type_object(const char *class_name) {
     Type t;
     t.kind       = TYPE_OBJECT;
@@ -58,6 +58,7 @@ Type type_object(const char *class_name) {
     t.enum_name  = NULL;
     t.element_type = NULL;
     t.param_name = NULL;
+    t.is_nullable = false;
     return t;
 }
 Type type_enum(const char *enum_name) {
@@ -67,18 +68,19 @@ Type type_enum(const char *enum_name) {
     t.enum_name  = enum_name;
     t.element_type = NULL;
     t.param_name = NULL;
+    t.is_nullable = false;
     return t;
 }
-Type type_sbyte(void)  { Type t; t.kind = TYPE_SBYTE;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_byte(void)   { Type t; t.kind = TYPE_BYTE;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_short(void)  { Type t; t.kind = TYPE_SHORT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_ushort(void) { Type t; t.kind = TYPE_USHORT; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_uint(void)   { Type t; t.kind = TYPE_UINT;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_long(void)   { Type t; t.kind = TYPE_LONG;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_ulong(void)  { Type t; t.kind = TYPE_ULONG;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_double(void) { Type t; t.kind = TYPE_DOUBLE; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_char(void)   { Type t; t.kind = TYPE_CHAR;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
-Type type_any(void)    { Type t; t.kind = TYPE_ANY;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; return t; }
+Type type_sbyte(void)  { Type t; t.kind = TYPE_SBYTE;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_byte(void)   { Type t; t.kind = TYPE_BYTE;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_short(void)  { Type t; t.kind = TYPE_SHORT;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_ushort(void) { Type t; t.kind = TYPE_USHORT; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_uint(void)   { Type t; t.kind = TYPE_UINT;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_long(void)   { Type t; t.kind = TYPE_LONG;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_ulong(void)  { Type t; t.kind = TYPE_ULONG;  t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_double(void) { Type t; t.kind = TYPE_DOUBLE; t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_char(void)   { Type t; t.kind = TYPE_CHAR;   t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
+Type type_any(void)    { Type t; t.kind = TYPE_ANY;    t.class_name = NULL; t.enum_name = NULL; t.element_type = NULL; t.param_name = NULL; t.is_nullable = false; return t; }
 Type type_array(Type *element_type) {
     Type t;
     t.kind         = TYPE_ARRAY;
@@ -96,6 +98,7 @@ Type type_class_ref(const char *class_name) {
     t.enum_name  = NULL;
     t.element_type = NULL;
     t.param_name = NULL;
+    t.is_nullable = false;
     return t;
 }
 
@@ -114,6 +117,8 @@ Type type_param(const char *param_name) {
  * For enums, they must name the same enum type. */
 bool type_equals(Type a, Type b) {
     if (a.kind != b.kind) return false;
+    /* Nullability must match for strict equality */
+    if (a.is_nullable != b.is_nullable) return false;
     if (a.kind == TYPE_ARRAY) {
         /* Both array — element types must match */
         if (!a.element_type || !b.element_type) return false;
@@ -182,47 +187,52 @@ bool type_is_unsigned(Type t) {
  * type checker to fill in.
  * ───────────────────────────────────────────────────────────────────────────*/
 
-Expr *expr_int_lit(Arena *a, int64_t value, int line) {
+Expr *expr_int_lit(Arena *a, __int128_t value, int line, int col) {
     Expr *e         = arena_alloc(a, sizeof(Expr));
     e->kind         = EXPR_INT_LIT;
     e->line         = line;
+    e->col          = col;
     e->int_lit.value = value;
     return e;
 }
 
-Expr *expr_char_lit(Arena *a, uint32_t value, int line) {
+Expr *expr_char_lit(Arena *a, uint32_t value, int line, int col) {
     Expr *e           = arena_alloc(a, sizeof(Expr));
     e->kind           = EXPR_CHAR_LIT;
     e->line           = line;
+    e->col          = col;
     e->char_lit.value = value;
     e->resolved_type  = type_char();
     return e;
 }
 
-Expr *expr_array_lit(Arena *a, ArgNode *elements, int count, int line) {
+Expr *expr_array_lit(Arena *a, ArgNode *elements, int count, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind              = EXPR_ARRAY_LIT;
     e->line              = line;
+    e->col          = col;
     e->array_lit.elements = elements;
     e->array_lit.count    = count;
     e->resolved_type.kind = TYPE_UNKNOWN;
     return e;
 }
 
-Expr *expr_index(Arena *a, Expr *array, Expr *index, int line) {
+Expr *expr_index(Arena *a, Expr *array, Expr *index, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind             = EXPR_INDEX;
     e->line             = line;
+    e->col          = col;
     e->index_expr.array = array;
     e->index_expr.index = index;
     e->resolved_type.kind = TYPE_UNKNOWN;
     return e;
 }
 
-Expr *expr_index_assign(Arena *a, Expr *array, Expr *index, Expr *value, int line) {
+Expr *expr_index_assign(Arena *a, Expr *array, Expr *index, Expr *value, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind                  = EXPR_INDEX_ASSIGN;
     e->line                  = line;
+    e->col          = col;
     e->index_assign.array    = array;
     e->index_assign.index    = index;
     e->index_assign.value    = value;
@@ -230,72 +240,80 @@ Expr *expr_index_assign(Arena *a, Expr *array, Expr *index, Expr *value, int lin
     return e;
 }
 
-Expr *expr_new_array(Arena *a, Type element_type, Expr *length, int line) {
+Expr *expr_new_array(Arena *a, Type element_type, Expr *length, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind                   = EXPR_NEW_ARRAY;
     e->line                   = line;
+    e->col          = col;
     e->new_array.element_type = element_type;
     e->new_array.length       = length;
     e->resolved_type.kind     = TYPE_UNKNOWN;
     return e;
 }
 
-Expr *expr_is(Arena *a, Expr *operand, Type check_type, int line) {
+Expr *expr_is(Arena *a, Expr *operand, Type check_type, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind            = EXPR_IS;
     e->line            = line;
+    e->col          = col;
     e->type_op.operand     = operand;
     e->type_op.check_type  = check_type;
     return e;
 }
 
-Expr *expr_as(Arena *a, Expr *operand, Type check_type, int line) {
+Expr *expr_as(Arena *a, Expr *operand, Type check_type, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind            = EXPR_AS;
     e->line            = line;
+    e->col          = col;
     e->type_op.operand     = operand;
     e->type_op.check_type  = check_type;
     return e;
 }
 
-Expr *expr_typeof(Arena *a, Expr *operand, int line) {
+Expr *expr_typeof(Arena *a, Expr *operand, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind           = EXPR_TYPEOF;
     e->line           = line;
+    e->col          = col;
     e->type_of.operand = operand;
     return e;
 }
 
 
-Expr *expr_float_lit(Arena *a, double value, int line) {
+Expr *expr_float_lit(Arena *a, double value, int line, int col) {
     Expr *e           = arena_alloc(a, sizeof(Expr));
     e->kind           = EXPR_FLOAT_LIT;
     e->line           = line;
+    e->col          = col;
     e->float_lit.value = value;
     return e;
 }
 
-Expr *expr_bool_lit(Arena *a, bool value, int line) {
+Expr *expr_bool_lit(Arena *a, bool value, int line, int col) {
     Expr *e          = arena_alloc(a, sizeof(Expr));
     e->kind          = EXPR_BOOL_LIT;
     e->line          = line;
+    e->col          = col;
     e->bool_lit.value = value;
     return e;
 }
 
-Expr *expr_string_lit(Arena *a, const char *chars, int len, int line) {
+Expr *expr_string_lit(Arena *a, const char *chars, int len, int line, int col) {
     Expr *e               = arena_alloc(a, sizeof(Expr));
     e->kind               = EXPR_STRING_LIT;
     e->line               = line;
+    e->col          = col;
     e->string_lit.chars   = chars;
     e->string_lit.length  = len;
     return e;
 }
 
-Expr *expr_interp_string(Arena *a, int line) {
+Expr *expr_interp_string(Arena *a, int line, int col) {
     Expr *e                          = arena_alloc(a, sizeof(Expr));
     e->kind                          = EXPR_INTERP_STRING;
     e->line                          = line;
+    e->col          = col;
     e->interp_string.segments        = NULL;
     e->interp_string.segment_count   = 0;
     return e;
@@ -303,28 +321,31 @@ Expr *expr_interp_string(Arena *a, int line) {
 
 
 
-Expr *expr_ident(Arena *a, const char *name, int len, int line) {
+Expr *expr_ident(Arena *a, const char *name, int len, int line, int col) {
     Expr *e        = arena_alloc(a, sizeof(Expr));
     e->kind        = EXPR_IDENT;
     e->line        = line;
+    e->col          = col;
     e->ident.name   = name;
     e->ident.length = len;
     return e;
 }
 
-Expr *expr_unary(Arena *a, TokenType op, Expr *operand, int line) {
+Expr *expr_unary(Arena *a, TokenType op, Expr *operand, int line, int col) {
     Expr *e          = arena_alloc(a, sizeof(Expr));
     e->kind          = EXPR_UNARY;
     e->line          = line;
+    e->col          = col;
     e->unary.op      = op;
     e->unary.operand = operand;
     return e;
 }
 
-Expr *expr_postfix(Arena *a, TokenType op, const char *name, int length, int line) {
+Expr *expr_postfix(Arena *a, TokenType op, const char *name, int length, int line, int col) {
     Expr *e                   = arena_alloc(a, sizeof(Expr));
     e->kind                   = EXPR_POSTFIX;
     e->line                   = line;
+    e->col          = col;
     e->postfix.op             = op;
     e->postfix.is_prefix      = false;
     e->postfix.is_field       = false;
@@ -336,10 +357,11 @@ Expr *expr_postfix(Arena *a, TokenType op, const char *name, int length, int lin
     return e;
 }
 
-Expr *expr_prefix(Arena *a, TokenType op, const char *name, int length, int line) {
+Expr *expr_prefix(Arena *a, TokenType op, const char *name, int length, int line, int col) {
     Expr *e                   = arena_alloc(a, sizeof(Expr));
     e->kind                   = EXPR_POSTFIX;
     e->line                   = line;
+    e->col          = col;
     e->postfix.op             = op;
     e->postfix.is_prefix      = true;
     e->postfix.is_field       = false;
@@ -352,10 +374,11 @@ Expr *expr_prefix(Arena *a, TokenType op, const char *name, int length, int line
 }
 
 Expr *expr_postfix_field(Arena *a, TokenType op, bool is_prefix,
-                         Expr *object, const char *field_name, int field_name_len, int line) {
+                         Expr *object, const char *field_name, int field_name_len, int line, int col) {
     Expr *e                   = arena_alloc(a, sizeof(Expr));
     e->kind                   = EXPR_POSTFIX;
     e->line                   = line;
+    e->col          = col;
     e->postfix.op             = op;
     e->postfix.is_prefix      = is_prefix;
     e->postfix.is_field       = true;
@@ -368,20 +391,22 @@ Expr *expr_postfix_field(Arena *a, TokenType op, bool is_prefix,
 }
 
 
-Expr *expr_binary(Arena *a, TokenType op, Expr *left, Expr *right, int line) {
+Expr *expr_binary(Arena *a, TokenType op, Expr *left, Expr *right, int line, int col) {
     Expr *e         = arena_alloc(a, sizeof(Expr));
     e->kind         = EXPR_BINARY;
     e->line         = line;
+    e->col          = col;
     e->binary.op    = op;
     e->binary.left  = left;
     e->binary.right = right;
     return e;
 }
 
-Expr *expr_assign(Arena *a, const char *name, int len, Expr *value, int line) {
+Expr *expr_assign(Arena *a, const char *name, int len, Expr *value, int line, int col) {
     Expr *e          = arena_alloc(a, sizeof(Expr));
     e->kind          = EXPR_ASSIGN;
     e->line          = line;
+    e->col          = col;
     e->assign.name   = name;
     e->assign.length = len;
     e->assign.value  = value;
@@ -389,10 +414,11 @@ Expr *expr_assign(Arena *a, const char *name, int len, Expr *value, int line) {
 }
 
 Expr *expr_call(Arena *a, const char *name, int len,
-                ArgNode *args, int count, int line) {
+                ArgNode *args, int count, int line, int col) {
     Expr *e            = arena_alloc(a, sizeof(Expr));
     e->kind            = EXPR_CALL;
     e->line            = line;
+    e->col          = col;
     e->call.name       = name;
     e->call.length     = len;
     e->call.args       = args;
@@ -401,10 +427,11 @@ Expr *expr_call(Arena *a, const char *name, int len,
 }
 
 Expr *expr_new(Arena *a, const char *class_name, int class_len,
-               ArgNode *args, int count, int line) {
+               ArgNode *args, int count, int line, int col) {
     Expr *e                       = arena_alloc(a, sizeof(Expr));
     e->kind                       = EXPR_NEW;
     e->line                       = line;
+    e->col          = col;
     e->new_expr.class_name        = class_name;
     e->new_expr.class_name_len    = class_len;
     e->new_expr.args              = args;
@@ -412,10 +439,11 @@ Expr *expr_new(Arena *a, const char *class_name, int class_len,
     return e;
 }
 
-Expr *expr_field_get(Arena *a, Expr *object, const char *field, int field_len, int line) {
+Expr *expr_field_get(Arena *a, Expr *object, const char *field, int field_len, int line, int col) {
     Expr *e                       = arena_alloc(a, sizeof(Expr));
     e->kind                       = EXPR_FIELD_GET;
     e->line                       = line;
+    e->col          = col;
     e->field_get.object           = object;
     e->field_get.field_name       = field;
     e->field_get.field_name_len   = field_len;
@@ -423,10 +451,11 @@ Expr *expr_field_get(Arena *a, Expr *object, const char *field, int field_len, i
 }
 
 Expr *expr_field_set(Arena *a, Expr *object, const char *field, int field_len,
-                     Expr *value, int line) {
+                     Expr *value, int line, int col) {
     Expr *e                       = arena_alloc(a, sizeof(Expr));
     e->kind                       = EXPR_FIELD_SET;
     e->line                       = line;
+    e->col          = col;
     e->field_set.object           = object;
     e->field_set.field_name       = field;
     e->field_set.field_name_len   = field_len;
@@ -435,10 +464,11 @@ Expr *expr_field_set(Arena *a, Expr *object, const char *field, int field_len,
 }
 
 Expr *expr_method_call(Arena *a, Expr *object, const char *method, int method_len,
-                       ArgNode *args, int count, int line) {
+                       ArgNode *args, int count, int line, int col) {
     Expr *e                         = arena_alloc(a, sizeof(Expr));
     e->kind                         = EXPR_METHOD_CALL;
     e->line                         = line;
+    e->col          = col;
     e->method_call.object           = object;
     e->method_call.method_name      = method;
     e->method_call.method_name_len  = method_len;
@@ -447,17 +477,19 @@ Expr *expr_method_call(Arena *a, Expr *object, const char *method, int method_le
     return e;
 }
 
-Expr *expr_this(Arena *a, int line) {
+Expr *expr_this(Arena *a, int line, int col) {
     Expr *e  = arena_alloc(a, sizeof(Expr));
     e->kind  = EXPR_THIS;
     e->line  = line;
+    e->col          = col;
     return e;
 }
 
-Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line) {
+Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line, int col) {
     Expr *e                   = arena_alloc(a, sizeof(Expr));
     e->kind                   = EXPR_SUPER_CALL;
     e->line                   = line;
+    e->col          = col;
     e->super_call.args        = args;
     e->super_call.arg_count   = count;
     return e;
@@ -469,10 +501,11 @@ Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line) {
  * ───────────────────────────────────────────────────────────────────────────*/
 
 Stmt *stmt_var_decl(Arena *a, Type type, const char *name, int len,
-                    Expr *init, int line) {
+                    Expr *init, int line, int col) {
     Stmt *s             = arena_alloc(a, sizeof(Stmt));
     s->kind             = STMT_VAR_DECL;
     s->line             = line;
+    s->col          = col;
     s->var_decl.type    = type;
     s->var_decl.name    = name;
     s->var_decl.length  = len;
@@ -480,38 +513,42 @@ Stmt *stmt_var_decl(Arena *a, Type type, const char *name, int len,
     return s;
 }
 
-Stmt *stmt_expr(Arena *a, Expr *expr, int line) {
+Stmt *stmt_expr(Arena *a, Expr *expr, int line, int col) {
     Stmt *s     = arena_alloc(a, sizeof(Stmt));
     s->kind     = STMT_EXPR;
     s->line     = line;
+    s->col          = col;
     s->expr.expr = expr;
     return s;
 }
 
-Stmt *stmt_if(Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line) {
+Stmt *stmt_if(Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_IF;
     s->line              = line;
+    s->col          = col;
     s->if_stmt.condition   = cond;
     s->if_stmt.then_branch = then_b;
     s->if_stmt.else_branch = else_b;
     return s;
 }
 
-Stmt *stmt_while(Arena *a, Expr *cond, Stmt *body, int line) {
+Stmt *stmt_while(Arena *a, Expr *cond, Stmt *body, int line, int col) {
     Stmt *s                = arena_alloc(a, sizeof(Stmt));
     s->kind                = STMT_WHILE;
     s->line                = line;
+    s->col          = col;
     s->while_stmt.condition = cond;
     s->while_stmt.body      = body;
     return s;
 }
 
 Stmt *stmt_for(Arena *a, Stmt *init, Expr *cond, Expr *step,
-               Stmt *body, int line) {
+               Stmt *body, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_FOR;
     s->line              = line;
+    s->col          = col;
     s->for_stmt.init      = init;
     s->for_stmt.condition = cond;
     s->for_stmt.step      = step;
@@ -520,19 +557,22 @@ Stmt *stmt_for(Arena *a, Stmt *init, Expr *cond, Expr *step,
 }
 
 Stmt *stmt_foreach(Arena *a, Type elem_type, const char *var_name, int var_len,
-                   Expr *array, Stmt *body, int line) {
+                   Expr *array, Stmt *body, int line, int col) {
     Stmt *s = arena_alloc(a, sizeof(Stmt));
-    s->kind = STMT_FOREACH; s->line = line;
+    s->kind = STMT_FOREACH; s->line = line; s->col = col;
+    s->col          = col;
+    s->col  = col;
     s->foreach_stmt.elem_type = elem_type; s->foreach_stmt.var_name = var_name;
     s->foreach_stmt.var_len = var_len; s->foreach_stmt.array = array;
     s->foreach_stmt.body = body;
     return s;
 }
 
-Stmt *stmt_match(Arena *a, Expr *subject, int line) {
+Stmt *stmt_match(Arena *a, Expr *subject, int line, int col) {
     Stmt *s                    = arena_alloc(a, sizeof(Stmt));
     s->kind                    = STMT_MATCH;
     s->line                    = line;
+    s->col          = col;
     s->match_stmt.subject      = subject;
     s->match_stmt.arms         = NULL;
     s->match_stmt.arm_count    = 0;
@@ -540,41 +580,48 @@ Stmt *stmt_match(Arena *a, Expr *subject, int line) {
     return s;
 }
 
-Stmt *stmt_return(Arena *a, Expr *value, int line) {
+Stmt *stmt_return(Arena *a, Expr *value, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_RETURN;
     s->line              = line;
+    s->col          = col;
     s->return_stmt.value = value;
     return s;
 }
 
-Stmt *stmt_break(Arena *a, int line) {
+Stmt *stmt_break(Arena *a, int line, int col) {
     Stmt *s = arena_alloc(a, sizeof(Stmt));
     s->kind = STMT_BREAK;
-    s->line = line;
+    s->line = line; s->col = col;
+    s->col          = col;
+    s->col  = col;
     return s;
 }
 
-Stmt *stmt_continue(Arena *a, int line) {
+Stmt *stmt_continue(Arena *a, int line, int col) {
     Stmt *s = arena_alloc(a, sizeof(Stmt));
     s->kind = STMT_CONTINUE;
-    s->line = line;
+    s->line = line; s->col = col;
+    s->col          = col;
+    s->col  = col;
     return s;
 }
 
-Stmt *stmt_block(Arena *a, StmtNode *stmts, int line) {
+Stmt *stmt_block(Arena *a, StmtNode *stmts, int line, int col) {
     Stmt *s           = arena_alloc(a, sizeof(Stmt));
     s->kind           = STMT_BLOCK;
     s->line           = line;
+    s->col          = col;
     s->block.stmts    = stmts;
     return s;
 }
 
 Stmt *stmt_fn_decl(Arena *a, Type ret, const char *name, int len,
-                   ParamNode *params, int param_count, Stmt *body, int line) {
+                   ParamNode *params, int param_count, Stmt *body, int line, int col) {
     Stmt *s                  = arena_alloc(a, sizeof(Stmt));
     s->kind                  = STMT_FN_DECL;
     s->line                  = line;
+    s->col          = col;
     s->fn_decl.return_type   = ret;
     s->fn_decl.name          = name;
     s->fn_decl.length        = len;
@@ -585,10 +632,11 @@ Stmt *stmt_fn_decl(Arena *a, Type ret, const char *name, int len,
 }
 
 Stmt *stmt_class_decl(Arena *a, const char *name, int len,
-                      const char *parent_name, int parent_len, int line) {
+                      const char *parent_name, int parent_len, int line, int col) {
     Stmt *s                        = arena_alloc(a, sizeof(Stmt));
     s->kind                        = STMT_CLASS_DECL;
     s->line                        = line;
+    s->col          = col;
     s->class_decl.name             = name;
     s->class_decl.length           = len;
     s->class_decl.parent_name      = parent_name;
@@ -600,10 +648,11 @@ Stmt *stmt_class_decl(Arena *a, const char *name, int len,
     return s;
 }
 
-Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line) {
+Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_ENUM_DECL;
     s->line              = line;
+    s->col          = col;
     s->enum_decl.name    = name;
     s->enum_decl.length  = len;
     s->enum_decl.members = NULL;
@@ -611,10 +660,11 @@ Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line) {
     return s;
 }
 
-Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line) {
+Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line, int col) {
     Stmt *s                          = arena_alloc(a, sizeof(Stmt));
     s->kind                          = STMT_INTERFACE_DECL;
     s->line                          = line;
+    s->col          = col;
     s->interface_decl.name           = name;
     s->interface_decl.length         = len;
     s->interface_decl.parent_name    = NULL;
@@ -859,6 +909,10 @@ void ast_print_expr(const Expr *expr, int indent) {
             for (ArgNode *arg = expr->method_call.args; arg; arg = arg->next)
                 ast_print_expr(arg->expr, indent + 1);
             break;
+
+        default:
+            printf("EXPR_<kind=%d>  [%s]\n", (int)expr->kind, type_str);
+            break;
     }
 }
 
@@ -1023,6 +1077,9 @@ void ast_print_stmt(const Stmt *stmt, int indent) {
                    stmt->import_decl.is_system ? "<system>" : "local",
                    stmt->import_decl.path ? stmt->import_decl.path : "");
             break;
+        default:
+            printf("STMT_<kind=%d>\n", (int)stmt->kind);
+            break;
     }
 }
 
@@ -1031,4 +1088,14 @@ void ast_print_program(const Program *program) {
     for (StmtNode *n = program->stmts; n; n = n->next)
         ast_print_stmt(n->stmt, 0);
     printf("===========\n");
+}
+Type type_null(void) {
+    Type t;
+    t.kind         = TYPE_NULL;
+    t.class_name   = NULL;
+    t.enum_name    = NULL;
+    t.element_type = NULL;
+    t.param_name   = NULL;
+    t.is_nullable  = false;
+    return t;
 }

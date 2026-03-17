@@ -1,0 +1,20 @@
+// Tests: typeof, is, as operators
+@Mod("typeof_casting", "1.0.0", "Test")
+class TypeofCasting {
+    public:
+        TypeofCasting() {
+            int i = 42;
+            float f = 1.5;
+            bool b = true;
+            string s = "hi";
+
+            print(typeof(i).name);
+            print(typeof(f).name);
+            print(typeof(b).name);
+            print(typeof(s).name);
+
+            print(i is int);
+            print(f is float);
+            print(b is bool);
+        }
+}

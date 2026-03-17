@@ -1,0 +1,85 @@
+// Tests: all primitive types, arithmetic, string interpolation, typeof
+@Mod("primitives", "1.0.0", "Test")
+class Primitives {
+    public:
+        Primitives() {
+            float f = float32();
+            double d = float64();
+            bool  b = boolean();
+            string s = charArray();
+            byte  u = int8();
+            sbyte sb = uint8();
+            short sh = int16();
+            ushort us = uint16();
+            int i = int32();
+            uint  ui = uint32();
+            long  l  = int64();
+            ulong ul = uint64();
+            char  c  = 'A';
+
+            print("Primitives");
+            print(f);
+            print(d);
+            print(b);
+            print(s);
+            print(u);
+            print(sb);
+            print(sh);
+            print(us);
+            print(i);
+            print(ui);
+            print(l);
+            print(ul);
+            print(c);
+            print($"interp: {i + 1} and {s}");
+        }
+
+    private:
+        function int32(): int {
+            return 42;
+        }
+
+        function float32(): float {
+            return 3.1415;
+        }
+
+        function float64(): double {
+            return 3.141596;
+        }
+
+        function boolean(): bool {
+            return true;
+        }
+
+        function charArray(): string {
+            return "hello";
+        }
+
+        function int8(): byte {
+            return 255;
+        }
+
+        function uint8(): sbyte {
+            return -127;
+        }
+
+        function int16(): short {
+            return -32768;
+        }
+
+        function uint16(): ushort {
+            return 65535;
+        }
+
+        function uint32(): uint {
+            return 4294967295;
+        }
+
+        function int64(): long {
+            return 9223372036854775807;
+        }
+
+        function uint64(): ulong {
+            return 18446744073709551615;
+        }
+}

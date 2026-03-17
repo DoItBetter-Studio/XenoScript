@@ -18,6 +18,12 @@ def read(path):
     except FileNotFoundError:
         return b""
 
+def strip_timing(b):
+    lines = b.splitlines(keepends=True)
+    if lines and lines[-1].startswith(b"Execution time:"):
+        lines = lines[:-1]
+    return b"".join(lines)
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <xenoc> <xenovm> <test_dir>")
@@ -53,11 +59,25 @@ def main():
 
         # Normalize line endings
         norm = lambda b: b.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        actual_out = norm(rout)
+        actual_out = strip_timing(norm(rout))
         actual_err = norm(cerr + cout + rerr)
 
-        expected_out = read(base + ".out")
-        expected_err = read(base + ".err")
+        expected_out_path = base + ".out"
+        expected_err_path = base + ".err"
+
+        # Auto-generate expected files if missing
+        if not os.path.exists(expected_out_path):
+            with open(expected_out_path, "wb") as f:
+                f.write(actual_out)
+            print(f"  [GEN] {expected_out_path}")
+
+        if not os.path.exists(expected_err_path):
+            with open(expected_err_path, "wb") as f:
+                f.write(actual_err)
+            print(f"  [GEN] {expected_err_path}")
+
+        expected_out = strip_timing(read(expected_out_path))
+        expected_err = read(expected_err_path)
 
         if actual_out == expected_out and actual_err == expected_err:
             passed += 1

@@ -1,0 +1,60 @@
+// Test 21: Nullable types
+// Expected output:
+// null
+// hello
+// default
+// world
+// true
+// false
+// 42
+
+@Mod("nullable_types", "1.0.0", "Test nullable types")
+class NullableTypes {
+    private:
+        string? _name;
+
+    public:
+        NullableTypes() {
+            _name = null;
+            // null literal and nullable string
+            string? n = null;
+            print(n);                        // null
+
+            // Assign non-null, use null assertion
+            n = "hello";
+            print(n!);                       // hello
+
+            // Null coalescing — left is null, uses right
+            string? x = null;
+            string result = x ?? "default";
+            print(result);                   // default
+
+            // Null coalescing — left is non-null, uses left
+            string? y = "world";
+            string r2 = y ?? "fallback";
+            print(r2);                       // world
+
+            // Equality with null
+            string? a = null;
+            print(a == null);               // true
+
+            string? b = "hi";
+            print(b == null);               // false
+
+            // Nullable int with coalescing
+            int? num = null;
+            int val = num ?? 42;
+            print(val);                     // 42
+        }
+
+        function setName(string? n): void {
+            _name = n;
+        }
+
+        function greet(): string? {
+            if (_name == null) {
+                return null;
+            }
+            return "safe-" + _name!;
+        }
+}

@@ -1,12 +1,27 @@
 import <libraries>
+import <collections>
 
-@Mod(MyMod.ModId, version="1.0.0", author="Tigga")
+@Mod("mymod", version="1.0.0", author="Tigga")
 class MyMod {
     public:
-        static string ModId = "mymod";
+        Dictionary<int, string> config = new Dictionary<int, string>();
 
-        Mod()
+        string ModId = "mymod";
+
+        Utils utils = new Utils();
+
+        MyMod()
         {
-            print(Utils.echo(MyMod.ModId));
+            config.Add(0, "Hello, World!");
+            config.Add(1, "We are alive and well!");
+
+            for (int i = 0; i < config.Count(); i++)
+            {
+                print(config.get(i));
+            }
+
+            config.removeAt(0);
+
+            print(utils.echo(ModId));
         }
 }

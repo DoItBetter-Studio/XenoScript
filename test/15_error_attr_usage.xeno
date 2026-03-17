@@ -1,0 +1,7 @@
+// Tests: @AttributeUsage enforcement — @Mod on a method is rejected
+@Mod("error_attr_usage", "1.0.0", "Test")
+class ErrorAttrUsage {
+    public:
+        @Mod("bad", "1.0.0", "x", "y")
+        ErrorAttrUsage() { }
+}
