@@ -64,13 +64,15 @@ This makes XenoScript ideal for secure modding environments.
 - Static fields and methods  
 - `final` fields (compile-time immutability)  
 - User-defined annotations with `@AttributeUsage` enforcement  
-- Strongly-typed casting (`as` throws on failure)  
-- Type checks (`is`, `typeof`)  
+- Strongly-typed casting (`as`) — numeric conversions, string conversion, and **runtime** class/interface checks  
+- Type checks (`is`) — static for primitives; **runtime** class hierarchy and interface matching for objects  
+- `typeof` — Type reflection objects; object values report their **runtime** class name  
 - Structured control flow (`if`, `for`, `foreach`, `while`)  
 - String interpolation  
 - Module imports and `.xar` package archives  
 - Project model (`xeno.project`) with dependency resolution and SemVer matching  
-- Bytecode compilation (XBC v19) with linker stage
+- Bytecode compilation (XBC v19) with linker stage  
+- Lean mod packages: `xenoc build` strips embedded stdlib/dep ClassDefs from the output `.xar` (VM re-seeds stdlib at load)  
 - API documentation via **XDocs** (`.xdoc` sidecars) for hover, stubs, and parameter names
 
 ---
@@ -167,10 +169,13 @@ Dump bytecode disassembly:
 ./bin/xenoc source.xeno --dump
 ```
 
-Build a project:
+Build a project (resolves `xeno.project`, links deps, strips stdlib from the output package):
 ```
+./bin/xenoc build [project-dir]
 ./bin/xenoc build [project-dir] -o output.xar
 ```
+
+Stdlib and dependency ClassDefs are **not** embedded in the mod `.xar`. The VM loads the embedded standard library (and declared dependency `.xar` files) before merging the mod so compile-time class indices still resolve.
 
 ### `xenovm` — Virtual Machine
 
@@ -209,6 +214,7 @@ Supported LSP features:
 - Hover (types + XDocs markdown when available)  
 - Go-to-definition (project sources and generated stubs for `.xar` classes)  
 - Find references  
+- Completion (keywords, top-level symbols, member access after `.`)  
 - Custom `xeno/getStub` for read-only stub views of archived classes  
 
 ### Building from Source
@@ -426,17 +432,41 @@ The game loads mods from the `mods/` directory. Directories are treated as devel
 
 ### VS Code Extension Configuration
 
-The extension supports a configured language-server path (recommended for game-specific toolchains) and falls back to `XENOLSP`, a bundled binary, or `PATH` when unset.
+The extension starts `xenolsp` using this search order:
+
+1. `xenoscript.lspPath` / `lspPathWindows` / `lspPathLinux` (settings)  
+2. `xenoscript.toolchainRoot` → `tools/xenolsp` or `bin/xenolsp`  
+3. `XENOLSP` / `XENOLSP_PATH` environment variables  
+4. **Auto-detect** from the workspace: walk ancestors for `tools/xenolsp`, `bin/xenolsp`, or a folder next to `xeno.project`  
+5. Bundled `<extension>/bin/xenolsp` (if present)  
+6. System `PATH`
+
+Typical layouts that auto-detect:
+
+```
+game_root/tools/xenolsp     # game toolchain
+repo_root/bin/xenolsp       # XenoScript source tree after `make`
+mod_folder/../tools/xenolsp # mod under game_root/mods/my_mod
+```
 
 Settings (under **XenoScript**):
 
 | Setting | Purpose |
 |--------|---------|
-| `xenoscript.lspPath` | Path to `xenolsp` / `xenolsp.exe` |
+| `xenoscript.lspPath` | Absolute path to `xenolsp` / `xenolsp.exe` (wins over auto-detect) |
 | `xenoscript.lspPathWindows` / `xenoscript.lspPathLinux` | Optional platform-specific overrides |
+| `xenoscript.toolchainRoot` | Game or SDK root; looks for `tools/` or `bin/` xenolsp underneath |
 | `xenoscript.trace.server` | LSP communication tracing |
 
-Point `lspPath` at the **game’s** (or this repo’s) `xenolsp` binary so hover, diagnostics, and navigation use that binary’s embedded stdlib and XDocs.
+Commands:
+
+| Command | Action |
+|---------|--------|
+| **XenoScript: Build Project** | Runs `xenoc build` on the nearest `xeno.project` (status-bar button and editor title when a `.xeno` file is open) |
+| **XenoScript: Restart Language Server** | Restarts `xenolsp` |
+| **XenoScript: Show Language Server Path** | Shows which `xenolsp` was chosen and why |
+
+`xenoc` is resolved as a sibling of the detected `xenolsp` (`tools/xenoc` or `bin/xenoc`). Build output appears in the **XenoScript Build** channel.
 
 #### Settings scope (important)
 
@@ -448,17 +478,9 @@ VS Code only applies settings from the scope that was actually opened:
 | **`.vscode/settings.json`** in the opened folder | When you open that folder |
 | **`.code-workspace` `settings`** | Only when you open that workspace file (“Open Workspace from File…”) |
 
-Opening a folder without opening the matching `.code-workspace` file will **ignore** workspace-file settings. If diagnostics, hover, or XDocs seem missing, confirm that `xenoscript.lspPath` is set in a scope that is active for the current window.
+Opening a folder without opening the matching `.code-workspace` file will **ignore** workspace-file settings. Auto-detect does **not** require a workspace file — opening the game root or mod folder is enough if `tools/xenolsp` or `bin/xenolsp` is reachable by walking parents.
 
-**Recommended for daily use — User settings:**
-
-```json
-{
-  "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
-}
-```
-
-**Or per-mod project** (`.vscode/settings.json` inside the mod folder):
+**Optional override — User settings:**
 
 ```json
 {
@@ -466,24 +488,22 @@ Opening a folder without opening the matching `.code-workspace` file will **igno
 }
 ```
 
-**Workspace file example** (only applies when that workspace is opened):
+**Or toolchain root** (auto-picks `tools/` or `bin/` under that path):
 
 ```json
 {
-  "folders": [
-    { "path": "." }
-  ],
-  "settings": {
-    "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
-  }
+  "xenoscript.toolchainRoot": "D:/Games/MyGame"
 }
 ```
 
-Once `lspPath` points at a correctly built `xenolsp`:
+Once a valid `xenolsp` is found:
 
-- Live diagnostics, hover (including XDocs), go-to-definition, and references work for project sources  
-- Stdlib symbols and their XDocs come from the embedded toolchain  
+- Live diagnostics, hover (including XDocs), go-to-definition, references, and completion work for project sources  
+- Stdlib symbols and their XDocs come from that binary’s embed  
 - Dependency classes resolve via project `deps/*.xar` and XDocs via sibling `deps/*.xdoc`  
+- **Build Project** packs the mod with the sibling `xenoc` without leaving the editor  
+
+Open a game `mods/` tree (or a single mod folder) for live edit of `.xeno` sources; compile to `.xar` when you want a shippable package.
 
 ---
 
@@ -504,19 +524,22 @@ The language, VM, and standard library are evolving together.
 - ✅ Standard library (`core`, `math`, `collections`)  
 - ✅ Erased generics — stdlib generic classes distributed as compiled `.xar` binaries  
 - ✅ `.xar` packaging and project model with dependency resolution  
+- ✅ Lean mod packages — stdlib/dep ClassDefs stripped from output; VM re-seeds at load  
 - ✅ SemVer dependency constraints (`exact`, `^`, `~`, `>=`, `*`)  
 - ✅ `@Mod` entrypoint detection and project id verification  
 - ✅ Attribute reflection (reading annotation data at runtime)  
-- ✅ LSP server (`xenolsp`): live diagnostics, hover, go-to-definition, find-references  
+- ✅ Runtime `is` / `as` / `typeof` for object class hierarchy and interfaces  
+- ✅ LSP server (`xenolsp`): diagnostics, hover, definition, references, completion  
 - ✅ Diagnostic ranges with accurate line and column spans  
 - ✅ XDocs: `#Docs` extraction, `.xdoc` sidecars, hover markdown, named params in stubs  
-- ✅ XDocs for project dependencies (`deps/*.xdoc`) and embedded standard-library XDocs in `xenolsp`  
-- ✅ VS Code extension: syntax highlighting, diagnostics, hover, navigation, configurable `lspPath`  
+- ✅ XDocs for project dependencies and embedded standard-library XDocs in `xenolsp`  
+- ✅ VS Code extension: highlighting, diagnostics, hover, navigation, completion  
+- ✅ VS Code extension: automatic toolchain detection (`tools/` / `bin/` / workspace ancestors)  
+- ✅ VS Code extension: **Build Project** (`xenoc build` from the status bar / command palette)  
 - ✅ Language test suite  
 
 **Known limitations / planned:**
-- 🔲 Completion provider  
-- 🔲 Automatic game-environment / toolchain detection in the extension  
+- 🔲 Context-aware local variable completion inside function bodies (top-level + member completion is implemented)
 
 ---
 
