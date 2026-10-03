@@ -1,37 +1,19 @@
-// XenoScript Standard Library — core/int
-// Extension methods for the int primitive type.
+// XenoScript Standard Library — core/Int
+// Constants and type-specific utilities for the int primitive.
+// Math operations (abs, min, max, clamp, sign, etc.) live in Math.
 
 class Int {
     public:
-        static function abs(int n): int {
-            return __abs(n); // host function
-        }
+        // ── Constants ────────────────────────────────────────────────────
+        static final int MaxValue =  2147483647;
+        static final int MinValue = -2147483648;
 
-        static function min(int a, int b): int {
-            return __min(a, b); // host function
-        }
-
-        static function max(int a, int b): int {
-            return __max(a, b); // host function
-        }
-
-        static function clamp(int value, int lo, int hi): int {
-            return __clamp(value, lo, hi); // host function
-        }
-
-        static function sign(int n): int {
-            return __sign(n); // host function
-        }
-
+        // ── Conversions ──────────────────────────────────────────────────
         static function toFloat(int n): float {
-            return __toFloat(n); // host function
+            return __toFloat(n);
         }
 
         static function toString(int n): string {
-            return n as string; // pure XenoScript
-        }
-
-        static function inRange(int value, int lo, int hi): bool {
-            return value >= lo && value <= hi; // pure XenoScript
+            return n as string;
         }
 }

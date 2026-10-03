@@ -109,18 +109,24 @@ static XenoHostFn const STDLIB_MATH_FNS[] = {
  * Zeros any newly added slots. Returns the (possibly moved) array pointer.
  * Called internally by List<T>, Stack<T>, Queue<T> — not for mod use. */
 static XenoResult fn_array_grow(XenoVM *vm, int argc, Value *argv, Value *out) {
-    (void)vm; (void)argc;
+    (void)argc;
     XenoArray *arr     = argv[0].arr;
     int        new_cap = (int)argv[1].i;
     if (new_cap <= 0) new_cap = 8;
     if (arr && new_cap <= arr->length) { *out = argv[0]; return XENO_OK; }
 
     int old_len = arr ? arr->length : 0;
-    XenoArray *grown = realloc(arr, sizeof(XenoArray) + (size_t)new_cap * sizeof(Value));
+    XenoArray *grown = malloc(sizeof(XenoArray) + (size_t)new_cap * sizeof(Value));
     if (!grown) return XENO_RUNTIME_ERROR;
+    xeno_vm_track(vm, grown);
+
+    grown->elem_kind = arr ? arr->elem_kind : (uint8_t)TYPE_ANY;  /* match the field's type */
+    if (old_len > 0)
+        memcpy(grown->elements, arr->elements, (size_t)old_len * sizeof(Value));
     grown->length = new_cap;
     for (int i = old_len; i < new_cap; i++)
         grown->elements[i].i = 0;
+
     out->arr = grown;
     return XENO_OK;
 }

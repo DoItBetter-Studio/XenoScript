@@ -1,0 +1,16 @@
+// XenoScript Standard Library — core/SByte
+// Constants and type-specific utilities for the sbyte primitive (signed 8-bit).
+
+class SByte {
+    public:
+        static final int MaxValue =  127;
+        static final int MinValue = -128;
+
+        static function toString(sbyte n): string {
+            return n as string;
+        }
+
+        static function toInt(sbyte n): int {
+            return n as int;
+        }
+}

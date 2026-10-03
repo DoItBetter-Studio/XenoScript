@@ -1,6 +1,12 @@
 // XenoScript Standard Library — Stack<T>
 // LIFO structure. Grows automatically — no fixed cap.
 
+/* #Docs
+ * # title: Stack
+ * # summary: "Last-in, first-out stack that grows as needed."
+ * # since: "1.0.0"
+ * #!Docs
+ */
 class Stack<T> {
     private:
         T[]  data;
@@ -8,12 +14,24 @@ class Stack<T> {
         int  capacity;
 
     public:
+        /* #Docs
+         * # title: Stack
+         * # summary: "Create an empty stack with a small default capacity."
+         * #!Docs
+         */
         Stack() {
             capacity = 8;
             data     = new T[8];
             top      = 0;
         }
 
+        /* #Docs
+         * # title: push
+         * # summary: "Push an item onto the top of the stack."
+         * # param: $item "Element to push."
+         * # returns: "void"
+         * #!Docs
+         */
         function push(T item): void {
             if (top >= capacity) {
                 capacity = capacity * 2;
@@ -23,6 +41,13 @@ class Stack<T> {
             top = top + 1;
         }
 
+        /* #Docs
+         * # title: pop
+         * # summary: "Remove and return the top item."
+         * # returns: "The former top element."
+         * # note: "On underflow, prints a message and returns data[0]."
+         * #!Docs
+         */
         function pop(): T {
             if (top <= 0) {
                 print("Stack: underflow");
@@ -32,18 +57,42 @@ class Stack<T> {
             return data[top];
         }
 
+        /* #Docs
+         * # title: peek
+         * # summary: "Return the top item without removing it."
+         * # returns: "The current top element."
+         * #!Docs
+         */
         function peek(): T {
             return data[top - 1];
         }
 
+        /* #Docs
+         * # title: count
+         * # summary: "Number of items on the stack."
+         * # returns: "Element count."
+         * #!Docs
+         */
         function count(): int {
             return top;
         }
 
+        /* #Docs
+         * # title: isEmpty
+         * # summary: "True when the stack has no items."
+         * # returns: "true if empty."
+         * #!Docs
+         */
         function isEmpty(): bool {
             return top == 0;
         }
 
+        /* #Docs
+         * # title: clear
+         * # summary: "Remove all items (capacity unchanged)."
+         * # returns: "void"
+         * #!Docs
+         */
         function clear(): void {
             top = 0;
         }

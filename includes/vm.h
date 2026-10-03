@@ -185,6 +185,10 @@ struct XenoVM {
     /* Dev/hot-reload state — compiler owned by VM for source mode */
     Module      source_module;            /* Module compiled from source     */
     bool        has_source_module;
+
+	void **allocs;
+	size_t alloc_count;
+	size_t alloc_cap;
 };
 
 
@@ -201,28 +205,20 @@ void xeno_vm_init(XenoVM *vm);
 void xeno_vm_free(XenoVM *vm);
 
 /*
- * Register a host (C) function that scripts can call.
- * name       — the function name as it appears in script (e.g. "print")
- * fn         — the C function pointer
- * param_count — expected argument count, or -1 for variadic
+ * Register a host function with full type information.
+ * name is the function name exposed to scripts; fn is the host callback.
+ * return_kind and param_kinds use the TypeKind enum values from ast.h.
+ * param_count is the expected argument count, or -1 for variadic.
+ * Use TYPE_VOID for void return. Pass NULL for param_kinds if param_count <= 0.
  *
  * Returns the host function index (used in OP_CALL_HOST operand),
  * or -1 if the registry is full.
  *
- * NOTE: Host functions must be registered BEFORE running any script that
- * calls them. The compiler resolves host function names at compile time.
- */
-/*
- * Register a host function with full type information.
- * return_kind and param_kinds use the TypeKind enum values from ast.h.
- * Use TYPE_VOID for void return. Pass NULL for param_kinds if param_count <= 0.
+ * Host functions must be registered BEFORE running any script that calls them.
+ * The compiler resolves host function names at compile time.
  */
 int xeno_register_fn_typed(XenoVM *vm, const char *name, XenoHostFn fn,
                            int return_kind, int param_count, int *param_kinds);
-
-/* Shorthand: registers with all params as TYPE_INT (for backward compat) */
-int xeno_register_fn(XenoVM *vm, const char *name,
-                     XenoHostFn fn, int param_count);
 
 /*
  * Execute a pre-compiled Module.
@@ -301,6 +297,8 @@ void xeno_vm_error(XenoVM *vm, const char *fmt, ...);
 /* Print the last error to stdout */
 void xeno_vm_print_error(const XenoVM *vm);
 
+
+void *xeno_vm_track(XenoVM *vm, void *p);
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * CONVENIENCE VALUE CONSTRUCTORS (for host function authors)

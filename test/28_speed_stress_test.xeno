@@ -1,0 +1,33 @@
+import <collections>
+import <math>
+
+class StressItem {
+	private:
+		ulong val;
+    public:
+        StressItem(ulong v) { val = v; }
+        function compute(): float { 
+			return Math.sqrt(val.toFloat()) * 3.1415;
+		}
+}
+
+@Mod("speed_stress_test", "v1.0.0", "TestAuthor", "A test mod")
+class StressTest {
+    public:
+        List<StressItem> items = new List<StressItem>();
+        int counter = 0;
+		float value = 3.1415;
+		string test;
+
+        StressTest() {
+            for (int i = 0; i < 1000000; i++) {
+                StressItem si = new StressItem(i);
+                items.add(si);
+                counter++;
+
+                value = items[i].compute();
+            }
+            print("Objects created: " + counter);
+            print("Last sqrt: " + value);
+        }
+}

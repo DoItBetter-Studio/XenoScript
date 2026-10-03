@@ -68,6 +68,6 @@ class Integration {
                 case Rarity.Legendary: print("legendary"); break;
             }
 
-            print(Float.sqrt(Int.toFloat(amulet.getValue())));
+            print(Math.sqrt(Int.toFloat(amulet.getValue())));
         }
 }

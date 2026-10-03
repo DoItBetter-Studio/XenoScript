@@ -26,7 +26,9 @@
 
 typedef struct {
     char message[256];
-    int  line;
+    int  line;     /* 1-based */
+    int  col;      /* 1-based token start; 0 = unknown */
+    int  end_col;  /* 1-based exclusive end; 0 = unknown */
 } ParseError;
 
 typedef struct {

@@ -23,6 +23,7 @@
 #include "../../includes/ast.h"
 #include "../../includes/arena.h"
 #include <stdbool.h>
+#include "../../includes/xdoc.h"
 
 #define DOC_STORE_MAX 32
 #define DOC_URI_MAX   1024
@@ -45,6 +46,14 @@ typedef struct {
     Checker *checker;   /* NULL until first successful run */
     Program *program;   /* NULL until first successful run */
     Arena   *arena;     /* NULL until first successful run — owns program nodes */
+
+    /* The per-run staging Module that was declared to `checker` via
+     * pipeline_declare_staging(). Class symbols in `checker` (e.g. SYM_CLASS
+     * entries' class_def) hold raw pointers into this module's classes[]
+     * array, so it must stay alive for as long as `checker` does — it is
+     * freed alongside checker/arena/program, NOT at the end of the
+     * doc_store_run() call that created it. */
+    Module  *checker_staging;
 
     /* Merged source from last pipeline run (stored for path computation) */
     char *merged_source;
@@ -88,6 +97,7 @@ void doc_store_close(DocStore *store, const char *uri);
 typedef struct {
     int  line;       /* 0-based for LSP */
     int  col;        /* 0-based for LSP */
+	int  end_col;    /* 0-based for LSP */
     char message[256];
     bool is_warning;
 } Diagnostic;
@@ -96,3 +106,6 @@ bool doc_store_run(DocStore *store, DocEntry *entry, const char *text,
                    Diagnostic *diags_out, int *diag_count_out);
 
 #endif /* DOC_STORE_H */
+
+/* Load deps/<name>.xdoc for each declared dependency into `out` (merged). */
+void doc_store_load_project_xdocs(const char *uri, XdocArchive *out);

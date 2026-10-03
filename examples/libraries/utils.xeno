@@ -4,6 +4,21 @@ class Utils
         static final string ECHO = "echo";
 
     public:
+		/* #Docs
+	     * # title: Utils
+	     * # summary: "Utility functions for common mod operations."
+	     * #!Docs
+	     */
+		Utils() {}
+
+        /* #Docs
+         * # title: echo
+         * # summary: "Prefix a string with the standard echo label."
+         * # param: $s "The string to echo."
+         * # returns: "The input string prefixed with \"echo: \"."
+         * # example: "Utils.echo(\"Hello\") returns \"echo: Hello\"."
+         * #!Docs
+         */
         function echo(string s): string
         {
             return $"{Utils.ECHO}: {s}";

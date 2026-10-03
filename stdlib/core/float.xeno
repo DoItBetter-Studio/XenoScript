@@ -1,98 +1,27 @@
-// XenoScript Standard Library — core/float
-// Utility methods for the float primitive type.
+// XenoScript Standard Library — core/Float
+// Constants and type-specific utilities for the float primitive.
+// Math operations (abs, min, max, clamp, sqrt, sin, etc.) live in Math.
 
 class Float {
     public:
-        // ───────────────────────────────────────────────
-        // Basic arithmetic wrappers
-        // ───────────────────────────────────────────────
+        // ── Constants ────────────────────────────────────────────────────
+        static final float MaxValue    =  3.4028235e38;
+        static final float MinValue    = -3.4028235e38;
+        static final float Epsilon     =  1.1754944e-38;
+        static final float NaN         =  0.0;          // placeholder — host provides real NaN
+        static final float PI          =  3.14159265358979323846;
+        static final float E           =  2.71828182845904523536;
 
-        static function abs(float n): float {
-            return __absf(n); // host function
-        }
-
-        static function min(float a, float b): float {
-            return __minf(a, b); // host function
-        }
-
-        static function max(float a, float b): float {
-            return __maxf(a, b); // host function
-        }
-
-        static function clamp(float value, float lo, float hi): float {
-            return __clampf(value, lo, hi); // host function
-        }
-
-        static function sign(float n): float {
-            if (n > 0.0) { return 1.0; }
-            if (n < 0.0) { return -1.0; }
-            return 0.0;
-        }
-
-        // ───────────────────────────────────────────────
-        // Math functions (host-backed)
-        // ───────────────────────────────────────────────
-
-        static function sqrt(float n): float {
-            return __sqrt(n); // host function
-        }
-
-        static function pow(float a, float b): float {
-            return __pow(a, b); // host function
-        }
-
-        static function floor(float n): float {
-            return __floor(n); // host function
-        }
-
-        static function ceil(float n): float {
-            return __ceil(n); // host function
-        }
-
-        static function round(float n): float {
-            return __round(n); // host function
-        }
-
-        static function sin(float n): float {
-            return __sin(n); // host function
-        }
-
-        static function cos(float n): float {
-            return __cos(n); // host function
-        }
-
-        static function tan(float n): float {
-            return __tan(n); // host function
-        }
-
-        static function log(float n): float {
-            return __log(n); // host function
-        }
-
-        static function log2(float n): float {
-            return __log2(n); // host function
-        }
-
-        static function log10(float n): float {
-            return __log10(n); // host function
-        }
-
-        // ───────────────────────────────────────────────
-        // Conversions
-        // ───────────────────────────────────────────────
-
+        // ── Conversions ──────────────────────────────────────────────────
         static function toInt(float n): int {
-            return __toInt(n); // host function
+            return __toInt(n);
         }
 
         static function toString(float n): string {
-            return n as string; // pure XenoScript
+            return n as string;
         }
 
-        // ───────────────────────────────────────────────
-        // Utility helpers
-        // ───────────────────────────────────────────────
-
+        // ── Float-specific tests ─────────────────────────────────────────
         static function isNear(float a, float b, float epsilon): bool {
             float d = a - b;
             if (d < 0.0) { d = 0.0 - d; }

@@ -331,6 +331,16 @@ Expr *expr_ident(Arena *a, const char *name, int len, int line, int col) {
     return e;
 }
 
+Expr *expr_type_ref(Arena *a, const char *type_name, int len, int line, int col) {
+    Expr *e            = arena_alloc(a, sizeof(Expr));
+    e->kind            = EXPR_TYPE_REF;
+    e->line            = line;
+    e->col             = col;
+    e->type_ref.type_name = type_name;
+    e->type_ref.length    = len;
+    return e;
+}
+
 Expr *expr_unary(Arena *a, TokenType op, Expr *operand, int line, int col) {
     Expr *e          = arena_alloc(a, sizeof(Expr));
     e->kind          = EXPR_UNARY;
@@ -427,15 +437,18 @@ Expr *expr_call(Arena *a, const char *name, int len,
 }
 
 Expr *expr_new(Arena *a, const char *class_name, int class_len,
-               ArgNode *args, int count, int line, int col) {
+               ArgNode *args, int count, int line, int col,
+               int class_line, int class_col) {
     Expr *e                       = arena_alloc(a, sizeof(Expr));
     e->kind                       = EXPR_NEW;
-    e->line                       = line;
+    e->line                       = line;   /* position of the 'new' keyword */
     e->col          = col;
     e->new_expr.class_name        = class_name;
     e->new_expr.class_name_len    = class_len;
     e->new_expr.args              = args;
     e->new_expr.arg_count         = count;
+    e->new_expr.class_line        = class_line; /* NEW: position of the class name itself */
+    e->new_expr.class_col         = class_col;  /* NEW */
     return e;
 }
 
@@ -501,15 +514,16 @@ Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line, int col) {
  * ───────────────────────────────────────────────────────────────────────────*/
 
 Stmt *stmt_var_decl(Arena *a, Type type, const char *name, int len,
-                    Expr *init, int line, int col) {
+                    Expr *init, int line, int col, int type_col) {
     Stmt *s             = arena_alloc(a, sizeof(Stmt));
     s->kind             = STMT_VAR_DECL;
     s->line             = line;
-    s->col          = col;
+    s->col              = col;             /* column of the variable NAME */
     s->var_decl.type    = type;
     s->var_decl.name    = name;
     s->var_decl.length  = len;
     s->var_decl.init    = init;
+    s->var_decl.type_col = type_col;        /* column of the TYPE token — NEW */
     return s;
 }
 
@@ -796,6 +810,11 @@ void ast_print_expr(const Expr *expr, int indent) {
         case EXPR_IDENT:
             printf("EXPR_IDENT '%.*s'  [%s]\n",
                    expr->ident.length, expr->ident.name, type_str);
+            break;
+
+        case EXPR_TYPE_REF:
+            printf("EXPR_TYPE_REF '%.*s'  [%s]\n",
+                   expr->type_ref.length, expr->type_ref.type_name, type_str);
             break;
 
         case EXPR_UNARY:
@@ -1089,6 +1108,7 @@ void ast_print_program(const Program *program) {
         ast_print_stmt(n->stmt, 0);
     printf("===========\n");
 }
+
 Type type_null(void) {
     Type t;
     t.kind         = TYPE_NULL;

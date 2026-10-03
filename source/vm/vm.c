@@ -24,14 +24,17 @@
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
+#include "strutil.h"
 #include "../../source/compiler/compile_pipeline.h"
 
-/* Forward declaration — xeno_execute is defined later in this file */
+/* Forward declarations — defined later in this file */
 static XenoResult xeno_execute(XenoVM *vm);
+static char *xeno_strdup(const char *s);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * INTERNAL MACROS
@@ -94,6 +97,15 @@ void xeno_vm_init(XenoVM *vm)
     vm->has_source_module = false;
 }
 
+static void vm_free_allocs(XenoVM *vm)
+{
+	for (size_t i = 0; i < vm->alloc_count; i++)
+		free(vm->allocs[i]);
+	free(vm->allocs);
+	vm->allocs = NULL;
+	vm->alloc_count = vm->alloc_cap = 0;
+}
+
 void xeno_vm_free(XenoVM *vm)
 {
     if (vm->has_source_module)
@@ -108,6 +120,7 @@ void xeno_vm_free(XenoVM *vm)
         vm->stdlib_modules[i] = NULL;
     }
     vm->stdlib_module_count = 0;
+	vm_free_allocs(vm);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -149,27 +162,37 @@ static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
                                     ar.chunks[i].size);
         if (xr == XBC_OK)
         {
+            /* __sinit__ is renamed to __sinit__N and class-remapped inside
+             * module_merge. Run them after all chunks are merged. */
             module_merge(pool_mod, chunk_mod);
-            /* Run sinit for this chunk so statics are initialised */
-            if (chunk_mod->sinit_index >= 0)
-            {
-                vm->module = pool_mod;
-                Chunk *sc = &chunk_mod->chunks[chunk_mod->sinit_index];
-                if (sc->count > 0 && vm->frame_count < XENO_FRAME_MAX)
-                {
-                    CallFrame *frame = &vm->frames[vm->frame_count++];
-                    frame->chunk = sc;
-                    frame->ip = sc->code;
-                    memset(frame->slots, 0, sizeof(frame->slots));
-                    frame->type_arg_count = 0;
-                    xeno_execute(vm);
-                }
-            }
             module_free(chunk_mod);
             free(chunk_mod);
         }
     }
     xar_archive_free(&ar);
+
+    /* Run every __sinit__* chunk now that class indices are pool-relative
+     * and constant pools live on pool_mod (not a freed temp chunk). */
+    vm->module = pool_mod;
+    for (int i = 0; i < pool_mod->count; i++)
+    {
+        if (strncmp(pool_mod->names[i], "__sinit__", 9) != 0)
+            continue;
+        Chunk *sc = &pool_mod->chunks[i];
+        if (sc->count <= 0)
+            continue;
+        vm->sp = vm->stack;
+        vm->frame_count = 0;
+        vm->had_error = false;
+        if (vm->frame_count >= XENO_FRAME_MAX)
+            break;
+        CallFrame *frame = &vm->frames[vm->frame_count++];
+        frame->chunk = sc;
+        frame->ip = sc->code;
+        memset(frame->slots, 0, sizeof(frame->slots));
+        frame->type_arg_count = 0;
+        xeno_execute(vm);
+    }
 
     strncpy(vm->stdlib_loaded_names[vm->stdlib_module_count], name,
             XAR_MAX_NAME - 1);
@@ -244,24 +267,31 @@ bool xeno_vm_load_xar(XenoVM *vm, const XarArchive *ar)
         if (xr == XBC_OK)
         {
             module_merge(pool_mod, chunk_mod);
-            /* Run __sinit__ if present so static fields are initialised */
-            if (chunk_mod->sinit_index >= 0)
-            {
-                vm->module = pool_mod;
-                Chunk *sc = &chunk_mod->chunks[chunk_mod->sinit_index];
-                if (sc->count > 0 && vm->frame_count < XENO_FRAME_MAX)
-                {
-                    CallFrame *frame = &vm->frames[vm->frame_count++];
-                    frame->chunk = sc;
-                    frame->ip = sc->code;
-                    memset(frame->slots, 0, sizeof(frame->slots));
-                    frame->type_arg_count = 0;
-                    xeno_execute(vm);
-                }
-            }
             module_free(chunk_mod);
             free(chunk_mod);
         }
+    }
+
+    /* Run every __sinit__* chunk with pool-relative class indices. */
+    vm->module = pool_mod;
+    for (int i = 0; i < pool_mod->count; i++)
+    {
+        if (strncmp(pool_mod->names[i], "__sinit__", 9) != 0)
+            continue;
+        Chunk *sc = &pool_mod->chunks[i];
+        if (sc->count <= 0)
+            continue;
+        vm->sp = vm->stack;
+        vm->frame_count = 0;
+        vm->had_error = false;
+        if (vm->frame_count >= XENO_FRAME_MAX)
+            break;
+        CallFrame *frame = &vm->frames[vm->frame_count++];
+        frame->chunk = sc;
+        frame->ip = sc->code;
+        memset(frame->slots, 0, sizeof(frame->slots));
+        frame->type_arg_count = 0;
+        xeno_execute(vm);
     }
 
     snprintf(vm->stdlib_loaded_names[vm->stdlib_module_count],
@@ -342,6 +372,21 @@ int xeno_register_fn(XenoVM *vm, const char *name,
                      XenoHostFn fn, int param_count)
 {
     return xeno_register_fn_typed(vm, name, fn, TYPE_VOID, param_count, NULL);
+}
+
+void *xeno_vm_track(XenoVM *vm, void *p)
+{
+	if (!p) return p;
+	if (vm->alloc_count == vm->alloc_cap)
+	{
+		size_t nc = vm->alloc_cap ? vm->alloc_cap * 2 : 1024;
+		void **n = realloc(vm->allocs, nc * sizeof(void *));
+		if (!n) return NULL;
+		vm->allocs 		= n;
+		vm->alloc_cap 	= nc;
+	}
+	vm->allocs[vm->alloc_count++] = p;
+	return p;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -486,16 +531,16 @@ static XenoType *xeno_make_type(uint8_t tag, const char *override_name,
     return t;
 }
 
-/* Check whether a Value matches a given type tag at runtime.
- * For IS/AS we use the static type tag baked in by the compiler — this is
- * a compile-time type that we verify is sensible, not a full RTTI check.
- * For objects/arrays we do a quick structural check. */
+/* Primitive / structural family check (Values are untagged — the compiler
+ * only emits these ops when the static types are already compatible families). */
 static bool xeno_value_is_type(Value v, uint8_t tag)
 {
+    if (v.is_null)
+        return false;
     switch (tag)
     {
     case XTAG_BOOL:
-        return true; /* bools are always bool */
+        return true;
     case XTAG_INT:
     case XTAG_SBYTE:
     case XTAG_BYTE:
@@ -520,7 +565,54 @@ static bool xeno_value_is_type(Value v, uint8_t tag)
     }
 }
 
-static char *int128_to_string(__int128 v) {
+/* True if `cls` is named `want`, inherits it, or lists it as an interface.
+ * `want` may be a bare name or a generic form ("List<int>"); we match the
+ * ClassDef name and any interface_names[] entry by exact string. */
+static bool class_matches_name(const Module *mod, const ClassDef *cls,
+                               const char *want)
+{
+    if (!cls || !want || !want[0])
+        return false;
+
+    /* Walk inheritance chain */
+    const ClassDef *cur = cls;
+    int guard = 0;
+    while (cur && guard++ < 64)
+    {
+        if (strcmp(cur->name, want) == 0)
+            return true;
+        for (int i = 0; i < cur->interface_count; i++)
+        {
+            if (strcmp(cur->interface_names[i], want) == 0)
+                return true;
+            /* Bare interface match: "IItem" matches "IItem" or prefix before '<' */
+            const char *iname = cur->interface_names[i];
+            const char *lt = strchr(iname, '<');
+            size_t wlen = strlen(want);
+            if (lt && (size_t)(lt - iname) == wlen &&
+                memcmp(iname, want, wlen) == 0)
+                return true;
+        }
+        if (cur->parent_index < 0 || !mod ||
+            cur->parent_index >= mod->class_count)
+            break;
+        cur = &mod->classes[cur->parent_index];
+    }
+    return false;
+}
+
+/* Object IS/AS: require non-null object whose runtime class matches `name`.
+ * If `name` is empty, any non-null object matches (legacy tag-only check). */
+static bool xeno_object_is_named(Value v, const Module *mod, const char *name)
+{
+    if (v.is_null || !v.obj || !v.obj->class_def)
+        return false;
+    if (!name || !name[0])
+        return true;
+    return class_matches_name(mod, v.obj->class_def, name);
+}
+
+static char *int128_to_string(__int128_t v) {
     char buf[64];
     int i = 63;
     buf[i] = '\0';
@@ -541,12 +633,12 @@ static char *int128_to_string(__int128 v) {
     return s;
 }
 
-static char *uint128_to_string(__int128 v) {
+static char *uint128_to_string(__int128_t v) {
     char buf[64];
     int i = 63;
     buf[i] = '\0';
 
-    unsigned __int128 uv = (unsigned __int128)v;
+    __int128_t uv = (__int128_t)v;
 
     if (uv == 0) {
         buf[--i] = '0';
@@ -560,6 +652,52 @@ static char *uint128_to_string(__int128 v) {
     char *s = malloc(64 - i);
     strcpy(s, &buf[i]);
     return s;
+}
+
+/*
+ * float_to_string — convert a double to a human-readable string.
+ *
+ * Rules:
+ *  - No trailing zeros after the decimal point (but always at least one
+ *    decimal digit so it's clear it's a float: "3.0" not "3").
+ *  - No scientific notation for numbers in the range [1e-4, 1e15).
+ *    Outside that range, use %g so very large/small values are readable.
+ *  - NaN and Inf handled explicitly.
+ *
+ * Returns a heap-allocated string; caller must free().
+ */
+static char *xeno_strdup(const char *s) {
+    size_t len = strlen(s) + 1;
+    char *p = malloc(len);
+    if (!p) return NULL;
+    memcpy(p, s, len);
+    return p;
+}
+
+static double xeno_round(double f) {
+    double scale = 10000.0; // 4 decimal places
+    return round(f * scale) / scale;
+}
+
+static char *float_to_string(double f) {
+    char buf[64];
+
+    if (f != f) return xeno_strdup("NaN");
+    if (f == 1.0/0.0) return xeno_strdup("Inf");
+    if (f == -1.0/0.0) return xeno_strdup("-Inf");
+
+    f = xeno_round(f);
+
+    snprintf(buf, sizeof(buf), "%.4f", f);
+
+    /* trim trailing zeros but keep at least 1 decimal */
+    char *dot = strchr(buf, '.');
+    if (dot) {
+        char *end = buf + strlen(buf) - 1;
+        while (end > dot + 1 && *end == '0') *end-- = '\0';
+    }
+
+    return xeno_strdup(buf);
 }
 
 static XenoResult xeno_execute(XenoVM *vm)
@@ -707,7 +845,7 @@ static XenoResult xeno_execute(XenoVM *vm)
              * — marked as a known TODO for the string GC pass. */
             size_t la = a.s ? strlen(a.s) : 0;
             size_t lb = b.s ? strlen(b.s) : 0;
-            char *result = malloc(la + lb + 1);
+            char *result = xeno_vm_track(vm, malloc(la + lb + 1));
             if (a.s)
                 memcpy(result, a.s, la);
             if (b.s)
@@ -772,9 +910,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 s = int128_to_string(v.i);
                 break;
             case 1: /* float */
-                snprintf(buf, sizeof(buf), "%g", v.f);
-                s = malloc(strlen(buf) + 1);
-                strcpy(s, buf);
+                s = float_to_string(v.f);
                 break;
             case 2: /* bool */
                 s = malloc(6);
@@ -794,7 +930,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 }
                 else if (cp < 0x800)
                 {
-                    s = malloc(3);
+                    s =	malloc(3);
                     s[0] = (char)(0xC0 | (cp >> 6));
                     s[1] = (char)(0x80 | (cp & 0x3F));
                     s[2] = 0;
@@ -822,7 +958,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 PUSH(v);
                 goto to_str_done;
             }
-            PUSH(val_str(s));
+            PUSH(val_str(xeno_vm_track(vm, s)));
         to_str_done:;
             break;
         }
@@ -1139,7 +1275,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 RUNTIME_ERROR("Array length cannot be negative (%lld)", (long long)len);
             if (len > 1000000)
                 RUNTIME_ERROR("Array length too large (%lld)", (long long)len);
-            XenoArray *arr = malloc(sizeof(XenoArray) + (size_t)len * sizeof(Value));
+            XenoArray *arr = xeno_vm_track(vm, malloc(sizeof(XenoArray) + (size_t)len * sizeof(Value)));
             if (!arr)
                 RUNTIME_ERROR("Out of memory allocating array of length %lld", (long long)len);
             arr->length = (int)len;
@@ -1153,10 +1289,12 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_ARRAY_LIT:
         {
             uint8_t count = READ_BYTE();
-            XenoArray *arr = malloc(sizeof(XenoArray) + count * sizeof(Value));
+			uint8_t elem_kind = READ_BYTE();
+            XenoArray *arr = xeno_vm_track(vm, malloc(sizeof(XenoArray) + count * sizeof(Value)));
             if (!arr)
                 RUNTIME_ERROR("Out of memory allocating array literal");
             arr->length = count;
+			arr->elem_kind = elem_kind;
             /* Elements are on stack in order (e0 pushed first, eN last).
              * We need to copy them out in reverse since stack is LIFO. */
             for (int i = count - 1; i >= 0; i--)
@@ -1192,34 +1330,92 @@ static XenoResult xeno_execute(XenoVM *vm)
         }
         case OP_IS_TYPE:
         {
-            /* [type_tag]  ( val -- bool ) */
+            /* [type_tag][name_len][name_bytes...]  ( val -- bool )
+             * name_len == 0: family/structural check only.
+             * name_len  > 0: object/interface name for runtime class match. */
             uint8_t tag = READ_BYTE();
+            uint8_t nlen = READ_BYTE();
+            char namebuf[128];
+            const char *tname = NULL;
+            if (nlen > 0)
+            {
+                if (nlen >= sizeof(namebuf))
+                    nlen = (uint8_t)(sizeof(namebuf) - 1);
+                for (int ni = 0; ni < nlen; ni++)
+                    namebuf[ni] = (char)READ_BYTE();
+                namebuf[nlen] = '\0';
+                tname = namebuf;
+            }
             Value v = POP();
-            PUSH(val_bool(xeno_value_is_type(v, tag)));
+            bool ok;
+            if (tag == XTAG_OBJECT || tag == XTAG_CLASS_REF)
+                ok = xeno_object_is_named(v, vm->module, tname);
+            else
+                ok = xeno_value_is_type(v, tag);
+            PUSH(val_bool(ok));
             break;
         }
 
         case OP_AS_TYPE:
         {
-            /* [type_tag]  ( val -- val )  runtime error if incompatible */
+            /* [type_tag][name_len][name_bytes...]  ( val -- val ) */
             uint8_t tag = READ_BYTE();
+            uint8_t nlen = READ_BYTE();
+            char namebuf[128];
+            const char *tname = NULL;
+            if (nlen > 0)
+            {
+                if (nlen >= sizeof(namebuf))
+                    nlen = (uint8_t)(sizeof(namebuf) - 1);
+                for (int ni = 0; ni < nlen; ni++)
+                    namebuf[ni] = (char)READ_BYTE();
+                namebuf[nlen] = '\0';
+                tname = namebuf;
+            }
             Value v = POP();
-            if (!xeno_value_is_type(v, tag))
+            bool ok;
+            if (tag == XTAG_OBJECT || tag == XTAG_CLASS_REF)
+                ok = xeno_object_is_named(v, vm->module, tname);
+            else
+                ok = xeno_value_is_type(v, tag);
+            if (!ok)
+            {
+                if (tname && tname[0])
+                    RUNTIME_ERROR("Cast failed: value is not a %s", tname);
                 RUNTIME_ERROR("Cast failed: value is not a %s", xeno_type_name(tag));
+            }
             PUSH(v);
             break;
         }
 
+		case OP_I2F:
+		{
+			Value v = POP();
+			v.f = (double)v.i;
+			PUSH(v);
+			break;
+		}
+
+		case OP_F2I:
+		{
+			Value v = POP();
+			v.i = (__int128_t)v.f;
+			PUSH(v);
+			break;
+		}
+
         case OP_TYPEOF:
         {
             /* [type_tag][name_len][name_bytes...]
-             * name_len=0 means use built-in name for tag. */
+             * name_len=0 means use built-in name for tag.
+             * If the runtime value is an object with a ClassDef, prefer that
+             * class name over the static tag baked in by the compiler. */
             uint8_t tag = READ_BYTE();
             uint8_t name_len = READ_BYTE();
             char *tname = NULL;
             if (name_len > 0)
             {
-                tname = malloc(name_len + 1);
+                tname = xeno_vm_track(vm, malloc(name_len + 1));
                 if (!tname)
                     RUNTIME_ERROR("Out of memory");
                 for (int ni = 0; ni < name_len; ni++)
@@ -1227,8 +1423,17 @@ static XenoResult xeno_execute(XenoVM *vm)
                 tname[name_len] = '\0';
             }
             Value v = POP();
-            (void)v; /* value not needed for type construction */
-            XenoType *t = xeno_make_type(tag, tname, vm->module);
+            if (!v.is_null && v.obj && v.obj->class_def &&
+                v.obj->class_def->name[0])
+            {
+                tag = XTAG_OBJECT;
+                const char *rn = v.obj->class_def->name;
+                tname = xeno_vm_track(vm, malloc(strlen(rn) + 1));
+                if (!tname)
+                    RUNTIME_ERROR("Out of memory");
+                strcpy(tname, rn);
+            }
+            XenoType *t = xeno_vm_track(vm, xeno_make_type(tag, tname, vm->module));
             if (!t)
                 RUNTIME_ERROR("Out of memory allocating Type object");
             PUSH(val_type(t));
@@ -1246,7 +1451,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             {
             case 0:
             { /* .name */
-                char *s = malloc(strlen(t->name) + 1);
+                char *s = xeno_vm_track(vm, malloc(strlen(t->name) + 1));
                 if (!s)
                     RUNTIME_ERROR("Out of memory");
                 strcpy(s, t->name);
@@ -1341,33 +1546,30 @@ static XenoResult xeno_execute(XenoVM *vm)
                 case ATTR_ARG_STRING:
                 {
                     const char *_s = arg->s ? arg->s : "";
-                    result = malloc(strlen(_s) + 1);
+                    result = xeno_vm_track(vm, malloc(strlen(_s) + 1));
                     if (result)
                         strcpy(result, _s);
                     break;
                 }
                 case ATTR_ARG_INT:
                     snprintf(buf, sizeof(buf), "%lld", (long long)arg->i);
-                    result = malloc(strlen(buf) + 1);
+                    result = xeno_vm_track(vm, malloc(strlen(buf) + 1));
                     if (result)
                         strcpy(result, buf);
                     break;
                 case ATTR_ARG_FLOAT:
-                    snprintf(buf, sizeof(buf), "%g", arg->f);
-                    result = malloc(strlen(buf) + 1);
-                    if (result)
-                        strcpy(result, buf);
+                    result = xeno_vm_track(vm, float_to_string(arg->f));
                     break;
                 case ATTR_ARG_BOOL:
                 {
                     const char *_s = arg->b ? "true" : "false";
-                    result = malloc(strlen(_s) + 1);
+                    result = xeno_vm_track(vm, malloc(strlen(_s) + 1));
                     if (result)
                         strcpy(result, _s);
                     break;
                 }
                 default:
-                    result = malloc(1);
+                    result = xeno_vm_track(vm, malloc(1));
                     if (result)
                         result[0] = '\0';
                     break;
@@ -1597,8 +1799,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 if (vm->event_count >= XENO_MAX_EVENTS)
                     RUNTIME_ERROR("Too many events");
                 ei = vm->event_count++;
-                strncpy(vm->event_table[ei].name, ename, 63);
-                vm->event_table[ei].name[63] = '\0';
+                xeno_copy_str(vm->event_table[ei].name, sizeof(vm->event_table[ei].name), ename);
                 vm->event_table[ei].handler_count = 0;
                 vm->event_table[ei].active = true;
             }
@@ -1625,8 +1826,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                     vm->event_table[ei].handler_count < XENO_MAX_EVENT_HANDLERS)
                 {
                     int hi = vm->event_table[ei].handler_count++;
-                    strncpy(vm->event_table[ei].handlers[hi].fn_name, hname, 63);
-                    vm->event_table[ei].handlers[hi].fn_name[63] = '\0';
+                    xeno_copy_str(vm->event_table[ei].handlers[hi].fn_name, sizeof(vm->event_table[ei].handlers[hi].fn_name), hname);
                     vm->event_table[ei].handlers[hi].receiver = receiver;
                 }
             }
@@ -1895,8 +2095,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             ClassDef *cls = &vm->module->classes[class_idx];
 
             /* Allocate the object — fixed header + one Value per field */
-            XenoObject *obj = malloc(
-                sizeof(XenoObject) + cls->field_count * sizeof(Value));
+            XenoObject *obj = xeno_vm_track(vm, malloc(sizeof(XenoObject) + cls->field_count * sizeof(Value)));
             if (!obj)
                 RUNTIME_ERROR("Out of memory allocating '%s'", cls->name);
 
@@ -2122,8 +2321,13 @@ static XenoResult xeno_execute(XenoVM *vm)
 
             ClassDef *cls = obj_val.obj->class_def;
             if (!cls || slot >= (uint16_t)cls->method_count)
-                RUNTIME_ERROR("Invalid method slot %d on class '%s'",
-                              slot, cls ? cls->name : "?");
+                RUNTIME_ERROR(
+                    "Invalid method slot %d on class '%s'%s",
+                    slot, cls ? cls->name : "?",
+                    (cls && cls->method_count == 0)
+                        ? " (class has no methods — dependency .xar may not "
+                          "have been loaded; check the mod manifest dependencies)"
+                        : "");
 
             int fn_idx = cls->methods[slot].fn_index;
             if (fn_idx < 0 || fn_idx >= vm->module->count)
@@ -2211,27 +2415,34 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
     for (int i = 0; i < vm->stdlib_module_count; i++)
         module_merge(module, vm->stdlib_modules[i]);
 
-    /* ── Run static initializers, run it now to initialize all
-     * static fields. This must happen before any entry point runs. */
-    if (module->sinit_index >= 0 && module->sinit_index < module->count)
+    /* ── Run static initializers ───────────────────────────────────────
+     * module_merge renames each module's __sinit__ to __sinit__N, so
+     * module->sinit_index alone is not enough (often a pre-merge index or
+     * only the first stdlib sinit). Run every "__sinit__*" chunk so user
+     * statics like MyMod.MOD_ID are actually initialized. */
+    for (int si = 0; si < module->count; si++)
     {
-        Chunk *sinit_chunk = &module->chunks[module->sinit_index];
-        if (sinit_chunk->count > 0)
+        if (strncmp(module->names[si], "__sinit__", 9) != 0)
+            continue;
+        Chunk *sinit_chunk = &module->chunks[si];
+        if (sinit_chunk->count <= 0)
+            continue;
+        if (vm->frame_count >= XENO_FRAME_MAX)
         {
-            if (vm->frame_count >= XENO_FRAME_MAX)
-            {
-                xeno_vm_error(vm, "Stack overflow running static initializers");
-                return XENO_RUNTIME_ERROR;
-            }
-            CallFrame *frame = &vm->frames[vm->frame_count++];
-            frame->chunk = sinit_chunk;
-            frame->ip = sinit_chunk->code;
-            memset(frame->slots, 0, sizeof(Value) * (sinit_chunk->local_count > 0 ? sinit_chunk->local_count : 1));
-            frame->type_arg_count = 0;
-            XenoResult r = xeno_execute(vm);
-            if (r != XENO_OK)
-                return r;
+            xeno_vm_error(vm, "Stack overflow running static initializers");
+            return XENO_RUNTIME_ERROR;
         }
+        vm->sp = vm->stack;
+        vm->frame_count = 0;
+        vm->had_error = false;
+        CallFrame *frame = &vm->frames[vm->frame_count++];
+        frame->chunk = sinit_chunk;
+        frame->ip = sinit_chunk->code;
+        memset(frame->slots, 0, sizeof(frame->slots));
+        frame->type_arg_count = 0;
+        XenoResult r = xeno_execute(vm);
+        if (r != XENO_OK)
+            return r;
     }
 
     /* Determine entry point.
@@ -2249,7 +2460,7 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
         ClassDef *cls = &module->classes[ci];
 
         /* Allocate the mod object */
-        XenoObject *obj = malloc(sizeof(XenoObject) + cls->field_count * sizeof(Value));
+        XenoObject *obj = xeno_vm_track(vm, malloc(sizeof(XenoObject) + cls->field_count * sizeof(Value)));
         if (!obj)
         {
             xeno_vm_error(vm, "Out of memory allocating @Mod class '%s'", entry_class);
@@ -2413,7 +2624,14 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source)
         return XENO_COMPILE_ERROR;
     }
 
-    /* Compile — pass staging so compiler can resolve stdlib classes (e.g. Exception)
+    /* Merge pre-loaded deps (and any other pool modules) into staging so the
+     * compiler can resolve classes like Utils from libraries.xar — the checker
+     * already sees them via pipeline_declare_staging, but the compiler looks
+     * up ClassDefs on the Module, not the checker symbol table. */
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        module_merge(staging, vm->stdlib_modules[i]);
+
+    /* Compile — pass staging so compiler can resolve stdlib/dep classes
      * via compiler_ensure_class fallback without inlining their source. */
     if (!compiler_compile_staged(&compiler, &program, &vm->source_module, &host_table, staging))
     {

@@ -45,6 +45,12 @@ typedef enum {
     ATTR_ARG_ARRAY,          /* nested AttrArg[] — for [Target.Class, ...] */
 } AttrArgKind;
 
+typedef enum {
+	VIS_PUBLIC = 0,
+	VIS_PRIVATE,
+	VIS_PROTECTED
+} Visibility;
+
 typedef struct AttrArg AttrArg;
 struct AttrArg {
     AttrArgKind kind;
@@ -125,6 +131,9 @@ typedef struct {
     char     name[FIELD_NAME_MAX];
     int      type_kind;    /* TypeKind of this field                        */
     char     class_name[CLASS_NAME_MAX]; /* if type_kind == TYPE_OBJECT     */
+
+	uint8_t  access_flags;
+
     bool     is_static;
     bool     is_final;
     bool     is_nullable;  /* true if declared with ?, e.g. string?         */
@@ -137,6 +146,9 @@ typedef struct {
 
 typedef struct {
     char     name[FIELD_NAME_MAX];
+
+	uint8_t  access_flags;
+
     int      fn_index;     /* Index into Module->chunks                     */
     bool     is_static;
     bool     is_virtual;   /* true if declared virtual in parent            */
@@ -160,6 +172,9 @@ typedef struct {
 #define EVENT_CLASS_NAME_MAX 32
 typedef struct {
     char name[FIELD_NAME_MAX];
+
+	uint8_t access_flags;
+
     int  param_count;
     int  param_type_kinds[EVENT_MAX_PARAMS];
     char param_class_names[EVENT_MAX_PARAMS][EVENT_CLASS_NAME_MAX];
@@ -423,8 +438,10 @@ typedef enum {
     OP_STORE_STATIC,      /* [uint8_t class_idx][uint8_t field_idx]  ( val -- ) */
 
     /* ── Type operators ────────────────────────────────────────────────── */
-    OP_IS_TYPE,           /* [uint8_t type_tag]  ( val -- bool )  expr is T   */
-    OP_AS_TYPE,           /* [uint8_t type_tag]  ( val -- val )   expr as T   */
+    OP_IS_TYPE,           /* [tag][name_len][name...]  ( val -- bool )  expr is T */
+    OP_AS_TYPE,           /* [tag][name_len][name...]  ( val -- val )   expr as T */
+	OP_I2F,				  /* [uint8_t conversion_tag]  ( int -- float )       */
+	OP_F2I,				  /* [uint8_t conversion_tag]  ( float -- int )       */
     OP_TYPEOF,            /* [uint8_t type_tag][uint8_t name_len][name_bytes] */
     OP_TYPE_FIELD,        /* [uint8_t field_id]  ( Type -- val )              */
     OP_TYPE_HAS_ATTR,     /* ( Type string -- bool )  hasAttribute(name)      */
@@ -480,6 +497,7 @@ const char *opcode_name(OpCode op);
 /* ConstPool grows dynamically — no fixed upper limit baked into the struct */
 typedef struct {
     Value  *values;   /* heap-allocated, grown on demand */
+	uint8_t *is_str;
     int     count;
     int     capacity;
 } ConstPool;
@@ -571,5 +589,8 @@ int chunk_add_constant(Chunk *chunk, Value value);
  *   0006  line 2   RETURN
  */
 void chunk_disassemble(const Chunk *chunk, const char *name);
+
+int chunk_add_constant_str(Chunk *chunk, char *heap_str);             /* takes ownership */
+int chunk_copy_constant(Chunk *dst, const Chunk *src, int idx);       /* dups strings */
 
 #endif /* BYTECODE_H */

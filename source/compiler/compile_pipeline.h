@@ -23,6 +23,7 @@
 #include "xbc.h"
 #include "xar.h"
 #include "stdlib_xar.h"
+#include "toml.h"
 #include "../../source/stdlib/stdlib_declare.h"
 #include "../../source/stdlib/stdlib_sources.h"
 #include <stdio.h>
@@ -53,10 +54,97 @@ static char *pipeline_read_file(const char *path) {
     fclose(f); return buf;
 }
 
+typedef struct {
+    int major, minor, patch;
+    bool valid;
+} SemVer;
+
+/* Parse "1.2.3" or "v1.2.3" → SemVer. Returns valid=false on failure. */
+static SemVer semver_parse(const char *s)
+{
+    SemVer v = {0, 0, 0, false};
+    if (!s || !*s) return v;
+
+    /* skip leading v/V */
+    if (s[0] == 'v' || s[0] == 'V') s++;
+
+    int n = sscanf(s, "%d.%d.%d", &v.major, &v.minor, &v.patch);
+    if (n < 1) return v;          /* need at least major */
+    if (n == 1) { v.minor = 0; v.patch = 0; }
+    if (n == 2) { v.patch = 0; }
+    v.valid = true;
+    return v;
+}
+
+/* -1 if a < b, 0 if equal, 1 if a > b */
+static int semver_cmp(SemVer a, SemVer b)
+{
+    if (a.major != b.major) return a.major < b.major ? -1 : 1;
+    if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
+    if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
+    return 0;
+}
+
+/*
+ * Does `actual` satisfy `constraint`?
+ *
+ * Supported constraints:
+ *   "1.2.3"   exact
+ *   "^1.2.3"  >=1.2.3  &&  <2.0.0
+ *   "~1.2.3"  >=1.2.3  &&  <1.3.0
+ *   ">=1.2.3" minimum
+ *   "*" or "" any
+ */
+static bool semver_satisfies(const char *constraint, const char *actual_str)
+{
+    if (!constraint || !*constraint || strcmp(constraint, "*") == 0)
+        return true;
+
+    SemVer actual = semver_parse(actual_str);
+    if (!actual.valid) return false;
+
+    const char *c = constraint;
+    char op = 0;   /* '^', '~', or 0 for exact; 'g' for >= */
+
+    if (c[0] == '^' || c[0] == '~') {
+        op = c[0];
+        c++;
+    } else if (c[0] == '>' && c[1] == '=') {
+        op = 'g';
+        c += 2;
+    }
+
+    SemVer need = semver_parse(c);
+    if (!need.valid) return false;
+
+    int cmp = semver_cmp(actual, need);
+
+    switch (op) {
+    case 0:   /* exact */
+        return cmp == 0;
+    case 'g': /* >= */
+        return cmp >= 0;
+    case '^': /* compatible: >= need && < (need.major+1).0.0 */
+        if (cmp < 0) return false;
+        return actual.major == need.major;
+    case '~': /* approx: >= need && < need.major.(need.minor+1).0 */
+        if (cmp < 0) return false;
+        return actual.major == need.major && actual.minor == need.minor;
+    default:
+        return false;
+    }
+}
+
 /* ── Dedup tracking ───────────────────────────────────────────────────── */
 
 #define PIPELINE_MAX_SYS    32
 #define PIPELINE_MAX_LOCAL  64
+#define PIPELINE_MAX_DEPS	32
+
+typedef struct {
+	char name[64];
+	char version[32];		/* required version from xeno.project; "" = any */
+} PipelineDep;
 
 typedef struct {
     char sys_loaded[PIPELINE_MAX_SYS][64];
@@ -64,12 +152,17 @@ typedef struct {
     char local_imported[PIPELINE_MAX_LOCAL][1024];
     int  local_import_count;
     char deps_dir[512];   /* project deps/ directory, or "" if none */
+
+	/* Declared project dependencies (from xeno.project [dependencies]) */
+    PipelineDep deps[PIPELINE_MAX_DEPS];
+    int         dep_count;
 } PipelineState;
 
 static void pipeline_state_init(PipelineState *s) {
     s->sys_loaded_count   = 0;
     s->local_import_count = 0;
     s->deps_dir[0]        = '\0';
+	s->dep_count		  = 0;
 }
 
 static bool pipeline_sys_loaded(PipelineState *s, const char *name) {
@@ -104,68 +197,210 @@ static char *pipeline_buf_append(char *buf, size_t *len, size_t *cap,
     return buf;
 }
 
+/* ── Last-error reporting ─────────────────────────────────────────────── */
+/* Import failures are recorded here (first failure wins) as well as echoed to
+ * stderr, so front-ends such as the LSP can show a precise diagnostic. Clear
+ * with pipeline_clear_error() before a run. */
+#include <stdarg.h>
+static char pipeline_last_error[320];
+static char pipeline_last_error_import[512];  /* name of the import that failed */
+
+static void pipeline_clear_error(void) {
+    pipeline_last_error[0] = '\0';
+    pipeline_last_error_import[0] = '\0';
+}
+
+static void pipeline_set_error(const char *import_name, const char *fmt, ...) {
+    char tmp[320];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "xenoscript: %s\n", tmp);
+    if (pipeline_last_error[0]) return;               /* keep the first failure */
+    snprintf(pipeline_last_error, sizeof(pipeline_last_error), "%s", tmp);
+    snprintf(pipeline_last_error_import, sizeof(pipeline_last_error_import), "%s",
+             import_name ? import_name : "");
+}
+
 /* ── System module loader ─────────────────────────────────────────────── */
+
+/* Fill ps->deps_dir and ps->deps[] from xeno.project.
+ * Returns true if the project file was found and parsed. */
+static inline bool pipeline_load_project(PipelineState *ps, const char *project_root)
+{
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/xeno.project", project_root);
+    char *text = pipeline_read_file(path);
+    if (!text) return false;
+
+    TomlDoc doc;
+    if (!toml_parse(&doc, text)) {
+        free(text);
+        return false;
+    }
+    free(text);
+
+    /* deps_dir */
+    const char *configured = toml_get(&doc, "project", "deps_dir");
+    if (configured && *configured) {
+        int n = snprintf(ps->deps_dir, sizeof ps->deps_dir, "%s/%s", project_root, configured);
+        if (n < 0 || (size_t)n >= sizeof ps->deps_dir) { toml_free(&doc); return false; }
+    } else {
+        static const char *candidates[] = { "deps", "dependencies", "libraries", "xars", NULL };
+        ps->deps_dir[0] = '\0';
+        for (int i = 0; candidates[i]; i++) {
+            int n = snprintf(ps->deps_dir, sizeof ps->deps_dir, "%s/%s", project_root, candidates[i]);
+            if (n < 0 || (size_t)n >= sizeof ps->deps_dir) { toml_free(&doc); return false; }
+            break; /* for now just take the first candidate; refine with stat() later */
+        }
+        if (!ps->deps_dir[0])
+            snprintf(ps->deps_dir, sizeof(ps->deps_dir), "%s/deps", project_root);
+    }
+
+    /* [dependencies] → ps->deps[] */
+    ps->dep_count = 0;
+    for (int i = 0; i < doc.count && ps->dep_count < PIPELINE_MAX_DEPS; i++) {
+        if (strcmp(doc.entries[i].section, "dependencies") != 0) continue;
+        PipelineDep *d = &ps->deps[ps->dep_count++];
+        snprintf(d->name,    sizeof(d->name),    "%s", doc.entries[i].key);
+        snprintf(d->version, sizeof(d->version), "%s", doc.entries[i].value);
+    }
+
+    toml_free(&doc);
+    return true;
+}
+
+static const PipelineDep *pipeline_find_dep(const PipelineState *ps, const char *name)
+{
+    for (int i = 0; i < ps->dep_count; i++)
+        if (strcmp(ps->deps[i].name, name) == 0)
+            return &ps->deps[i];
+    return NULL;
+}
 
 static bool pipeline_load_sys_module(PipelineState *s, const char *name,
                                       Module *staging) {
     if (pipeline_sys_loaded(s, name)) return true;
 
-    /* First: check deps_dir for a user-provided <name>.xar */
+    /* ── 1. Project dependency (.xar in deps_dir) ─────────────────────── */
     if (s->deps_dir[0]) {
         char dep_path[1024];
         snprintf(dep_path, sizeof(dep_path), "%s/%s.xar", s->deps_dir, name);
+
         FILE *probe = fopen(dep_path, "rb");
         if (probe) {
             fclose(probe);
-            /* Load dep xar — read all chunks into staging */
+
+            /* File exists under deps_dir — load it. Version is checked only
+             * when the dep was declared in xeno.project (PipelineState.deps).
+             * Previously we required a declaration and ignored the file when
+             * PipelineState had no deps list (e.g. xenovm project mode), which
+             * produced "Unknown module '<libraries>'". */
+            const PipelineDep *decl = pipeline_find_dep(s, name);
+            bool ok = false;
             FILE *f = fopen(dep_path, "rb");
             if (f) {
-                fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
-                uint8_t *buf = malloc((size_t)sz);
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                rewind(f);
+                uint8_t *buf = (sz > 0) ? malloc((size_t)sz) : NULL;
                 if (buf) {
-                    size_t nr = fread(buf, 1, (size_t)sz, f); fclose(f);
-                    (void)nr;
-                    XarArchive dep; memset(&dep, 0, sizeof(dep));
-                    if (xar_read_mem(&dep, buf, (size_t)sz) == XAR_OK) {
-                        for (int j = 0; j < dep.chunk_count; j++) {
-                            Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
-                            if (xbc_read_mem(cm, dep.chunks[j].data,
-                                             dep.chunks[j].size) == XBC_OK) {
-                                module_merge(staging, cm); module_free(cm); free(cm);
+                    size_t nr = fread(buf, 1, (size_t)sz, f);
+                    XarArchive dep;
+                    memset(&dep, 0, sizeof(dep));
+
+                    if (nr != (size_t)sz) {
+                        pipeline_set_error(name,
+                            "Dependency '%s' could not be read (short read: %s)",
+                            name, dep_path);
+                    } else if (xar_read_mem(&dep, buf, (size_t)sz) != XAR_OK) {
+                        pipeline_set_error(name,
+                            "Dependency '%s' is not a valid .xar (%s)",
+                            name, dep_path);
+                    } else {
+                        const char *actual = dep.manifest.version;
+                        const char *need   = decl ? decl->version : "";
+
+                        if (need[0] && actual[0] && !semver_satisfies(need, actual)) {
+                            pipeline_set_error(name,
+                                "Dependency '%s' version mismatch: need %s, found %s",
+                                name, need, actual);
+                            xar_archive_free(&dep);
+                        } else {
+                            ok = true;
+                            for (int j = 0; j < dep.chunk_count; j++) {
+                                Module *cm = calloc(1, sizeof(Module));
+                                module_init(cm);
+                                XbcResult br = xbc_read_mem(cm,
+                                    dep.chunks[j].data, dep.chunks[j].size);
+                                if (br == XBC_OK) {
+                                    module_merge(staging, cm);
+                                } else {
+                                    if (br == XBC_ERR_BAD_VERSION)
+                                        pipeline_set_error(name,
+                                            "Dependency '%s' was built with a different "
+                                            "bytecode version (tooling expects v%d) — "
+                                            "rebuild %s.xar",
+                                            name, XBC_VERSION, name);
+                                    else
+                                        pipeline_set_error(name,
+                                            "Dependency '%s': bad bytecode chunk '%s': %s",
+                                            name, dep.chunks[j].name,
+                                            xbc_result_str(br));
+                                    ok = false;
+                                }
+                                module_free(cm);
+                                free(cm);
                             }
+                            xar_archive_free(&dep);
                         }
-                        xar_archive_free(&dep);
                     }
                     free(buf);
                 }
+                fclose(f);
             }
+
+            if (!ok) return false;
+
             if (s->sys_loaded_count < PIPELINE_MAX_SYS)
                 strncpy(s->sys_loaded[s->sys_loaded_count++], name, 63);
             return true;
         }
     }
 
-    /* Fall back to embedded stdlib xar */
+    /* ── 2. Embedded stdlib ───────────────────────────────────────────── */
     for (int i = 0; i < STDLIB_XAR_TOTAL_COUNT; i++) {
         if (strcmp(STDLIB_XAR_TABLE[i].name, name) != 0) continue;
+
         size_t sz = (size_t)(STDLIB_XAR_TABLE[i].end - STDLIB_XAR_TABLE[i].start);
         XarArchive ar;
         if (xar_read_mem(&ar, STDLIB_XAR_TABLE[i].start, sz) != XAR_OK) {
-            fprintf(stderr, "xenoscript: failed to read embedded stdlib '%s'\n", name);
+            pipeline_set_error(name,
+                "Failed to read embedded standard library module '%s'", name);
             return false;
         }
         for (int j = 0; j < ar.chunk_count; j++) {
-            Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
+            Module *cm = calloc(1, sizeof(Module));
+            module_init(cm);
             if (xbc_read_mem(cm, ar.chunks[j].data, ar.chunks[j].size) == XBC_OK) {
-                module_merge(staging, cm); module_free(cm); free(cm);
+                module_merge(staging, cm);
+                module_free(cm);
+                free(cm);
             }
         }
         xar_archive_free(&ar);
+
         if (s->sys_loaded_count < PIPELINE_MAX_SYS)
             strncpy(s->sys_loaded[s->sys_loaded_count++], name, 63);
         return true;
     }
-    fprintf(stderr, "xenoscript: unknown system module '<%s>'\n", name);
+
+    /* ── 3. Not found anywhere ────────────────────────────────────────── */
+    pipeline_set_error(name,
+        "Unknown module '<%s>' — not part of the standard library, "
+        "and no %s.xar was found in the project's deps folder "
+        "(or it is not listed under [dependencies] in xeno.project)",
+        name, name);
     return false;
 }
 
@@ -254,8 +489,8 @@ static char *pipeline_resolve_imports(PipelineState *s,
                 snprintf(fpath, sizeof(fpath), "%s%s", base_dir, name);
                 char *src = pipeline_read_file(fpath);
                 if (!src) {
-                    fprintf(stderr, "xenoscript: cannot open '%s' (from '%s')\n",
-                            fpath, label);
+                    pipeline_set_error(name, "Cannot open '%s' (imported from '%s')",
+                                       fpath, label);
                     *err = true; return out;
                 }
                 char sub[1024] = "";
@@ -335,21 +570,76 @@ static void pipeline_declare_staging_deps_only(Checker *checker,
 
 /* ── Top-level entry point ────────────────────────────────────────────── */
 
+static char *pipeline_prepare_with_state(const char *source, const char *source_path,
+                                          PipelineState *ps,
+                                          Module *staging, bool *err)
+{
+    pipeline_clear_error();
+
+    /* Load stdlib first with deps_dir disabled so disk packages can't shadow it */
+    char saved_deps[512];
+    snprintf(saved_deps, sizeof(saved_deps), "%s", ps->deps_dir);
+    ps->deps_dir[0] = '\0';
+
+    pipeline_load_sys_module(ps, "core",        staging);
+    pipeline_load_sys_module(ps, "math",        staging);
+    pipeline_load_sys_module(ps, "collections", staging);
+
+    /* Restore project deps_dir for user imports */
+    snprintf(ps->deps_dir, sizeof(ps->deps_dir), "%s", saved_deps);
+
+    char base_dir[1024] = "";
+    if (source_path && *source_path)
+        pipeline_dir_of(source_path, base_dir, sizeof(base_dir));
+
+    size_t len = 0, cap = 65536;
+    char *merged = malloc(cap);
+    if (!merged) { *err = true; return NULL; }
+    merged[0] = '\0';
+
+    merged = pipeline_buf_append(merged, &len, &cap,
+                                 xenostd_enumerable_source,
+                                 strlen(xenostd_enumerable_source));
+    if (!merged) { *err = true; return NULL; }
+
+    merged = pipeline_buf_append(merged, &len, &cap, "// @xeno:line 1\n", 16);
+    if (!merged) { *err = true; return NULL; }
+
+    *err = false;
+    merged = pipeline_resolve_imports(ps, source, base_dir,
+                                       source_path ? source_path : "<source>",
+                                       merged, &len, &cap, staging, err);
+    if (*err || !merged) { free(merged); return NULL; }
+    return merged;
+}
+
 /*
  * pipeline_prepare — resolve all imports from `source` (at `source_path`),
  * populate `staging` with stdlib modules, and return the fully-merged source
  * string (heap-allocated, caller must free). Returns NULL on error.
  */
-static char *pipeline_prepare(const char *source, const char *source_path,
-                               Module *staging, bool *err) {
+static char *pipeline_prepare_with_deps(const char *source, const char *source_path,
+                                         const char *deps_dir,
+                                         Module *staging, bool *err) {
     PipelineState ps;
     pipeline_state_init(&ps);
+    pipeline_clear_error();
+    /* Do NOT set deps_dir while loading stdlib — stdlib is always loaded from
+     * the embedded binary (STDLIB_XAR_TABLE), never from disk. This prevents a
+     * stale build/xar/math.xar on disk from silently shadowing the embedded one
+     * when running `xenovm script.xeno` directly. */
+    ps.deps_dir[0] = '\0';
 
     /* Always load all stdlib so compile-time class indices match
      * the runtime layout produced by xenovm (which loads all stdlib). */
     pipeline_load_sys_module(&ps, "core", staging);
     pipeline_load_sys_module(&ps, "math", staging);
     pipeline_load_sys_module(&ps, "collections", staging);
+
+    /* Only now enable project dependency lookup (deps/<name>.xar), so a stray
+     * deps/core.xar can never shadow the embedded stdlib loaded above. */
+    if (deps_dir && *deps_dir)
+        snprintf(ps.deps_dir, sizeof(ps.deps_dir), "%s", deps_dir);
 
     char base_dir[512] = "";
     if (source_path && *source_path)
@@ -379,6 +669,12 @@ static char *pipeline_prepare(const char *source, const char *source_path,
                                        merged, &len, &cap, staging, err);
     if (*err || !merged) { free(merged); return NULL; }
     return merged;
+}
+
+/* pipeline_prepare — no project dependencies (stdlib only). */
+static char *pipeline_prepare(const char *source, const char *source_path,
+                               Module *staging, bool *err) {
+    return pipeline_prepare_with_deps(source, source_path, NULL, staging, err);
 }
 /*
  * pipeline_prepare_project — like pipeline_prepare but with a deps_dir so

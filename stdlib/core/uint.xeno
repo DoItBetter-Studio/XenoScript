@@ -1,0 +1,20 @@
+// XenoScript Standard Library — core/UInt
+// Constants and type-specific utilities for the uint primitive (unsigned 32-bit).
+
+class UInt {
+    public:
+        static final long MaxValue = 4294967295;
+        static final int  MinValue = 0;
+
+        static function toString(uint n): string {
+            return n as string;
+        }
+
+        static function toInt(uint n): int {
+            return n as int;
+        }
+
+        static function toLong(uint n): long {
+            return n as long;
+        }
+}

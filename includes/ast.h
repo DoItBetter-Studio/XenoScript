@@ -184,6 +184,7 @@ typedef enum {
 
     /* Variables */
     EXPR_IDENT,         /* x  — a variable reference   */
+    EXPR_TYPE_REF,      /* int — a type reference for static access */
 
     /* Operations */
     EXPR_UNARY,         /* -x  or  !flag         */
@@ -312,6 +313,12 @@ struct Expr {
             int         length;
         } ident;
 
+        /* EXPR_TYPE_REF */
+        struct {
+            const char *type_name;
+            int         length;
+        } type_ref;
+
         /* EXPR_UNARY
          * op is one of: TOK_MINUS (negation), TOK_BANG (logical not) */
         struct {
@@ -374,6 +381,11 @@ struct Expr {
             TypeArgNode *type_args;     /* NULL if not generic instantiation */
             int          type_arg_count;
             ParamNode   *resolved_params; /* Set by checker — for default arg emission */
+            int          class_line;    /* Position of the class NAME token itself —
+                                          * Expr.line/col point at the 'new' keyword,
+                                          * not the class name, so LSP hover/definition
+                                          * on the class name needs this instead. */
+            int          class_col;
         } new_expr;
 
         /* EXPR_SUPER_CALL — super(args)
@@ -382,6 +394,7 @@ struct Expr {
         struct {
             ArgNode    *args;
             int         arg_count;
+			ParamNode  *resolved_params; /* Set by checker — for truncation/default-arg emission */
         } super_call;
 
         /* EXPR_FIELD_GET — obj.field
@@ -464,10 +477,13 @@ struct Expr {
             int             count;
         } array_lit;
 
-        /* EXPR_INDEX — arr[index] */
+        /* EXPR_INDEX — arr[i] */
         struct {
             Expr *array;
             Expr *index;
+            /* Set by checker when target is a class with get()/set() methods.
+             * The compiler emits OP_CALL_METHOD instead of OP_ARRAY_GET. */
+            bool  is_subscript_method;
         } index_expr;
 
         /* EXPR_INDEX_ASSIGN — arr[index] = value */
@@ -475,6 +491,8 @@ struct Expr {
             Expr *array;
             Expr *index;
             Expr *value;
+            /* Set by checker when target is a class with set() method. */
+            bool  is_subscript_method;
         } index_assign;
 
         /* EXPR_NEW_ARRAY — new ElementType[n] */
@@ -674,6 +692,11 @@ struct Stmt {
             int         length;       /* Name length                     */
             Expr       *init;         /* Initializer expression (or NULL
                                          if declared without a value)    */
+            int         type_col;     /* Column of the TYPE token itself —
+                                        * Stmt.col above is the variable
+                                        * NAME's column, not the type's,
+                                        * so LSP hover/definition on the
+                                        * type annotation needs this. */
         } var_decl;
 
         /* STMT_EXPR */
@@ -823,6 +846,8 @@ struct Stmt {
                 AccessLevel     access;   /* public / private / protected */
                 Expr           *initializer;
                 AnnotationNode *annotations; /* @Serialize etc. */
+                int             type_line;   /* Position of the TYPE token, for LSP  */
+                int             type_col;    /* (hover/definition on the annotation) */
                 struct ClassFieldNode *next;
             } *fields;
             int field_count;
@@ -958,6 +983,7 @@ Expr *expr_bool_lit  (Arena *a, bool value,              int line, int col);
 Expr *expr_string_lit(Arena *a, const char *chars, int len, int line, int col);
 Expr *expr_interp_string(Arena *a, int line, int col);
 Expr *expr_ident     (Arena *a, const char *name,  int len, int line, int col);
+Expr *expr_type_ref  (Arena *a, const char *type_name, int len, int line, int col);
 Expr *expr_unary     (Arena *a, TokenType op, Expr *operand,        int line, int col);
 Expr *expr_postfix   (Arena *a, TokenType op, const char *name, int length, int line, int col);
 Expr *expr_postfix_field(Arena *a, TokenType op, bool is_prefix,
@@ -967,7 +993,8 @@ Expr *expr_binary    (Arena *a, TokenType op, Expr *left, Expr *right, int line,
 Expr *expr_assign    (Arena *a, const char *name, int len, Expr *value, int line, int col);
 Expr *expr_call      (Arena *a, const char *name, int len, ArgNode *args, int count, int line, int col);
 Expr *expr_new       (Arena *a, const char *class_name, int class_len,
-                      ArgNode *args, int count, int line, int col);
+                      ArgNode *args, int count, int line, int col,
+                      int class_line, int class_col);
 Expr *expr_super_call(Arena *a, ArgNode *args, int count, int line, int col);
 Expr *expr_field_get (Arena *a, Expr *object, const char *field, int field_len, int line, int col);
 Expr *expr_field_set (Arena *a, Expr *object, const char *field, int field_len,
@@ -977,7 +1004,7 @@ Expr *expr_method_call(Arena *a, Expr *object, const char *method, int method_le
 Expr *expr_this      (Arena *a, int line, int col);
 
 /* Statements */
-Stmt *stmt_var_decl  (Arena *a, Type type, const char *name, int len, Expr *init, int line, int col);
+Stmt *stmt_var_decl  (Arena *a, Type type, const char *name, int len, Expr *init, int line, int col, int type_col);
 Stmt *stmt_expr      (Arena *a, Expr *expr, int line, int col);
 Stmt *stmt_if        (Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line, int col);
 Stmt *stmt_while     (Arena *a, Expr *cond, Stmt *body,   int line, int col);

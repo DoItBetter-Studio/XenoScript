@@ -1,0 +1,16 @@
+// XenoScript Standard Library — core/UShort
+// Constants and type-specific utilities for the ushort primitive (unsigned 16-bit).
+
+class UShort {
+    public:
+        static final int MaxValue = 65535;
+        static final int MinValue = 0;
+
+        static function toString(ushort n): string {
+            return n as string;
+        }
+
+        static function toInt(ushort n): int {
+            return n as int;
+        }
+}

@@ -27,16 +27,40 @@ void chunk_init(Chunk *chunk)
     chunk->return_type_kind = 0;
     memset(chunk->param_type_kinds, 0, sizeof(chunk->param_type_kinds));
     chunk->constants.values = NULL;
+	chunk->constants.is_str = NULL;
     chunk->constants.count = 0;
     chunk->constants.capacity = 0;
 }
 
 void chunk_free(Chunk *chunk)
 {
+	for (int i = 0; i < chunk->constants.count; i++)
+		if (chunk->constants.is_str && chunk->constants.is_str[i])
+			free(chunk->constants.values[i].s);
+	free(chunk->constants.is_str);
+	free(chunk->constants.values);
     free(chunk->code);
     free(chunk->lines);
-    free(chunk->constants.values);
     chunk_init(chunk); /* Reset to clean state */
+}
+
+static int const_pool_push(ConstPool *pool, Value value, uint8_t is_str)
+{
+	if (pool->count >= pool->capacity)
+	{
+		int new_cap = pool->capacity < 8 ? 8 : pool->capacity * 2;
+		Value *nv = realloc(pool->values, (size_t)new_cap * sizeof(Value));
+		if (!nv) return -1;
+		pool->values = nv;
+		uint8_t *nk = realloc(pool->is_str, (size_t)new_cap);
+		if (!nk) return -1;
+		pool->is_str = nk;
+		pool->capacity = new_cap;
+	}
+	int index = pool->count++;
+	pool->values[index] = value;
+	pool->is_str[index] = is_str;
+	return index;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -86,17 +110,40 @@ void chunk_patch_u16(Chunk *chunk, int offset, uint16_t value)
 
 int chunk_add_constant(Chunk *chunk, Value value)
 {
-    ConstPool *pool = &chunk->constants;
-    if (pool->count >= pool->capacity)
-    {
-        int new_cap = pool->capacity < 8 ? 8 : pool->capacity * 2;
-        pool->values = realloc(pool->values, new_cap * sizeof(Value));
-        pool->capacity = new_cap;
-    }
-    int index = pool->count;
-    pool->values[index] = value;
-    pool->count++;
-    return index;
+    return const_pool_push(&chunk->constants, value, 0);
+}
+
+int chunk_add_constant_str(Chunk *chunk, char *heap_str)
+{
+	Value v;
+	memset(&v, 0, sizeof(Value));
+	v.is_null = 0;
+	v.s = heap_str;
+	int idx = const_pool_push(&chunk->constants, v, 1);
+	if (idx < 0) free(heap_str);
+	return idx;
+}
+
+/* strdup() is POSIX, not ISO C, so it is unavailable under -std=c11 without a
+ * feature-test macro (and spelled _strdup on some Windows toolchains). */
+static char *dup_cstr(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+int chunk_copy_constant(Chunk *dst, const Chunk *src, int idx)
+{
+	Value v = src->constants.values[idx];
+	if (src->constants.is_str && src->constants.is_str[idx])
+	{
+		char *copy = v.s ? dup_cstr(v.s) : NULL;     /* was: strdup(v.s) */
+		if (v.s && !copy) return -1;
+		return chunk_add_constant_str(dst, copy);
+	}
+	return chunk_add_constant(dst, v);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -390,7 +437,12 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     case OP_NEW_ARRAY:
         return dis_byte("NEW_ARRAY", chunk, offset);
     case OP_ARRAY_LIT:
-        return dis_byte("ARRAY_LIT", chunk, offset);
+    {
+		uint8_t count = chunk->code[offset + 1];
+		uint8_t kind  = chunk->code[offset + 2];
+		printf("%-20s %4d	kind=%d\n", "ARRAY_LIT", count, kind);
+		return offset + 3;
+	}
     case OP_ARRAY_GET:
         return dis_simple("ARRAY_GET", offset);
     case OP_ARRAY_SET:
@@ -458,6 +510,8 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     case OP_AS_TYPE:
         printf("%04d AS_TYPE %d\n", offset, chunk->code[offset + 1]);
         return offset + 2;
+	case OP_I2F: return dis_simple("I2F", offset);
+	case OP_F2I: return dis_simple("F2I", offset);
     case OP_IS_TYPE:
         printf("%04d IS_TYPE\n", offset);
         return offset + 1;

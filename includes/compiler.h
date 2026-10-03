@@ -174,8 +174,7 @@ typedef struct {
     Module *module;
 
     /* Current function being compiled */
-    Chunk  *current_chunk;     /* Points into module->chunks[current_fn]  */
-    int     current_fn;        /* Index of the current function           */
+    int     current_fn;        /* Index of the chunk being compiled (-1 = none) */
 
     /* Local variable table for current function */
     LocalVar locals[MAX_LOCALS];
@@ -223,6 +222,12 @@ typedef struct {
     int          error_count;
     bool         had_error;
 } Compiler;
+
+/* Re-derive current chunk pointer from its index on every access.
+ * This ensures that reallocs of module->chunks[] (e.g. from compiler_ensure_class
+ * calling module_add_chunk) never leave a dangling pointer in the compiler state.
+ * c->current_fn = -1 means no function is being compiled (init state). */
+#define CURRENT_CHUNK(c) (&(c)->module->chunks[(c)->current_fn])
 
 
 /* ─────────────────────────────────────────────────────────────────────────────

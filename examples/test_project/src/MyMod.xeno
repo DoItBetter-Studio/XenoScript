@@ -1,27 +1,35 @@
 import <libraries>
 import <collections>
 
-@Mod("mymod", version="1.0.0", author="Tigga")
+@Mod(MyMod.MOD_ID, "1.0.0", "Bogairg")
 class MyMod {
-    public:
-        Dictionary<int, string> config = new Dictionary<int, string>();
+	private:
+		int myNewInteger;
 
-        string ModId = "mymod";
+    public:
+		// This comment never get compiled into the xda
+        Dictionary<int, string> config = new Dictionary<int, string>();
+		
+        static final string MOD_ID = "mymod";
 
         Utils utils = new Utils();
 
+		List<string> myStringList = new List<string>();
+
         MyMod()
         {
-            config.Add(0, "Hello, World!");
-            config.Add(1, "We are alive and well!");
+			string ModId = "mymod";
+			print("Mod ID set to: " + ModId);
 
-            for (int i = 0; i < config.Count(); i++)
+            config.add(0, "Hello, World!");
+            config.add(1, "We are alive and well!");
+
+            for (int i = 0; i < config.count(); i++)
             {
                 print(config.get(i));
             }
 
-            config.removeAt(0);
-
-            print(utils.echo(ModId));
+			print(MyMod.MOD_ID);
+            print(utils.echo(MyMod.MOD_ID));
         }
 }

@@ -32,6 +32,13 @@ class Primitives {
             print(ul);
             print(c);
             print($"interp: {i + 1} and {s}");
+
+			u = u + (1 as byte);
+
+			print(u);
+
+			Box box = new Box(300);
+			print(box.b);
         }
 
     private:
@@ -82,4 +89,10 @@ class Primitives {
         function uint64(): ulong {
             return 18446744073709551615;
         }
+}
+
+class Box {
+	public:
+		byte b;
+		Box(int v) { b = v; }
 }

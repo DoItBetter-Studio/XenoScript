@@ -11,6 +11,7 @@
 
 #include "parser.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -22,6 +23,26 @@
 /* Consume the current token and fetch the next one.
  * The consumed token becomes `previous`, the new one becomes `current`.
  * We maintain current, next, and peek (3-token lookahead). */
+/* Record a parse error at a token (1-based line/col). */
+static void record_error_at(Parser *p, Token t, bool set_panic, const char *fmt, ...)
+{
+    if (p->error_count >= PARSER_MAX_ERRORS)
+        return;
+    if (set_panic && p->panic_mode)
+        return;
+    ParseError *e = &p->errors[p->error_count++];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e->message, sizeof(e->message), fmt, ap);
+    va_end(ap);
+    e->line = t.line;
+    e->col = t.col > 0 ? t.col : 1;
+    e->end_col = e->col + (t.length > 0 ? t.length : 1);
+    p->had_error = true;
+    if (set_panic)
+        p->panic_mode = true;
+}
+
 static void advance(Parser *p) {
     p->previous = p->current;
     p->current  = p->next;
@@ -34,11 +55,8 @@ static void advance(Parser *p) {
 
         /* Report the lexer error but don't set panic_mode */
         if (p->error_count < PARSER_MAX_ERRORS) {
-            ParseError *e = &p->errors[p->error_count++];
-            snprintf(e->message, sizeof(e->message),
-                     "Lexer error: %.*s", p->peek.length, p->peek.start);
-            e->line = p->peek.line;
-            p->had_error = true;
+            record_error_at(p, p->peek, false,
+                            "Lexer error: %.*s", p->peek.length, p->peek.start);
         }
     }
 }
@@ -64,12 +82,8 @@ static bool consume(Parser *p, TokenType type, const char *message) {
     }
 
     if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
-        ParseError *e = &p->errors[p->error_count++];
-        snprintf(e->message, sizeof(e->message),
-                 "%s (got '%s')", message, token_type_name(p->current.type));
-        e->line      = p->current.line;
-        p->had_error  = true;
-        p->panic_mode = true;
+        record_error_at(p, p->current, true,
+                        "%s (got '%s')", message, token_type_name(p->current.type));
     }
     return false;
 }
@@ -425,6 +439,7 @@ static Expr *parse_prefix(Parser *p) {
             Expr *e = arena_alloc(&p->arena, sizeof(Expr));
             e->kind = EXPR_NULL_LIT;
             e->line = t.line;
+            e->col = t.col;
             e->resolved_type = (Type){.kind = TYPE_NULL};
             return e;
         }
@@ -473,7 +488,9 @@ static Expr *parse_prefix(Parser *p) {
                         snprintf(e->message, sizeof(e->message),
                             "Unexpected token inside interpolated string (got '%s')",
                             token_type_name(p->current.type));
-                        e->line      = p->current.line;
+                        e->line = p->current.line;
+                        e->col = p->current.col > 0 ? p->current.col : 1;
+                        e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                         p->had_error  = true;
                         p->panic_mode = true;
                     }
@@ -578,7 +595,9 @@ static Expr *parse_prefix(Parser *p) {
                     ParseError *e = &p->errors[p->error_count++];
                     snprintf(e->message, sizeof(e->message),
                              "Expected '(' after generic type arguments");
-                    e->line      = p->current.line;
+                    e->line = p->current.line;
+                    e->col = p->current.col > 0 ? p->current.col : 1;
+                    e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                     p->had_error = true;
                 }
             }
@@ -617,7 +636,9 @@ static Expr *parse_prefix(Parser *p) {
                 snprintf(e->message, sizeof(e->message),
                          "'%s' requires a variable or field as its operand",
                          t.type == TOK_PLUS_PLUS ? "++" : "--");
-                e->line       = t.line;
+                e->line = t.line;
+                e->col = t.col > 0 ? t.col : 1;
+                e->end_col = e->col + (t.length > 0 ? t.length : 1);
                 p->had_error  = true;
                 p->panic_mode = true;
             }
@@ -748,7 +769,8 @@ static Expr *parse_prefix(Parser *p) {
 
             Expr *new_e = expr_new(&p->arena,
                             class_tok.start, class_tok.length,
-                            args, arg_count, t.line, t.col);
+                            args, arg_count, t.line, t.col,
+                            class_tok.line, class_tok.col);
             new_e->new_expr.type_args      = type_args;
             new_e->new_expr.type_arg_count = type_arg_count;
             return new_e;
@@ -788,13 +810,30 @@ static Expr *parse_prefix(Parser *p) {
             return expr_array_lit(&p->arena, head, count, t.line, t.col);
         }
 
+        /* ── Type references for static access ────────────────────────── */
+        case TOK_INT:    return expr_type_ref(&p->arena, "int",    t.length, t.line, t.col);
+        case TOK_FLOAT:  return expr_type_ref(&p->arena, "float",  t.length, t.line, t.col);
+        case TOK_BOOL:   return expr_type_ref(&p->arena, "bool",   t.length, t.line, t.col);
+        case TOK_STRING: return expr_type_ref(&p->arena, "string", t.length, t.line, t.col);
+        case TOK_SBYTE:  return expr_type_ref(&p->arena, "sbyte",  t.length, t.line, t.col);
+        case TOK_BYTE:   return expr_type_ref(&p->arena, "byte",   t.length, t.line, t.col);
+        case TOK_SHORT:  return expr_type_ref(&p->arena, "short",  t.length, t.line, t.col);
+        case TOK_USHORT: return expr_type_ref(&p->arena, "ushort", t.length, t.line, t.col);
+        case TOK_UINT:   return expr_type_ref(&p->arena, "uint",   t.length, t.line, t.col);
+        case TOK_LONG:   return expr_type_ref(&p->arena, "long",   t.length, t.line, t.col);
+        case TOK_ULONG:  return expr_type_ref(&p->arena, "ulong",  t.length, t.line, t.col);
+        case TOK_DOUBLE: return expr_type_ref(&p->arena, "double", t.length, t.line, t.col);
+        case TOK_CHAR:   return expr_type_ref(&p->arena, "char",   t.length, t.line, t.col);
+
         default:
             if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
                 ParseError *e = &p->errors[p->error_count++];
                 snprintf(e->message, sizeof(e->message),
                          "Expected an expression, got '%s'",
                          token_type_name(t.type));
-                e->line       = t.line;
+                e->line = t.line;
+                e->col = t.col > 0 ? t.col : 1;
+                e->end_col = e->col + (t.length > 0 ? t.length : 1);
                 p->had_error  = true;
                 p->panic_mode = true;
             }
@@ -865,7 +904,9 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             snprintf(e->message, sizeof(e->message),
                      "'%s' requires a variable or field as its operand",
                      op.type == TOK_PLUS_PLUS ? "++" : "--");
-            e->line       = op.line;
+            e->line = op.line;
+            e->col = op.col > 0 ? op.col : 1;
+            e->end_col = e->col + (op.length > 0 ? op.length : 1);
             p->had_error  = true;
             p->panic_mode = true;
         }
@@ -891,6 +932,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         Expr *e = arena_alloc(&p->arena, sizeof(Expr));
         e->kind = EXPR_NULL_ASSERT;
         e->line = op.line;
+        e->col = op.col;
         e->null_assert.operand = left;
         return e;
     }
@@ -919,6 +961,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             Expr *e = arena_alloc(&p->arena, sizeof(Expr));
             e->kind = EXPR_NULL_SAFE_CALL;
             e->line = op.line;
+            e->col = op.col;
             e->null_safe_call.object          = left;
             e->null_safe_call.method_name     = member.start;
             e->null_safe_call.method_name_len = member.length;
@@ -930,6 +973,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         Expr *e = arena_alloc(&p->arena, sizeof(Expr));
         e->kind = EXPR_NULL_SAFE_GET;
         e->line = op.line;
+        e->col = op.col;
         e->null_safe_get.object        = left;
         e->null_safe_get.field_name    = member.start;
         e->null_safe_get.field_name_len = member.length;
@@ -942,6 +986,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         Expr *e = arena_alloc(&p->arena, sizeof(Expr));
         e->kind = EXPR_NULL_COALESCE;
         e->line = op.line;
+        e->col = op.col;
         e->null_coalesce.left  = left;
         e->null_coalesce.right = right;
         return e;
@@ -970,7 +1015,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             consume(p, TOK_RPAREN, "Expected ')' after method arguments");
             return expr_method_call(&p->arena, left,
                                     member.start, member.length,
-                                    args, arg_count, op.line, op.col);
+                                    args, arg_count, member.line, member.col);
         }
 
         if (check(p, TOK_ASSIGN)) {
@@ -979,12 +1024,12 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
             Expr *value = parse_expr(p, BP_ASSIGN);
             return expr_field_set(&p->arena, left,
                                   member.start, member.length,
-                                  value, op.line, op.col);
+                                  value, member.line, member.col);
         }
 
         /* Plain field access: obj.field */
         return expr_field_get(&p->arena, left,
-                              member.start, member.length, op.line, op.col);
+                              member.start, member.length, member.line, member.col);
     }
 
     if (op.type == TOK_ASSIGN) {
@@ -996,7 +1041,9 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
                 ParseError *e = &p->errors[p->error_count++];
                 snprintf(e->message, sizeof(e->message),
                          "Left side of '=' must be a variable name");
-                e->line       = op.line;
+                e->line = op.line;
+                e->col = op.col > 0 ? op.col : 1;
+                e->end_col = e->col + (op.length > 0 ? op.length : 1);
                 p->had_error  = true;
                 p->panic_mode = true;
             }
@@ -1086,7 +1133,7 @@ static Stmt *parse_block(Parser *p) {
  *
  * Precondition: the type token has already been parsed and is in `type`.
  */
-static Stmt *parse_var_decl(Parser *p, Type type, int line) {
+static Stmt *parse_var_decl(Parser *p, Type type, int line, int type_col) {
     /* Identifier */
     Token name = p->current;
     consume(p, TOK_IDENT, "Expected variable name after type");
@@ -1098,7 +1145,7 @@ static Stmt *parse_var_decl(Parser *p, Type type, int line) {
     }
 
     consume(p, TOK_SEMICOLON, "Expected ';' after variable declaration");
-    return stmt_var_decl(&p->arena, type, name.start, name.length, init, line, name.col);
+    return stmt_var_decl(&p->arena, type, name.start, name.length, init, line, name.col, type_col);
 }
 
 /*
@@ -1229,7 +1276,9 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
                     snprintf(e->message, sizeof(e->message),
                              "Required parameter '%.*s' cannot follow a parameter with a default value",
                              param_name.length, param_name.start);
-                    e->line      = param_name.line;
+                    e->line = param_name.line;
+                    e->col = param_name.col > 0 ? param_name.col : 1;
+                    e->end_col = e->col + (param_name.length > 0 ? param_name.length : 1);
                     p->had_error = true;
                 }
             }
@@ -1422,7 +1471,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                 ParseError *_pe = &p->errors[p->error_count++];
                 snprintf(_pe->message, sizeof(_pe->message),
                          "A method cannot be both 'virtual' and 'override'");
-                _pe->line     = p->current.line;
+                _pe->line = p->current.line;
+                _pe->col = p->current.col > 0 ? p->current.col : 1;
+                _pe->end_col = _pe->col + (p->current.length > 0 ? p->current.length : 1);
                 p->had_error  = true;
             }
         }
@@ -1460,7 +1511,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                             snprintf(e->message, sizeof(e->message),
                                      "Required parameter '%.*s' cannot follow a parameter with a default value",
                                      param_name.length, param_name.start);
-                            e->line      = param_name.line;
+                            e->line = param_name.line;
+                            e->col = param_name.col > 0 ? param_name.col : 1;
+                            e->end_col = e->col + (param_name.length > 0 ? param_name.length : 1);
                             p->had_error = true;
                         }
                     }
@@ -1508,6 +1561,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     snprintf(e->message, sizeof(e->message),
                              "'final' cannot be applied to a method");
                     e->line      = member_line;
+                    e->col = 1;
+                    e->end_col = 2;
                     p->had_error = true;
                 }
             }
@@ -1543,6 +1598,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                 ct == TOK_USHORT || ct == TOK_UINT || ct == TOK_LONG ||
                 ct == TOK_ULONG || ct == TOK_DOUBLE || ct == TOK_CHAR)
             {
+                int   field_type_line = p->current.line;
+                int   field_type_col  = p->current.col;
                 Type  field_type = parse_type(p);
                 Token field_name = p->current;
                 consume(p, TOK_IDENT, "Expected field name");
@@ -1564,6 +1621,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                 fn->access        = current_access;
                 fn->initializer   = initializer;
                 fn->annotations   = member_annotations;
+                fn->type_line     = field_type_line;
+                fn->type_col      = field_type_col;
                 fn->next          = NULL;
                 if (!cls->class_decl.fields) {
                     cls->class_decl.fields = fn;
@@ -1584,7 +1643,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     ParseError *e = &p->errors[p->error_count++];
                     snprintf(e->message, sizeof(e->message),
                              "Expected event name after 'event'");
-                    e->line = p->current.line; p->had_error = true;
+                    e->line = p->current.line;
+                    e->col = p->current.col > 0 ? p->current.col : 1;
+                    e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                 }
                 continue;
             }
@@ -1603,7 +1664,9 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                             ParseError *e = &p->errors[p->error_count++];
                             snprintf(e->message, sizeof(e->message),
                                      "Expected parameter name in event declaration");
-                            e->line = p->current.line; p->had_error = true;
+                            e->line = p->current.line;
+                            e->col = p->current.col > 0 ? p->current.col : 1;
+                            e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                         }
                         break;
                     }
@@ -1647,6 +1710,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                      "Unexpected token '%s' in class body",
                      token_type_name(p->current.type));
             e->line       = member_line;
+            e->col = 1;
+            e->end_col = 2;
             p->had_error  = true;
             p->panic_mode = true;
         }
@@ -1807,11 +1872,15 @@ static Stmt *parse_for_stmt(Parser *p, int line) {
     if (!check(p, TOK_SEMICOLON)) {
         /* Check if it's a type keyword (variable declaration) */
         TokenType ct = p->current.type;
-        if (ct == TOK_INT || ct == TOK_FLOAT ||
-            ct == TOK_BOOL || ct == TOK_STRING) {
+        if (ct == TOK_INT || ct == TOK_FLOAT || ct == TOK_BOOL ||
+            ct == TOK_STRING || ct == TOK_IDENT ||
+            ct == TOK_SBYTE || ct == TOK_BYTE || ct == TOK_SHORT ||
+            ct == TOK_USHORT || ct == TOK_UINT || ct == TOK_LONG ||
+            ct == TOK_ULONG || ct == TOK_DOUBLE) {
             int   init_line = p->current.line;
+            int   init_col  = p->current.col;
             Type  init_type = parse_type(p);
-            init = parse_var_decl(p, init_type, init_line);
+            init = parse_var_decl(p, init_type, init_line, init_col);
             /* parse_var_decl already consumes the semicolon */
         } else {
             Expr *init_expr = parse_expr(p, BP_NONE);
@@ -1888,7 +1957,9 @@ static Stmt *parse_match_stmt(Parser *p, int line) {
                 snprintf(e->message, sizeof(e->message),
                     "Expected 'case' or 'default' inside match (got '%s')",
                     token_type_name(p->current.type));
-                e->line      = p->current.line;
+                e->line = p->current.line;
+                e->col = p->current.col > 0 ? p->current.col : 1;
+                e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                 p->had_error  = true;
                 p->panic_mode = true;
             }
@@ -1934,6 +2005,9 @@ static Stmt *parse_match_stmt(Parser *p, int line) {
  */
 static Stmt *parse_stmt(Parser *p) {
     int line = p->current.line;
+    int col  = p->current.col; /* column of the first token of this statement —
+                                 * used as the TYPE token's column for var-decls
+                                 * (distinct from the variable name's column). */
 
     /* Import declaration — must appear before any other top-level statements.
      * import <name>;       — system import (angle brackets)
@@ -1955,6 +2029,8 @@ static Stmt *parse_stmt(Parser *p) {
                     ParseError *e = &p->errors[p->error_count++];
                     snprintf(e->message, sizeof(e->message), "Expected system module name after '<'");
                     e->line = p->current.line;
+                    e->col = p->current.col > 0 ? p->current.col : 1;
+                    e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                     p->had_error = true; p->panic_mode = true;
                 }
                 return s;
@@ -1996,6 +2072,8 @@ static Stmt *parse_stmt(Parser *p) {
                 snprintf(e->message, sizeof(e->message),
                          "Expected '<n>' or \"path\" after 'import'");
                 e->line = p->current.line;
+                e->col = p->current.col > 0 ? p->current.col : 1;
+                e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                 p->had_error = true; p->panic_mode = true;
             }
             return s;
@@ -2108,7 +2186,9 @@ static Stmt *parse_stmt(Parser *p) {
                             ParseError *e = &p->errors[p->error_count++];
                             snprintf(e->message, sizeof(e->message),
                                      "Expected ',' or '}' in enum body");
-                            e->line = p->current.line; p->had_error = true;
+                            e->line = p->current.line;
+                            e->col = p->current.col > 0 ? p->current.col : 1;
+                            e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                         }
                     }
                 }
@@ -2201,21 +2281,21 @@ static Stmt *parse_stmt(Parser *p) {
         ct == TOK_USHORT || ct == TOK_UINT || ct == TOK_LONG ||
         ct == TOK_ULONG || ct == TOK_DOUBLE || ct == TOK_CHAR) {
             Type type = parse_type(p);
-            return parse_var_decl(p, type, line);
+            return parse_var_decl(p, type, line, col);
         }
         /* Class-typed variable: ClassName varName = ...
          * Also handles array types: ClassName[] varName = ...
          * Also handles generic types: ClassName<T> varName = ... */
         if (ct == TOK_IDENT && p->next.type == TOK_IDENT) {
             Type type = parse_type(p);   /* consumes the class name */
-            return parse_var_decl(p, type, line);
+            return parse_var_decl(p, type, line, col);
         }
         /* Nullable class type: ClassName? varName = ...
          * Pattern: IDENT ? IDENT (3-token lookahead) */
         if (ct == TOK_IDENT && p->next.type == TOK_QUESTION &&
             p->peek.type == TOK_IDENT) {
             Type type = parse_type(p);   /* consumes ClassName? */
-            return parse_var_decl(p, type, line);
+            return parse_var_decl(p, type, line, col);
         }
         /* Generic type variable: ClassName<TypeArg> varName = ...
          * OR generic function call: foo<TypeArg>(args);
@@ -2229,7 +2309,7 @@ static Stmt *parse_stmt(Parser *p) {
 
             /* After parsing, if current is IDENT → variable declaration */
             if (check(p, TOK_IDENT)) {
-                return parse_var_decl(p, type, line);
+                return parse_var_decl(p, type, line, col);
             }
 
             /* If current is '(' → this was a generic function CALL, not a type.
@@ -2300,7 +2380,9 @@ static Stmt *parse_stmt(Parser *p) {
                 ParseError *e = &p->errors[p->error_count++];
                 snprintf(e->message, sizeof(e->message),
                          "Expected variable name or '(' after generic type");
-                e->line      = p->current.line;
+                e->line = p->current.line;
+                e->col = p->current.col > 0 ? p->current.col : 1;
+                e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                 p->had_error = true;
                 p->panic_mode = true;
             }
@@ -2312,7 +2394,7 @@ static Stmt *parse_stmt(Parser *p) {
         if (ct == TOK_IDENT && p->next.type == TOK_LBRACKET &&
             p->peek.type == TOK_RBRACKET) {
             Type type = parse_type(p);   /* consumes ClassName[] */
-            return parse_var_decl(p, type, line);
+            return parse_var_decl(p, type, line, col);
         }
     }
 
@@ -2350,6 +2432,8 @@ static Stmt *parse_stmt(Parser *p) {
                 snprintf(e->message, sizeof(e->message),
                          "Expected event name after 'event'");
                 e->line = line; p->had_error = true;
+                e->col = 1;
+                e->end_col = 2;
             }
             return NULL;
         }
@@ -2369,7 +2453,9 @@ static Stmt *parse_stmt(Parser *p) {
                         ParseError *e = &p->errors[p->error_count++];
                         snprintf(e->message, sizeof(e->message),
                                  "Expected parameter name");
-                        e->line = p->current.line; p->had_error = true;
+                        e->line = p->current.line;
+                        e->col = p->current.col > 0 ? p->current.col : 1;
+                        e->end_col = e->col + (p->current.length > 0 ? p->current.length : 1);
                     }
                     break;
                 }
@@ -2468,7 +2554,9 @@ static Stmt *parse_stmt(Parser *p) {
                 ParseError *_pe = &p->errors[p->error_count++];
                 snprintf(_pe->message, sizeof(_pe->message),
                          "Expected at least one 'catch' clause after 'try'");
-                _pe->line     = p->current.line;
+                _pe->line = p->current.line;
+                _pe->col = p->current.col > 0 ? p->current.col : 1;
+                _pe->end_col = _pe->col + (p->current.length > 0 ? p->current.length : 1);
                 p->had_error  = true;
                 p->panic_mode = true;
             }
@@ -2561,6 +2649,7 @@ static Stmt *parse_stmt(Parser *p) {
             memset(e, 0, sizeof(Expr));
             e->kind = is_subscribe ? EXPR_EVENT_SUBSCRIBE : EXPR_EVENT_UNSUBSCRIBE;
             e->line = line;
+            e->col = 1;
             e->event_sub.object           = handler_obj;  /* NULL = static */
             e->event_sub.event_name       = event_name;
             e->event_sub.event_name_len   = event_len;
@@ -2608,18 +2697,14 @@ parse_foreach_stmt(Parser *p, int line) {
  * ───────────────────────────────────────────────────────────────────────────*/
 
 void parser_init(Parser *p, Lexer *lexer) {
-    p->lexer       = lexer;
-    p->error_count = 0;
-    p->had_error   = false;
-    p->panic_mode  = false;
+    /* Zero everything first so Token fields (start/length/line/col) are not
+     * left uninitialized — advance() copies them around and valgrind otherwise
+     * reports conditional jumps on uninit values. */
+    memset(p, 0, sizeof(*p));
+    p->lexer = lexer;
 
     arena_init(&p->arena, ARENA_DEFAULT_SIZE);
 
-    /* Prime the 3-token lookahead */
-    p->previous.type = TOK_EOF;
-    p->current.type  = TOK_EOF;
-    p->next.type     = TOK_EOF;
-    p->peek.type     = TOK_EOF;
     /* Call advance three times: fills current, next, and peek */
     advance(p);
     advance(p);

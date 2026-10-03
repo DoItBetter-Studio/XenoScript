@@ -51,10 +51,12 @@ This makes XenoScript ideal for secure modding environments.
 
 ## 🧠 Language Features
 
-- Classes, single inheritance, interfaces, enums  
+- Primitive types (`int`, `long`, `float`, `double`, `bool`, `string`, `char`, `byte`, `sbyte`, `short`, `ushort`, `uint`, `ulong`), arrays, classes, single inheritance, interfaces, and enums
 - **Erased generics** (`List<T>`, `Dictionary<K, V>`, user-defined generic classes) — distributed as compiled `.xar` binaries, no source shipping required  
 - Access modifiers (`public`, `private`, `protected`)  
 - Virtual dispatch (`virtual` / `override`)  
+- Constructor overloading and default parameter values
+- Enum `match` expressions
 - Nullable types (`string?`, `int?`, `??`, `!`, `?.`)  
 - Exception handling (`try` / `catch` / `finally` / `throw`)  
 - Events with static and **bound delegate** handlers (`EventName += this.method`)  
@@ -67,8 +69,9 @@ This makes XenoScript ideal for secure modding environments.
 - Structured control flow (`if`, `for`, `foreach`, `while`)  
 - String interpolation  
 - Module imports and `.xar` package archives  
-- Project model (`xeno.project`) with dependency resolution  
-- Bytecode compilation (XBC v16) with linker stage  
+- Project model (`xeno.project`) with dependency resolution and SemVer matching  
+- Bytecode compilation (XBC v19) with linker stage
+- API documentation via **XDocs** (`.xdoc` sidecars) for hover, stubs, and parameter names
 
 ---
 
@@ -81,12 +84,62 @@ import "local_file.xeno"
 ```
 
 - `<name>` imports a package from the global package cache
-(core stdlib, game-extended stdlib, or any resolved dependency `.xar`)  
+  (core stdlib, game-extended stdlib, or any resolved dependency `.xar`)  
 - `"file.xeno"` imports project-local files (resolved from project root)  
 - Circular imports are not allowed  
 
 The standard library — including both the core language packages and the game's extended API — is embedded into the compiler, VM, packer, and LSP.
 External packages are resolved from `.xar` archives at build time and loaded into the global package cache.
+
+### API Documentation (XDocs)
+
+Document declarations in `.xeno` source with `#Docs` blocks:
+
+```xeno
+/* #Docs
+ * # title: add
+ * # summary: "Append an item to the list."
+ * # param: $item "Element to append."
+ * # returns: "void"
+ * #!Docs
+ */
+function add(T item): void {
+    // ...
+}
+```
+
+Supported tags: `title`, `summary`, `description`, `param`, `returns`, `throws`, `example`, `see`, `link`, `since`, `deprecated`, `note`, `warning`, `important`, `remarks`.
+
+Use `$name` in `# param:` / `# throws:` so stubs and hover show real parameter names instead of `arg0`, `arg1`, …
+
+Docs bind to the **next declaration**. If `# title:` does not match that declaration’s name, the LSP warns and still binds. A `#Docs` block with no following declaration is dropped.
+
+When `xar pack` packages documented source files, it writes a sibling `.xdoc` sidecar next to the `.xar`. XDocs are IDE-only metadata and are **not** included in the runtime package.
+
+#### Dependency XDocs
+
+To make a packaged dependency’s XDocs available to the LSP:
+
+1. Add `#Docs` blocks to the dependency’s `.xeno` declarations.
+2. Pack the source into the project’s dependency directory. For example, for a dependency named `utilities`:
+
+   ```sh
+   ./bin/xar pack utilities/src/ -o my_mod/deps/utilities.xar -n utilities -v 1.0.0
+   ```
+
+   The packer writes `my_mod/deps/utilities.xdoc` alongside the archive when the source contains documentation.
+3. Declare the dependency in `my_mod/xeno.project`:
+
+   ```toml
+   [dependencies]
+   utilities = "1.0.0"
+   ```
+
+The dependency key (`utilities`) must match both filenames: `deps/utilities.xar` and `deps/utilities.xdoc`. The LSP reads the sidecar for each declared dependency; there is no separate doc-store registration step. If `[project] deps_dir` is configured, put both files in that directory instead of `deps/`.
+
+#### Standard-library XDocs
+
+XDocs for the embedded standard library (`core`, `math`, `collections`) are produced when you run `make stdlib` and are loaded by `xenolsp` from the embedded blobs (with an optional disk fallback under the toolchain root). Hover, go-to-definition stubs, and parameter names for stdlib APIs work when the language server binary is the one built with those embeds.
 
 ### Standard Library Packages
 
@@ -95,6 +148,8 @@ External packages are resolved from `.xar` archives at build time and loaded int
 | `<core>` | `Exception`, `Attribute`, `IEnumerable<T>`, `IEnumerator<T>`, `string`, `int`, `float`, `bool` helpers |
 | `<math>` | `Math` static class |
 | `<collections>` | `List<T>`, `Dictionary<K,V>`, `Stack<T>`, `Queue<T>` |
+
+**Note:** Floating-point values (`float` and `double`) are rounded to 4 decimal places for deterministic behavior and to prevent floating-point precision issues in modding environments.
 
 ---
 
@@ -129,9 +184,14 @@ Run a `.xar` package:
 ./bin/xenovm output.xar
 ```
 
+Run a project directory (source + `xeno.project`):
+```
+./bin/xenovm path/to/project/
+```
+
 ### `xar` — Package Tool
 
-Pack a directory into a `.xar` archive:
+Pack a directory into a `.xar` archive (and sibling `.xdoc` when sources contain `#Docs`):
 ```
 ./bin/xar pack src/ -o output.xar -n name -v 1.0.0
 ```
@@ -142,6 +202,14 @@ Run the LSP server for IDE integration:
 ```
 ./bin/xenolsp
 ```
+
+Supported LSP features:
+
+- Live diagnostics (parse + type check) with accurate line/column ranges  
+- Hover (types + XDocs markdown when available)  
+- Go-to-definition (project sources and generated stubs for `.xar` classes)  
+- Find references  
+- Custom `xeno/getStub` for read-only stub views of archived classes  
 
 ### Building from Source
 
@@ -154,6 +222,8 @@ make
 ```
 make stdlib
 ```
+
+Rebuilds stdlib `.xar` / `.xdoc` packages and re-embeds them into the toolchain binaries.
 
 ### Running the test suite
 
@@ -168,19 +238,18 @@ make xeno_tests
 ```
 source/             Compiler and VM source
   core/             Lexer, parser, checker, bytecode
-  compiler/         xenoc compiler, XBC serialization, XAR packer
+  compiler/         xenoc compiler, XBC serialization, XDocs, module merge
   vm/               xenovm virtual machine
-  stdlib/           Core stdlib bootstrap sources (embedded)
   tools/            Test runner and utilities
   lsp/              xenolsp language server
 includes/           Shared headers
-stdlib/             Example game-extended stdlib sources
+stdlib/             Standard library sources (packed + embedded)
   core/             Exception, Attribute, IEnumerable, primitives
   math/             Math
   collections/      List, Dictionary, Stack, Queue
-build/              Intermediate build files (XARs, object files)
+build/              Intermediate build files (XARs, XDocs, object files)
 bin/                Compiled binaries
-test/               Language test suite (27 tests)
+test/               Language test suite
 xenoscript.vscode-xenoscript/  VS Code extension
 ```
 
@@ -195,13 +264,27 @@ A `xeno.project` file defines a project:
 name = "my_mod"
 version = "1.0.0"
 description = "My mod"
+# deps_dir = "deps"   # optional; default search includes deps/, dependencies/, libraries/, xars/
 
 [dependencies]
-utilities = "v3.5.1"
-playerInteractions = "v1.2.0"
+utilities = "1.0.0"           # exact
+playerInteractions = "^1.2.0"   # compatible (>=1.2.0, <2.0.0)
+sharedLib = "~1.4.0"          # approximate (>=1.4.0, <1.5.0)
+toolkit = ">=1.0.0"           # minimum
+optionalExtra = "*"           # any version
 ```
 
-The compiler resolves dependencies from `.xar` archives and links them at build time.
+Dependency versions use **SemVer** (optional leading `v`/`V` is accepted). Supported constraints:
+
+| Constraint | Meaning |
+|------------|---------|
+| `1.2.3` | Exact match |
+| `^1.2.3` | Compatible: `>=1.2.3` and `<2.0.0` |
+| `~1.2.3` | Approximate: `>=1.2.3` and `<1.3.0` |
+| `>=1.2.3` | Minimum version |
+| `*` or empty | Any version |
+
+The compiler resolves dependencies from `.xar` archives, checks the archive version against the constraint, and links them at build time. At runtime, `xenovm` loads declared dependency `.xar` files from the same directory as the mod package (or from the project’s dependency directory when running from source).
 
 XenoScript uses a layered standard library model:
 
@@ -216,8 +299,7 @@ XenoScript uses a layered standard library model:
   the project's dependency list. Mods are never embedded into the game; they remain external.
 
 Every mod must define an entrypoint class annotated with `@Mod`.  
-The current XenoScript toolchain (compiler, VM, and packer) is configured to look for
-this specific annotation name when identifying a mod's entrypoint.
+The toolchain looks for this annotation when identifying a mod’s entrypoint and verifies the id against the project name when building.
 
 The `@Mod` attribute itself is defined in the game-extended standard library as a normal
 XenoScript class derived from `Attribute`. The attribute supports both positional and
@@ -249,6 +331,54 @@ class MyMod {
         }
 }
 ```
+
+### Exposing C host functions to scripts
+
+Host functions are the explicit bridge from XenoScript into the game. Register them on the VM before loading its stdlib or compiling/running scripts that call them. Use `xeno_register_fn_typed` so the compiler can check the script-visible parameter and return types:
+
+```c
+#include "vm.h"
+
+static XenoResult game_add_one(XenoVM *vm, int argc, Value *argv, Value *out)
+{
+    if (argc != 1) {
+        xeno_vm_error(vm, "game_add_one expects one argument");
+        return XENO_RUNTIME_ERROR;
+    }
+
+    *out = xeno_int((int64_t)argv[0].i + 1);
+    return XENO_OK;
+}
+
+static int register_game_api(XenoVM *vm)
+{
+    int param_types[] = { TYPE_INT };
+    return xeno_register_fn_typed(
+        vm, "game_add_one", game_add_one, TYPE_INT, 1, param_types);
+}
+```
+
+The script can then call the registered name as a normal function:
+
+```xeno
+int answer = game_add_one(41);
+```
+
+Initialize the VM and register every host function before loading stdlib modules and running scripts:
+
+```c
+XenoVM vm;
+xeno_vm_init(&vm);
+
+if (register_game_api(&vm) < 0) {
+    /* Handle a full host-function registry. */
+}
+
+xeno_vm_load_stdlib(&vm);
+/* Compile/run scripts with this VM, then call xeno_vm_free(&vm). */
+```
+
+`TYPE_*` values come from the type definitions included by `vm.h`. Use `TYPE_VOID` for a function that has no return value (leave `out` untouched), and `TYPE_ANY` for a parameter that should accept any script value. Return `XENO_OK` on success; on runtime failure, set a useful message with `xeno_vm_error` and return `XENO_RUNTIME_ERROR`. Registration exposes a capability to scripts, so only register callbacks the game intends to make available and enforce game-specific permissions inside those callbacks.
 
 ---
 
@@ -292,19 +422,68 @@ game_root/
     └── utilities.xar         # Shared mod dependency
 ```
 
-This structure enables the VS Code extension to automatically detect the LSP server and game-specific stdlib. However, the extension is designed to be customizable — developers can configure paths to match their project's needs.
-
 The game loads mods from the `mods/` directory. Directories are treated as development projects (enabling faster iteration with hot-reloading), while `.xar` files are compiled packages.
 
 ### VS Code Extension Configuration
 
-The VS Code extension currently uses a static LSP path but is intended to be game-aware. For now:
+The extension supports a configured language-server path (recommended for game-specific toolchains) and falls back to `XENOLSP`, a bundled binary, or `PATH` when unset.
 
-- Install the extension from source or marketplace  
-- Configure the LSP server path in VS Code settings if your game uses a non-standard location  
-- The extension provides syntax highlighting, basic diagnostics, and will gain full IntelliSense as LSP features mature  
+Settings (under **XenoScript**):
 
-Future versions will automatically detect game environments and load appropriate stdlibs.
+| Setting | Purpose |
+|--------|---------|
+| `xenoscript.lspPath` | Path to `xenolsp` / `xenolsp.exe` |
+| `xenoscript.lspPathWindows` / `xenoscript.lspPathLinux` | Optional platform-specific overrides |
+| `xenoscript.trace.server` | LSP communication tracing |
+
+Point `lspPath` at the **game’s** (or this repo’s) `xenolsp` binary so hover, diagnostics, and navigation use that binary’s embedded stdlib and XDocs.
+
+#### Settings scope (important)
+
+VS Code only applies settings from the scope that was actually opened:
+
+| Where you put the setting | When it applies |
+|---------------------------|-----------------|
+| **User settings** | Always, for every folder and workspace |
+| **`.vscode/settings.json`** in the opened folder | When you open that folder |
+| **`.code-workspace` `settings`** | Only when you open that workspace file (“Open Workspace from File…”) |
+
+Opening a folder without opening the matching `.code-workspace` file will **ignore** workspace-file settings. If diagnostics, hover, or XDocs seem missing, confirm that `xenoscript.lspPath` is set in a scope that is active for the current window.
+
+**Recommended for daily use — User settings:**
+
+```json
+{
+  "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
+}
+```
+
+**Or per-mod project** (`.vscode/settings.json` inside the mod folder):
+
+```json
+{
+  "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
+}
+```
+
+**Workspace file example** (only applies when that workspace is opened):
+
+```json
+{
+  "folders": [
+    { "path": "." }
+  ],
+  "settings": {
+    "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
+  }
+}
+```
+
+Once `lspPath` points at a correctly built `xenolsp`:
+
+- Live diagnostics, hover (including XDocs), go-to-definition, and references work for project sources  
+- Stdlib symbols and their XDocs come from the embedded toolchain  
+- Dependency classes resolve via project `deps/*.xar` and XDocs via sibling `deps/*.xdoc`  
 
 ---
 
@@ -324,19 +503,20 @@ The language, VM, and standard library are evolving together.
 - ✅ Annotations and `@AttributeUsage`  
 - ✅ Standard library (`core`, `math`, `collections`)  
 - ✅ Erased generics — stdlib generic classes distributed as compiled `.xar` binaries  
-- ✅ `.xar` packaging and project model  
+- ✅ `.xar` packaging and project model with dependency resolution  
+- ✅ SemVer dependency constraints (`exact`, `^`, `~`, `>=`, `*`)  
+- ✅ `@Mod` entrypoint detection and project id verification  
 - ✅ Attribute reflection (reading annotation data at runtime)  
-- ✅ LSP server (`xenolsp`) for IDE integration  
-- ✅ VS Code extension with diagnostics, hover, and completions  
-- ✅ 27-test suite passing  
+- ✅ LSP server (`xenolsp`): live diagnostics, hover, go-to-definition, find-references  
+- ✅ Diagnostic ranges with accurate line and column spans  
+- ✅ XDocs: `#Docs` extraction, `.xdoc` sidecars, hover markdown, named params in stubs  
+- ✅ XDocs for project dependencies (`deps/*.xdoc`) and embedded standard-library XDocs in `xenolsp`  
+- ✅ VS Code extension: syntax highlighting, diagnostics, hover, navigation, configurable `lspPath`  
+- ✅ Language test suite  
 
-**Partially implemented / in progress:**
-- 🔄 LSP server: Basic diagnostics working; go-to-definition, find-references, and full IntelliSense autocomplete are under development  
-- 🔄 VS Code extension: Error squigglies appear at line start (not precise positioning); extension detects static LSP path but may need customization for game-specific stdlibs  
-
-**Planned:**
-- 🔲 Enhanced LSP features (precise error positioning, full symbol navigation)  
-- 🔲 Game-aware VS Code extension configuration for dynamic stdlib detection  
+**Known limitations / planned:**
+- 🔲 Completion provider  
+- 🔲 Automatic game-environment / toolchain detection in the extension  
 
 ---
 

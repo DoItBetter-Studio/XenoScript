@@ -29,6 +29,7 @@
 #define _DEFAULT_SOURCE
 #include "xar.h"
 #include "xbc.h"
+#include "xdoc.h"
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
@@ -502,6 +503,44 @@ static int cmd_pack(int argc, char **argv) {
 
     printf("xar: wrote '%s' (%d chunk(s), %d export(s))\n",
            out_path, n_chunks, manifest.export_count);
+
+    /* Emit side-car .xdoc documentation archive (IDE-only, not in the .xar). */
+    {
+        XdocArchive docs;
+        memset(&docs, 0, sizeof(docs));
+        for (int i = 0; i < g_file_count; i++) {
+            FILE *sf = fopen(g_files[i].path, "rb");
+            if (!sf) continue;
+            fseek(sf, 0, SEEK_END);
+            long sz = ftell(sf);
+            fseek(sf, 0, SEEK_SET);
+            if (sz <= 0) { fclose(sf); continue; }
+            char *src = malloc((size_t)sz + 1);
+            if (!src) { fclose(sf); continue; }
+            size_t nr = fread(src, 1, (size_t)sz, sf);
+            fclose(sf);
+            src[nr] = '\0';
+            int n = xdoc_extract_from_source(src, g_files[i].path, &docs);
+            if (n > 0)
+                printf("  docs: %d entr%s from '%s'\n", n, n == 1 ? "y" : "ies", g_files[i].rel);
+            free(src);
+        }
+        if (docs.count > 0) {
+            char xdoc_path[1024];
+            snprintf(xdoc_path, sizeof(xdoc_path), "%s", out_path);
+            size_t plen = strlen(xdoc_path);
+            if (plen > 4 && strcmp(xdoc_path + plen - 4, ".xar") == 0)
+                snprintf(xdoc_path + plen - 4, sizeof(xdoc_path) - (plen - 4), ".xdoc");
+            else
+                strncat(xdoc_path, ".xdoc", sizeof(xdoc_path) - plen - 1);
+            if (xdoc_save(&docs, xdoc_path))
+                printf("xar: wrote docs '%s' (%d entr%s)\n",
+                       xdoc_path, docs.count, docs.count == 1 ? "y" : "ies");
+            else
+                fprintf(stderr, "xar: warning: failed to write '%s'\n", xdoc_path);
+        }
+        xdoc_free(&docs);
+    }
     return 0;
 }
 

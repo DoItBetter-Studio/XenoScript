@@ -1,0 +1,22 @@
+// XenoScript Standard Library — core/Double
+// Constants and type-specific utilities for the double primitive.
+// In XenoScript, double uses the same runtime storage as float.
+
+class Double {
+    public:
+        static final float MaxValue =  1.7976931348623157e308;
+        static final float MinValue = -1.7976931348623157e308;
+        static final float Epsilon  =  2.2250738585072014e-308;
+
+        static function toFloat(double n): float {
+            return n as float;
+        }
+
+        static function toInt(double n): int {
+            return n as int;
+        }
+
+        static function toString(double n): string {
+            return n as string;
+        }
+}

@@ -1,0 +1,38 @@
+class Box<T>
+{
+	private:
+		T[] items;
+
+	public:
+		Box(T[] xs) { items = xs; }
+		
+		function has(T x) : bool
+		{
+			for (int i = 0; i < items.length; i++)
+			{
+				if (items[i] == x)
+				{
+					return true;
+				}
+			}
+
+			return false;
+		}
+}
+
+@Mod("arrays_two", "1.0.0", "tests")
+class ArraysTwo
+{
+	private:
+		Box<string> b = new Box<string>(new string[] { "a", "b" } );
+		Box<int>    n = new Box<int>(new int[] { 1, 2 } );
+
+	public:
+		ArraysTwo()
+		{
+			print(b.has("b"));
+			print(b.has("z"));
+			print(n.has(2));
+			print(n.has(3));
+		}
+}

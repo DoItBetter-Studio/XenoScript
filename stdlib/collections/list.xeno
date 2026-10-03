@@ -1,6 +1,13 @@
 // XenoScript Standard Library — List<T>
 // A dynamically-sized ordered sequence. Grows automatically — no fixed cap.
 
+/* #Docs
+ * # title: List
+ * # summary: "A dynamically-sized ordered sequence that grows as needed."
+ * # description: "Backed by an array. Capacity starts small and doubles via __array_grow when full."
+ * # since: "1.0.0"
+ * #!Docs
+ */
 class List<T> {
     private:
         T[]  data;
@@ -8,12 +15,24 @@ class List<T> {
         int  capacity;
 
     public:
+        /* #Docs
+         * # title: List
+         * # summary: "Create an empty list with a small default capacity."
+         * #!Docs
+         */
         List() {
             capacity = 8;
             data     = new T[8];
             size     = 0;
         }
 
+        /* #Docs
+         * # title: add
+         * # summary: "Append an item to the end of the list."
+         * # param: $item "Element to append."
+         * # returns: "void"
+         * #!Docs
+         */
         function add(T item): void {
             if (size >= capacity) {
                 capacity = capacity * 2;
@@ -23,26 +42,66 @@ class List<T> {
             size = size + 1;
         }
 
+        /* #Docs
+         * # title: get
+         * # summary: "Return the element at the given index."
+         * # param: $index "Zero-based position."
+         * # returns: "The element at index."
+         * #!Docs
+         */
         function get(int index): T {
             return data[index];
         }
 
-        function set(int index, T item): void {
+        /* #Docs
+         * # title: set
+         * # summary: "Replace the element at the given index."
+         * # param: $index "Zero-based position."
+         * # param: $item "New element."
+         * # returns: "void"
+         * #!Docs
+         */
+        function set(uint index, T item): void {
             data[index] = item;
         }
 
-        function count(): int {
+        /* #Docs
+         * # title: count
+         * # summary: "Number of elements currently in the list."
+         * # returns: "Element count."
+         * #!Docs
+         */
+        function count(): uint {
             return size;
         }
 
+        /* #Docs
+         * # title: isEmpty
+         * # summary: "True when the list has no elements."
+         * # returns: "true if empty."
+         * #!Docs
+         */
         function isEmpty(): bool {
             return size == 0;
         }
 
+        /* #Docs
+         * # title: clear
+         * # summary: "Remove all elements (capacity unchanged)."
+         * # returns: "void"
+         * #!Docs
+         */
         function clear(): void {
             size = 0;
         }
 
+        /* #Docs
+         * # title: contains
+         * # summary: "True if the list holds at least one equal item."
+         * # param: $item "Value to search for."
+         * # returns: "true if found, otherwise false."
+         * #!Docs
+         */
         function contains(T item): bool {
             for (int i = 0; i < size; i++) {
                 if (data[i] == item) { return true; }
@@ -50,6 +109,13 @@ class List<T> {
             return false;
         }
 
+        /* #Docs
+         * # title: removeAt
+         * # summary: "Remove the element at index, shifting later elements down."
+         * # param: $index "Zero-based position to remove."
+         * # returns: "void"
+         * #!Docs
+         */
         function removeAt(int index): void {
             for (int i = index; i < size - 1; i++) {
                 data[i] = data[i + 1];
@@ -57,6 +123,13 @@ class List<T> {
             size = size - 1;
         }
 
+        /* #Docs
+         * # title: indexOf
+         * # summary: "Index of the first matching element, or -1."
+         * # param: $item "Value to search for."
+         * # returns: "Zero-based index, or -1 if not found."
+         * #!Docs
+         */
         function indexOf(T item): int {
             for (int i = 0; i < size; i++) {
                 if (data[i] == item) { return i; }
@@ -64,6 +137,12 @@ class List<T> {
             return -1;
         }
 
+        /* #Docs
+         * # title: toArray
+         * # summary: "Copy the list contents into a new array."
+         * # returns: "Array of length count() with the current elements."
+         * #!Docs
+         */
         function toArray(): T[] {
             T[] result = new T[size];
             for (int i = 0; i < size; i++) {

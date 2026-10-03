@@ -1,0 +1,21 @@
+// XenoScript Standard Library — core/ULong
+// Constants and type-specific utilities for the ulong primitive (unsigned 64-bit).
+// Note: XenoScript stores all integers as int64, so ulong MaxValue is capped at long MaxValue.
+
+class ULong {
+    public:
+        static ulong MaxValue = 18446744073709551615;
+        static ulong MinValue = 0;
+
+        static function toString(ulong n): string {
+            return n as string;
+        }
+
+        static function toLong(ulong n): long {
+            return n as long;
+        }
+
+		static function toFloat(ulong n): float {
+			return n as float;
+		}
+}

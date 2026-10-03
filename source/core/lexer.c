@@ -131,7 +131,7 @@ static void skip_whitespace_and_comments(Lexer *lexer)
                     int new_line = atoi(p + 11);
                     /* Set to new_line - 1 because the newline at end of this
                      * comment will be consumed and increment line by 1. */
-                    if (new_line > 0) { lexer->line = new_line - 1; lexer->col = 1; }
+                    if (new_line > 0) { lexer->line = new_line; lexer->col = 1; }
                 }
                 /* Consume everything until newline or EOF.
                  * We DON'T consume the newline itself — the outer loop
@@ -368,20 +368,39 @@ static Token scan_number(Lexer *lexer)
     /* Check for a decimal point to determine if this is a float.
      * We peek at the character AFTER the '.' — if it's not a digit,
      * the '.' belongs to something else (e.g. a method call later on). */
+    bool is_float = false;
     if (peek(lexer) == '.' && peek_next(lexer) >= '0' && peek_next(lexer) <= '9')
     {
+        is_float = true;
         advance(lexer); /* consume the '.' */
         while (peek(lexer) >= '0' && peek(lexer) <= '9')
             advance(lexer);
-        if (peek(lexer) == 'f') advance(lexer); /* optional f suffix: 3.14f */
-        return make_token(lexer, TOK_FLOAT_LIT);
     }
 
-    /* Optional f suffix on integer: 1f — treat as float */
-    if (peek(lexer) == 'f') {
-        advance(lexer);
-        return make_token(lexer, TOK_FLOAT_LIT);
+    /* Optional exponent part: e.g. 1e10, 3.14E-2 */
+    if ((peek(lexer) == 'e' || peek(lexer) == 'E')) {
+        const char *save = lexer->current;
+        advance(lexer); /* consume 'e' */
+        if (peek(lexer) == '+' || peek(lexer) == '-')
+            advance(lexer);
+        if (peek(lexer) >= '0' && peek(lexer) <= '9') {
+            is_float = true;
+            while (peek(lexer) >= '0' && peek(lexer) <= '9')
+                advance(lexer);
+        } else {
+            /* Not a valid exponent; rewind back to 'e' so it can be parsed later */
+            lexer->current = save;
+        }
     }
+
+    /* Optional f suffix on float or integer (treat as float) */
+    if (peek(lexer) == 'f' || peek(lexer) == 'F') {
+        advance(lexer);
+        is_float = true;
+    }
+
+    if (is_float)
+        return make_token(lexer, TOK_FLOAT_LIT);
 
     return make_token(lexer, TOK_INT_LIT);
 }
@@ -535,6 +554,7 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
 
 void lexer_init(Lexer *lexer, const char *source)
 {
+	memset(lexer, 0, sizeof(*lexer));
     lexer->start = source;
     lexer->current = source;
     lexer->line = 1;

@@ -24,12 +24,15 @@
 #include "compiler.h"
 #include "../../source/stdlib/stdlib_register.h"
 #include "../../source/compiler/compile_pipeline.h"
+#include "platform_time.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <time.h>
+
+uint64_t ts_start_ns, ts_end_ns;
 
 /* ── Host functions ───────────────────────────────────────────────────── */
 
@@ -56,6 +59,10 @@ static void print_usage(void) {
     printf("  .xbc   Run pre-compiled bytecode\n");
     printf("  .xar   Run a built mod archive\n");
     printf("  dir/   Build-and-run a project directory (needs xeno.project)\n");
+    printf("\nNote: there is no 'build' subcommand. To run a built mod:\n");
+    printf("  xenovm path/to/mod.xar\n");
+    printf("To build a project, use xenoc:\n");
+    printf("  xenoc build path/to/project/\n");
 }
 
 static bool has_ext(const char *path, const char *ext) {
@@ -98,7 +105,7 @@ static int run_xbc(XenoVM *vm, const char *path) {
             Chunk *dst = &module->chunks[si];
             for (int bi = 0; bi < src->count; bi++) chunk_write(dst, src->code[bi], 0);
             for (int ci = 0; ci < src->constants.count; ci++)
-                chunk_add_constant(dst, src->constants.values[ci]);
+                chunk_copy_constant(dst, src, ci);
             dst->local_count = src->local_count;
             dst->param_count = src->param_count;
             strncpy(module->names[si], "__sinit__", 63);
@@ -111,7 +118,9 @@ static int run_xbc(XenoVM *vm, const char *path) {
     /* Extract ModMetadata now that user classes are fully merged in */
     module_extract_mod_metadata(module, NULL);
 
+    ts_start_ns = xeno_time_ns();
     XenoResult r = xeno_vm_run(vm, module);
+    ts_end_ns = xeno_time_ns();
     module_free(module);
     free(module);
     return (r == XENO_OK) ? 0 : 1;
@@ -121,7 +130,9 @@ static int run_source(XenoVM *vm, const char *path) {
     char *source = pipeline_read_file(path);
     if (!source) return 2;
 
+    ts_start_ns = xeno_time_ns();
     XenoResult r = xeno_vm_run_source(vm, source);
+    ts_end_ns = xeno_time_ns();
     free(source);
     return (r == XENO_OK) ? 0 : 1;
 }
@@ -221,7 +232,14 @@ static int run_xar(XenoVM *vm, const char *path) {
             xar_archive_free(&ar);
             return 1;
         }
+        fprintf(stderr, "xenovm: loaded dep '%s' from '%s'\n", dep_name, dep_path);
         xar_archive_free(&dep);
+    }
+    if (ar.manifest.dep_count == 0) {
+        fprintf(stderr,
+                "xenovm: note: '%s' declares no dependencies — "
+                "stripped library classes will not be resolved\n",
+                path);
     }
 
     /* Load the main archive as a standalone runnable module.
@@ -249,7 +267,9 @@ static int run_xar(XenoVM *vm, const char *path) {
     /* Extract ModMetadata from @Mod attribute on merged classes */
     module_extract_mod_metadata(module, NULL);
 
+    ts_start_ns = xeno_time_ns();
     XenoResult r = xeno_vm_run(vm, module);
+    ts_end_ns = xeno_time_ns();
     module_free(module);
     free(module);
     xar_archive_free(&ar);
@@ -371,7 +391,9 @@ static int run_project(XenoVM *vm, const char *project_dir) {
 
     if (any_err) { free(merged_all); return 1; }
 
+    ts_start_ns = xeno_time_ns();
     XenoResult r = xeno_vm_run_source(vm, merged_all);
+    ts_end_ns = xeno_time_ns();
     free(merged_all);
     return (r == XENO_OK) ? 0 : 1;
 }
@@ -381,6 +403,15 @@ static int run_project(XenoVM *vm, const char *project_dir) {
 int main(int argc, char **argv) {
     if (argc < 2) { print_usage(); return 3; }
     if (strcmp(argv[1], "--help") == 0) { print_usage(); return 0; }
+
+    /* Catch xenoc-style "build" misuse: xenovm build <path> */
+    if (strcmp(argv[1], "build") == 0) {
+        fprintf(stderr,
+                "xenovm: there is no 'build' subcommand.\n"
+                "  Build with:  xenoc build <project-dir>\n"
+                "  Run with:    xenovm <mod.xar>   or   xenovm <project-dir>\n");
+        return 3;
+    }
 
     const char *path = argv[1];
 
@@ -415,7 +446,8 @@ int main(int argc, char **argv) {
     clock_t end = clock();          // stop timing
 
     double ms = (double)(end - start) * 1000.0 / CLOCKS_PER_SEC;
-    fprintf(stdout, "Execution time: %.6f ms \n", ms);
+    double exec_time = (ts_end_ns - ts_start_ns) / 1e6;
+    fprintf(stdout, "VM time: %.6f ms\nExec time: %.16f ms\n", ms, exec_time);
 
     if (exit_code != 0 && exit_code != 2) {
         xeno_vm_print_error(vm);

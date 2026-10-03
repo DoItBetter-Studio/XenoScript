@@ -162,6 +162,11 @@ static const char *find_key(const char *p, const char *key, size_t keylen) {
 
 /*
  * Navigate a dotted path and return pointer to the final value, or NULL.
+ * Supports both object keys and numeric array indices.
+ * Examples:
+ *   "params.textDocument.uri"
+ *   "contentChanges.0.text"
+ *   "result.0.range.start.line"
  */
 static const char *navigate(const char *json, const char *key_path) {
     const char *p = json;
@@ -172,8 +177,37 @@ static const char *navigate(const char *json, const char *key_path) {
         size_t seglen = dot ? (size_t)(dot - seg) : strlen(seg);
 
         p = skip_ws(p);
-        p = find_key(p, seg, seglen);
-        if (!p) return NULL;
+
+        /* Array index? */
+        if (seglen > 0 && seglen < 16 && seg[0] >= '0' && seg[0] <= '9') {
+            bool all_digits = true;
+            for (size_t i = 0; i < seglen; i++) {
+                if (seg[i] < '0' || seg[i] > '9') { all_digits = false; break; }
+            }
+            if (all_digits && *p == '[') {
+                int want = (int)strtol(seg, NULL, 10);
+                p++; /* skip '[' */
+                int idx = 0;
+                for (;;) {
+                    p = skip_ws(p);
+                    if (*p == ']') return NULL;
+                    if (idx == want) {
+                        /* Found the element — continue navigating from here */
+                        break;
+                    }
+                    p = skip_value(p);
+                    p = skip_ws(p);
+                    if (*p == ',') { p++; idx++; continue; }
+                    return NULL;
+                }
+            } else {
+                return NULL;
+            }
+        } else {
+            /* Normal object key */
+            p = find_key(p, seg, seglen);
+            if (!p) return NULL;
+        }
 
         seg = dot ? dot + 1 : seg + seglen;
     }

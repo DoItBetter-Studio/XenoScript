@@ -1,19 +1,21 @@
-// Tests: Int., Float., Boolean. stdlib functions
+// Tests: Int., Float., Boolean. stdlib wrapper classes + Math. operations
+import <math>
+
 @Mod("stdlib_core", "1.0.0", "Test")
 class StdlibCore {
     public:
         StdlibCore() {
-            print(Int.abs(-5));
-            print(Int.min(3, 7));
-            print(Int.max(3, 7));
-            print(Int.clamp(15, 0, 10));
-            print(Int.sign(-42));
+            print(Math.abs(-5));
+            print(Math.min(3, 7));
+            print(Math.max(3, 7));
+            print(Math.clamp(15, 0, 10));
+            print(Math.sign(-42));
             print(Int.toString(99));
 
-            print(Float.abs(-2.5));
-            print(Float.floor(3.9));
-            print(Float.ceil(3.1));
-            print(Float.round(3.5));
+            print(Math.absf(-2.5));
+            print(Math.floor(3.9));
+            print(Math.ceil(3.1));
+            print(Math.round(3.5));
             print(Float.toString(1.0));
 
             print(Boolean.toString(true));

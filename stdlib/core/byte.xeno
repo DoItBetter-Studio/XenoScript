@@ -1,0 +1,16 @@
+// XenoScript Standard Library — core/Byte
+// Constants and type-specific utilities for the byte primitive (unsigned 8-bit).
+
+class Byte {
+    public:
+        static final int MaxValue = 255;
+        static final int MinValue = 0;
+
+        static function toString(byte n): string {
+            return n as string;
+        }
+
+        static function toInt(byte n): int {
+            return n as int;
+        }
+}

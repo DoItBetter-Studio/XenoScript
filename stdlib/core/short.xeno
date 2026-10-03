@@ -1,0 +1,16 @@
+// XenoScript Standard Library — core/Short
+// Constants and type-specific utilities for the short primitive (signed 16-bit).
+
+class Short {
+    public:
+        static final int MaxValue =  32767;
+        static final int MinValue = -32768;
+
+        static function toString(short n): string {
+            return n as string;
+        }
+
+        static function toInt(short n): int {
+            return n as int;
+        }
+}

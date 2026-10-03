@@ -139,6 +139,8 @@ typedef struct {
 typedef struct {
     char message[256];
     int  line;
+	int  col;
+	int  end_col;
     bool is_warning;   /* true → printed as warning, does not block compilation */
 } CheckError;
 

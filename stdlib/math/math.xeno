@@ -1,19 +1,291 @@
-// XenoScript Standard Library — math
-// Mathematical functions backed by C host implementations.
+// XenoScript Standard Library — math/Math
+// Mathematical operations for all numeric types.
 // Import with: import <math>;
-//
-// Host functions (C-backed, registered by the VM):
-//   abs(int): int           absf(float): float
-//   min(int,int): int       max(int,int): int
-//   minf(float,float): float  maxf(float,float): float
-//   clamp(int,int,int): int   clampf(float,float,float): float
-//   sign(int): int
-//   sqrt(float): float      pow(float,float): float
-//   floor(float): float     ceil(float): float     round(float): float
-//   sin(float): float       cos(float): float      tan(float): float
-//   log(float): float       log2(float): float     log10(float): float
-//   toFloat(int): float     toInt(float): int
-//
-// This file is intentionally empty of XenoScript declarations —
-// all symbols are declared as host functions by the compiler/VM
-// when this module is loaded. It exists so `import <math>;` is valid.
+
+/* #Docs
+ * # title: Math
+ * # summary: "Static mathematical helpers for int and float."
+ * # description: "Constants (PI, E) and common operations backed by host functions where noted."
+ * # since: "1.0.0"
+ * #!Docs
+ */
+class Math {
+    public:
+        // ── Constants ────────────────────────────────────────────────────
+        static final float PI = 3.14159265358979323846;
+        static final float E  = 2.71828182845904523536;
+
+        // ── Integer operations ───────────────────────────────────────────
+                /* #Docs
+         * # title: abs
+         * # summary: "Absolute value of an integer."
+         * # param: $n "Input value."
+         * # returns: "Non-negative absolute value."
+         * #!Docs
+         */
+        static function abs(int n): int {
+            return __abs(n);
+        }
+
+                /* #Docs
+         * # title: sign
+         * # summary: "Sign of an integer: -1, 0, or 1."
+         * # param: $n "Input value."
+         * # returns: "Sign as int."
+         * #!Docs
+         */
+        static function sign(int n): int {
+            return __sign(n);
+        }
+
+                /* #Docs
+         * # title: min
+         * # summary: "Smaller of two integers."
+         * # param: $a "First value."
+         * # param: $b "Second value."
+         * # returns: "The lesser of a and b."
+         * #!Docs
+         */
+        static function min(int a, int b): int {
+            return __min(a, b);
+        }
+
+                /* #Docs
+         * # title: max
+         * # summary: "Larger of two integers."
+         * # param: $a "First value."
+         * # param: $b "Second value."
+         * # returns: "The greater of a and b."
+         * #!Docs
+         */
+        static function max(int a, int b): int {
+            return __max(a, b);
+        }
+
+                /* #Docs
+         * # title: clamp
+         * # summary: "Clamp an integer into [lo, hi]."
+         * # param: $value "Value to clamp."
+         * # param: $lo "Lower bound."
+         * # param: $hi "Upper bound."
+         * # returns: "Clamped value."
+         * #!Docs
+         */
+        static function clamp(int value, int lo, int hi): int {
+            return __clamp(value, lo, hi);
+        }
+
+                /* #Docs
+         * # title: inRange
+         * # summary: "True if value is within [lo, hi] inclusive."
+         * # param: $value "Value to test."
+         * # param: $lo "Lower bound."
+         * # param: $hi "Upper bound."
+         * # returns: "true if in range."
+         * #!Docs
+         */
+        static function inRange(int value, int lo, int hi): bool {
+            return value >= lo && value <= hi;
+        }
+
+        // ── Float operations ─────────────────────────────────────────────
+                /* #Docs
+         * # title: absf
+         * # summary: "Absolute value of a float."
+         * # param: $n "Input value."
+         * # returns: "Non-negative absolute value."
+         * #!Docs
+         */
+        static function absf(float n): float {
+            return __absf(n);
+        }
+
+                /* #Docs
+         * # title: signf
+         * # summary: "Sign of a float as -1.0, 0.0, or 1.0."
+         * # param: $n "Input value."
+         * # returns: "Sign as float."
+         * #!Docs
+         */
+        static function signf(float n): float {
+            if (n > 0.0) { return 1.0; }
+            if (n < 0.0) { return -1.0; }
+            return 0.0;
+        }
+
+                /* #Docs
+         * # title: minf
+         * # summary: "Smaller of two floats."
+         * # param: $a "First value."
+         * # param: $b "Second value."
+         * # returns: "The lesser of a and b."
+         * #!Docs
+         */
+        static function minf(float a, float b): float {
+            return __minf(a, b);
+        }
+
+                /* #Docs
+         * # title: maxf
+         * # summary: "Larger of two floats."
+         * # param: $a "First value."
+         * # param: $b "Second value."
+         * # returns: "The greater of a and b."
+         * #!Docs
+         */
+        static function maxf(float a, float b): float {
+            return __maxf(a, b);
+        }
+
+                /* #Docs
+         * # title: clampf
+         * # summary: "Clamp a float into [lo, hi]."
+         * # param: $value "Value to clamp."
+         * # param: $lo "Lower bound."
+         * # param: $hi "Upper bound."
+         * # returns: "Clamped value."
+         * #!Docs
+         */
+        static function clampf(float value, float lo, float hi): float {
+            return __clampf(value, lo, hi);
+        }
+
+                /* #Docs
+         * # title: inRangef
+         * # summary: "True if value is within [lo, hi] inclusive."
+         * # param: $value "Value to test."
+         * # param: $lo "Lower bound."
+         * # param: $hi "Upper bound."
+         * # returns: "true if in range."
+         * #!Docs
+         */
+        static function inRangef(float value, float lo, float hi): bool {
+            return value >= lo && value <= hi;
+        }
+
+        // ── Rounding ─────────────────────────────────────────────────────
+                /* #Docs
+         * # title: floor
+         * # summary: "Largest integer value not greater than n."
+         * # param: $n "Input value."
+         * # returns: "Floor as float."
+         * #!Docs
+         */
+        static function floor(float n): float {
+            return __floor(n);
+        }
+
+                /* #Docs
+         * # title: ceil
+         * # summary: "Smallest integer value not less than n."
+         * # param: $n "Input value."
+         * # returns: "Ceiling as float."
+         * #!Docs
+         */
+        static function ceil(float n): float {
+            return __ceil(n);
+        }
+
+                /* #Docs
+         * # title: round
+         * # summary: "Nearest integer value to n."
+         * # param: $n "Input value."
+         * # returns: "Rounded value as float."
+         * #!Docs
+         */
+        static function round(float n): float {
+            return __round(n);
+        }
+
+        // ── Powers and roots ─────────────────────────────────────────────
+                /* #Docs
+         * # title: sqrt
+         * # summary: "Square root."
+         * # param: $n "Non-negative value."
+         * # returns: "Approximate square root."
+         * #!Docs
+         */
+        static function sqrt(float n): float {
+            return __sqrt(n);
+        }
+
+                /* #Docs
+         * # title: pow
+         * # summary: "Raise base to the power exp."
+         * # param: $base "Base value."
+         * # param: $exp "Exponent."
+         * # returns: "base raised to exp."
+         * #!Docs
+         */
+        static function pow(float base, float exp): float {
+            return __pow(base, exp);
+        }
+
+        // ── Trigonometry ─────────────────────────────────────────────────
+                /* #Docs
+         * # title: sin
+         * # summary: "Sine of n (radians)."
+         * # param: $n "Angle in radians."
+         * # returns: "sin(n)."
+         * #!Docs
+         */
+        static function sin(float n): float {
+            return __sin(n);
+        }
+
+                /* #Docs
+         * # title: cos
+         * # summary: "Cosine of n (radians)."
+         * # param: $n "Angle in radians."
+         * # returns: "cos(n)."
+         * #!Docs
+         */
+        static function cos(float n): float {
+            return __cos(n);
+        }
+
+                /* #Docs
+         * # title: tan
+         * # summary: "Tangent of n (radians)."
+         * # param: $n "Angle in radians."
+         * # returns: "tan(n)."
+         * #!Docs
+         */
+        static function tan(float n): float {
+            return __tan(n);
+        }
+
+        // ── Logarithms ───────────────────────────────────────────────────
+                /* #Docs
+         * # title: log
+         * # summary: "Natural logarithm."
+         * # param: $n "Positive value."
+         * # returns: "ln(n)."
+         * #!Docs
+         */
+        static function log(float n): float {
+            return __log(n);
+        }
+
+                /* #Docs
+         * # title: log2
+         * # summary: "Base-2 logarithm."
+         * # param: $n "Positive value."
+         * # returns: "log2(n)."
+         * #!Docs
+         */
+        static function log2(float n): float {
+            return __log2(n);
+        }
+
+                /* #Docs
+         * # title: log10
+         * # summary: "Base-10 logarithm."
+         * # param: $n "Positive value."
+         * # returns: "log10(n)."
+         * #!Docs
+         */
+        static function log10(float n): float {
+            return __log10(n);
+        }
+}

@@ -2,6 +2,13 @@
 // FIFO structure. Grows automatically — no fixed cap.
 // On grow the buffer is linearised (head resets to 0).
 
+/* #Docs
+ * # title: Queue
+ * # summary: "First-in, first-out queue that grows as needed."
+ * # description: "Uses a circular buffer. On grow, elements are linearised and head resets to 0."
+ * # since: "1.0.0"
+ * #!Docs
+ */
 class Queue<T> {
     private:
         T[]  data;
@@ -11,6 +18,11 @@ class Queue<T> {
         int  capacity;
 
     public:
+        /* #Docs
+         * # title: Queue
+         * # summary: "Create an empty queue with a small default capacity."
+         * #!Docs
+         */
         Queue() {
             capacity = 8;
             data     = new T[8];
@@ -19,6 +31,13 @@ class Queue<T> {
             size     = 0;
         }
 
+        /* #Docs
+         * # title: enqueue
+         * # summary: "Add an item at the back of the queue."
+         * # param: $item "Element to enqueue."
+         * # returns: "void"
+         * #!Docs
+         */
         function enqueue(T item): void {
             if (size >= capacity) {
                 int new_cap = capacity * 2;
@@ -39,6 +58,13 @@ class Queue<T> {
             size = size + 1;
         }
 
+        /* #Docs
+         * # title: dequeue
+         * # summary: "Remove and return the front item."
+         * # returns: "The former front element."
+         * # note: "On empty queue, prints a message and returns data[0]."
+         * #!Docs
+         */
         function dequeue(): T {
             if (size <= 0) {
                 print("Queue: empty");
@@ -51,18 +77,42 @@ class Queue<T> {
             return item;
         }
 
+        /* #Docs
+         * # title: peek
+         * # summary: "Return the front item without removing it."
+         * # returns: "The current front element."
+         * #!Docs
+         */
         function peek(): T {
             return data[head];
         }
 
+        /* #Docs
+         * # title: count
+         * # summary: "Number of items in the queue."
+         * # returns: "Element count."
+         * #!Docs
+         */
         function count(): int {
             return size;
         }
 
+        /* #Docs
+         * # title: isEmpty
+         * # summary: "True when the queue has no items."
+         * # returns: "true if empty."
+         * #!Docs
+         */
         function isEmpty(): bool {
             return size == 0;
         }
 
+        /* #Docs
+         * # title: clear
+         * # summary: "Remove all items (capacity unchanged)."
+         * # returns: "void"
+         * #!Docs
+         */
         function clear(): void {
             head = 0;
             tail = 0;

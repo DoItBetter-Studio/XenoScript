@@ -8,7 +8,16 @@ Usage:
 """
 import os, sys, subprocess, glob
 
+VG = os.environ.get("XENO_VALGRIND")
+_vg_n = 0
+
 def run(cmd):
+    global _vg_n
+    if VG:
+        _vg_n += 1
+        os.makedirs("vg_logs", exist_ok=True)
+        tag = os.path.basename(cmd[1]) if len(cmd) > 1 else "run"
+        cmd = ["valgrind", "-q", "--leak-check=full", "--errors-for-leak-kinds=definite", f"--log-file=vg_logs/{_vg_n:03d}_{os.path.basename(cmd[0])}_{tag}.log"] + cmd
     r = subprocess.run(cmd, capture_output=True)
     return r.stdout, r.stderr
 
@@ -20,7 +29,9 @@ def read(path):
 
 def strip_timing(b):
     lines = b.splitlines(keepends=True)
-    if lines and lines[-1].startswith(b"Execution time:"):
+    if len(lines) >= 2 and lines and lines[-2].startswith(b"VM time:"):
+        lines = lines[:-2]
+    if len(lines) >= 1 and lines and lines[-1].startswith(b"Exec time:"):
         lines = lines[:-1]
     return b"".join(lines)
 

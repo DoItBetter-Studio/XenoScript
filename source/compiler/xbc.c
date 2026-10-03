@@ -239,11 +239,12 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
         if (!wb_u16(wb, (uint16_t)cls->field_count)) return false;
         for (int fi = 0; fi < cls->field_count; fi++) {
             const FieldDef *fd = &cls->fields[fi];
-            if (!wb_str(wb, fd->name))                    return false;
-            if (!wb_u8(wb, (uint8_t)fd->type_kind))       return false;
-            if (!wb_str(wb, fd->class_name))              return false;
-            if (!wb_u8(wb, fd->is_static ? 1 : 0))       return false;
-            if (!wb_u8(wb, fd->is_final  ? 1 : 0))       return false;
+            if (!wb_str(wb, fd->name))                    	return false;
+            if (!wb_u8(wb, (uint8_t)fd->type_kind))       	return false;
+            if (!wb_str(wb, fd->class_name))              	return false;
+            if (!wb_u8(wb, fd->is_static ? 1 : 0))       	return false;
+            if (!wb_u8(wb, fd->is_final  ? 1 : 0))       	return false;
+			if (!wb_u8(wb, fd->access_flags))				return false;
         }
 
         /* Methods */
@@ -254,6 +255,7 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
             if (!wb_u32(wb, (uint32_t)md->fn_index))         return false;
             if (!wb_u8(wb, md->is_static ? 1 : 0))          return false;
             if (!wb_u8(wb, md->is_virtual ? 1 : 0))         return false;
+			if (!wb_u8(wb, md->access_flags)) 				return false;
             if (!wb_u8(wb, (uint8_t)md->return_type_kind))  return false;
             if (!wb_str(wb, md->return_class_name))          return false;
             /* v17: param signature */
@@ -287,6 +289,7 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
         for (int ei = 0; ei < cls->event_count; ei++) {
             const EventDef *ed = &cls->events[ei];
             if (!wb_str(wb, ed->name)) return false;
+			if (!wb_u8(wb, ed->access_flags)) return false;
             if (!wb_u8(wb, (uint8_t)ed->param_count)) return false;
             for (int pi = 0; pi < ed->param_count; pi++) {
                 if (!wb_u8(wb, (uint8_t)ed->param_type_kinds[pi])) return false;
@@ -329,228 +332,31 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
         for (int pi = 0; pi < chunk->param_count && pi < 16; pi++)
             if (!wb_u8(wb, (uint8_t)chunk->param_type_kinds[pi])) return false;
 
-        /* Scan bytecode to determine constant type tags.
-         * The constant pool itself has no type info — we infer from opcodes. */
-        uint8_t *const_kinds = calloc(chunk->constants.count + 1, 1);
-        if (!const_kinds) return false;
-
-        for (int pc = 0; pc < chunk->count; ) {
-            OpCode op = (OpCode)chunk->code[pc++];
-
-            switch (op) {
-                case OP_LOAD_CONST_FLOAT:
-                    if (pc+1 < chunk->count) {
-                        uint16_t idx = (chunk->code[pc]<<8)|chunk->code[pc+1];
-                        if (idx < chunk->constants.count)
-                            const_kinds[idx] = CONST_FLOAT;
-                    }
-                    pc += 2; break;
-                case OP_LOAD_CONST_STR:
-                    if (pc+1 < chunk->count) {
-                        uint16_t idx = (chunk->code[pc]<<8)|chunk->code[pc+1];
-                        if (idx < chunk->constants.count)
-                            const_kinds[idx] = CONST_STR;
-                    }
-                    pc += 2; break;
-
-                /* 2-byte operand opcodes */
-                case OP_LOAD_CONST_INT:
-                case OP_JUMP:
-                case OP_JUMP_IF_FALSE:
-                    pc += 2; break;
-
-                /* 3-byte operand opcodes (uint16 + uint8) */
-                case OP_CALL:
-                case OP_CALL_HOST:
-                case OP_CALL_SUPER:
-                case OP_CALL_METHOD:
-                    pc += 3; break;
-
-                case OP_CALL_IFACE:
-                    /* uint16 name_const_idx (a CONST_STR) + uint8 argc */
-                    if (pc+1 < chunk->count) {
-                        uint16_t idx = (chunk->code[pc]<<8)|chunk->code[pc+1];
-                        if (idx < chunk->constants.count)
-                            const_kinds[idx] = CONST_STR;
-                    }
-                    pc += 3; break;
-
-                /* OP_NEW: uint16 class_idx + uint8 argc + uint8 tac + tac bytes = variable */
-                case OP_NEW: {
-                    /* skip class_idx(2) + argc(1) = 3, then read tac to skip type args */
-                    pc += 3;
-                    uint8_t tac = (pc < chunk->count) ? chunk->code[pc] : 0;
-                    pc += 1 + tac;  /* skip tac byte + tac kind bytes */
-                    break;
-                }
-
-                /* 2-byte operand opcodes (two uint8_t operands = class_idx + field_idx) */
-                case OP_LOAD_STATIC:
-                case OP_STORE_STATIC:
-                    pc += 2; break;  /* opcode already consumed; 2 operand bytes follow */
-
-                /* 1-byte operand opcodes — always exactly 1 operand byte */
-                case OP_LOAD_LOCAL:
-                case OP_STORE_LOCAL:
-                case OP_LOAD_CONST_BOOL:
-                case OP_GET_FIELD:
-                case OP_SET_FIELD:
-                    pc += 1; break;
-
-                /* OP_TO_STR: 1 byte kind; if kind==4 (enum) an extra class_index byte follows */
-                case OP_TO_STR: {
-                    uint8_t kind = (pc < chunk->count) ? chunk->code[pc] : 0;
-                    pc += (kind == 4) ? 2 : 1; break;
-                }
-                case OP_NEW_ARRAY:
-                case OP_ARRAY_LIT:
-                case OP_IS_TYPE:
-                case OP_AS_TYPE:
-                case OP_TYPE_FIELD:
-                    pc += 1; break;
-
-                /* OP_TYPEOF: variable length [tag][name_len][name_bytes...] */
-                case OP_TYPEOF: {
-                    /* [tag][name_len][name_bytes...] */
-                    if (pc + 1 < chunk->count) {
-                        uint8_t name_len = chunk->code[pc + 1];
-                        pc += 2 + name_len;
-                    } else { pc += 1; }
-                    break;
-                }
-
-                /* No operands */
-                case OP_RETURN:
-                case OP_RETURN_VOID:
-                case OP_MATCH_FAIL:
-                case OP_TRUNC_I8:
-                case OP_TRUNC_U8:
-                case OP_TRUNC_I16:
-                case OP_TRUNC_U16:
-                case OP_TRUNC_I32:
-                case OP_TRUNC_U32:
-                case OP_TRUNC_U64:
-                case OP_TRUNC_CHAR:
-                case OP_ARRAY_GET:
-                case OP_ARRAY_SET:
-                case OP_ARRAY_LEN:
-                case OP_POP:
-                case OP_ADD_INT:
-                case OP_ADD_FLOAT:
-                case OP_SUB_INT:
-                case OP_SUB_FLOAT:
-                case OP_MUL_INT:
-                case OP_MUL_FLOAT:
-                case OP_DIV_INT:
-                case OP_DIV_FLOAT:
-                case OP_MOD_INT:
-                case OP_MOD_FLOAT:
-                case OP_NEGATE_INT:
-                case OP_NEGATE_FLOAT:
-                case OP_NOT_BOOL:
-                case OP_CMP_EQ_INT:
-                case OP_CMP_NEQ_INT:
-                case OP_CMP_LT_INT:
-                case OP_CMP_LTE_INT:
-                case OP_CMP_GT_INT:
-                case OP_CMP_GTE_INT:
-                case OP_CMP_EQ_FLOAT:
-                case OP_CMP_NEQ_FLOAT:
-                case OP_CMP_LT_FLOAT:
-                case OP_CMP_LTE_FLOAT:
-                case OP_CMP_GT_FLOAT:
-                case OP_CMP_GTE_FLOAT:
-                case OP_CMP_EQ_BOOL:
-                case OP_CMP_NEQ_BOOL:
-                case OP_CMP_EQ_STR:
-                case OP_CMP_NEQ_STR:
-                case OP_AND_BOOL:
-                case OP_OR_BOOL:
-                case OP_CONCAT_STR:
-                case OP_LOAD_THIS:
-                case OP_PUSH_NULL:
-                case OP_IS_NULL:
-                case OP_CMP_EQ_VAL:
-                case OP_CMP_NEQ_VAL:
-                    break;
-
-                /* OP_JUMP_IF_TRUE: 2-byte signed offset */
-                case OP_JUMP_IF_TRUE:
-                    pc += 2; break;
-
-                /* OP_NULL_COALESCE: 2-byte forward offset */
-                case OP_NULL_COALESCE:
-                    pc += 2; break;
-
-                /* OP_NULL_ASSERT: 2-byte line number */
-                case OP_NULL_ASSERT:
-                    pc += 2; break;
-
-                /* OP_TRY_BEGIN: 2-byte catch offset */
-                case OP_TRY_BEGIN:
-                    pc += 2; break;
-
-                /* OP_TRY_END, OP_THROW, OP_LOAD_EXCEPTION: no operands */
-                case OP_TRY_END:
-                case OP_THROW:
-                case OP_LOAD_EXCEPTION:
-                    break;
-
-                /* OP_EXCEPTION_IS_TYPE: [u8 name_len][name_bytes] */
-                case OP_EXCEPTION_IS_TYPE: {
-                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
-                    pc += 1 + nlen;
-                    break;
-                }
-
-                /* OP_EVENT_SUBSCRIBE / OP_EVENT_UNSUBSCRIBE: [u8 nlen][name][u16 fn_idx] */
-                case OP_EVENT_SUBSCRIBE:
-                case OP_EVENT_UNSUBSCRIBE: {
-                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
-                    pc += 1 + nlen + 2; /* name + u16 fn_idx */
-                    break;
-                }
-
-                /* OP_EVENT_FIRE: [u8 nlen][name][u8 argc] */
-                case OP_EVENT_FIRE: {
-                    uint8_t nlen = (pc < chunk->count) ? chunk->code[pc] : 0;
-                    pc += 1 + nlen + 1; /* name + u8 argc */
-                    break;
-                }
-
-                /* OP_CALL_SUPER: 2-byte fn_idx + 1-byte argc */
-                /* Already listed above but double-check: */
-
-                /* OP_GET_FIELD: 1-byte field_idx (already listed, verify) */
-                /* OP_SET_FIELD: 1-byte field_idx (already listed) */
-
-                default: break;
-            }
-        }
-
-        /* Constant pool */
-        if (!wb_u16(wb, (uint16_t)chunk->constants.count)) {
-            free(const_kinds);
+        /* Constant kinds come from ConstPool.is_str (set at emit time).
+         * Never infer from bytecode — the opcode walk desyncs on OP_NEW /
+         * type-args and mis-tags string constants as raw ints, which then
+         * load as null (field init: string ModId = "mymod"). */
+        if (!wb_u16(wb, (uint16_t)chunk->constants.count))
             return false;
-        }
 
         for (int i = 0; i < chunk->constants.count; i++) {
-            Value    v    = chunk->constants.values[i];
-            uint8_t  kind = const_kinds[i];
-            if (!wb_u8(wb, kind)) { free(const_kinds); return false; }
+            Value v = chunk->constants.values[i];
+            uint8_t kind = CONST_INT; /* default numeric/raw */
+            if (chunk->constants.is_str && chunk->constants.is_str[i])
+                kind = CONST_STR;
+            if (!wb_u8(wb, kind))
+                return false;
 
             if (kind == CONST_STR) {
-                if (!wb_str(wb, v.s)) { free(const_kinds); return false; }
+                if (!wb_str(wb, v.s ? v.s : ""))
+                    return false;
             } else {
-                /* Serialize the payload (union field) as raw 8 bytes.
-                 * We extract the union portion only, skipping is_null. */
                 uint64_t raw = 0;
-                memcpy(&raw, &v.i, 8);   /* .i overlaps all union members */
-                if (!wb_u64(wb, raw)) { free(const_kinds); return false; }
+                memcpy(&raw, &v.i, 8);
+                if (!wb_u64(wb, raw))
+                    return false;
             }
         }
-
-        free(const_kinds);
 
         /* Bytecode */
         if (!wb_u32(wb, (uint32_t)chunk->count)) return false;
@@ -693,6 +499,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
 
             fd->is_static = rb_u8(rb) != 0;
             fd->is_final  = rb_u8(rb) != 0;
+			fd->access_flags = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
         }
 
@@ -714,6 +521,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             md->fn_index        = (int)rb_u32(rb);
             md->is_static       = rb_u8(rb) != 0;
             md->is_virtual      = rb_u8(rb) != 0;
+			md->access_flags 	= rb_u8(rb);
             md->return_type_kind = (int)rb_u8(rb);
             char *rcname = rb_str(rb);
             if (rb->error || !rcname) return XBC_ERR_OOM;
@@ -816,6 +624,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             char *ename = rb_str(rb);
             if (rb->error || !ename) return XBC_ERR_OOM;
             strncpy(ed->name, ename, FIELD_NAME_MAX - 1); free(ename);
+			ed->access_flags = rb_u8(rb);
             ed->param_count = (int)rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
             for (int pi = 0; pi < ed->param_count && pi < EVENT_MAX_PARAMS; pi++) {
@@ -888,18 +697,17 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             uint8_t kind = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
     
-            Value v; memset(&v, 0, sizeof(Value));
             if (kind == CONST_STR) {
                 char *s = rb_str(rb);
                 if (rb->error || !s) return XBC_ERR_OOM;
-                v.is_null = 0; v.s = s;
+                chunk_add_constant_str(chunk, s);
             } else {
-                uint64_t raw = rb_u64(rb);
+                int64_t raw = (int64_t)rb_u64(rb);
                 if (rb->error) return XBC_ERR_IO;
-                memcpy(&v.i, &raw, 8);   /* restore union, leave is_null=0 */
+				Value v; memset(&v, 0, sizeof(Value));
+                v.i = (__int128_t)raw;    /* sign-extend into __int128 */
+				chunk_add_constant(chunk, v);
             }
-
-            chunk_add_constant(chunk, v);
         }
 
         /* Bytecode */

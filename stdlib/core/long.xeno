@@ -1,0 +1,20 @@
+// XenoScript Standard Library — core/Long
+// Constants and type-specific utilities for the long primitive (signed 64-bit).
+
+class Long {
+    public:
+        static final long MaxValue =  9223372036854775807;
+        static final long MinValue = -9223372036854775808;
+
+        static function toString(long n): string {
+            return n as string;
+        }
+
+        static function toInt(long n): int {
+            return n as int;
+        }
+
+        static function toFloat(long n): float {
+            return n as float;
+        }
+}

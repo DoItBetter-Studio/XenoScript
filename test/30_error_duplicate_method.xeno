@@ -1,0 +1,13 @@
+class Dup {
+    public:
+        Dup() {}
+        function f_int(int a): int { return a; }
+        function f(int a): int { return a; }
+        function f(string s): string { return s; }
+}
+
+@Mod("dup", "1.0.0", "t")
+class Entry {
+    public:
+        Entry() { Dup d = new Dup(); print(d.f(1)); }
+}
