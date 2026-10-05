@@ -41,7 +41,10 @@ def main():
         sys.exit(1)
 
     xenoc, xenovm, test_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-    tests = sorted(glob.glob(os.path.join(test_dir, "*.xeno")))
+    tests = sorted(
+        path.replace(os.sep, "/")
+        for path in glob.glob(os.path.join(test_dir, "**", "*.xeno"), recursive=True)
+    )
 
     if not tests:
         print(f"No tests found in {test_dir}")

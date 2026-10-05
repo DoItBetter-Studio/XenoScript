@@ -14,14 +14,18 @@ typedef struct {
 extern const uint8_t xdoc_collections_start[] __asm("_binary_build_xar_collections_xdoc_start");
 extern const uint8_t xdoc_collections_end[]   __asm("_binary_build_xar_collections_xdoc_end");
 
+extern const uint8_t xdoc_core_start[] __asm("_binary_build_xar_core_xdoc_start");
+extern const uint8_t xdoc_core_end[]   __asm("_binary_build_xar_core_xdoc_end");
+
 extern const uint8_t xdoc_math_start[] __asm("_binary_build_xar_math_xdoc_start");
 extern const uint8_t xdoc_math_end[]   __asm("_binary_build_xar_math_xdoc_end");
 
-#define STDLIB_XDOC_COUNT 2
+#define STDLIB_XDOC_COUNT 3
 
 #ifndef XAR_BOOTSTRAP
 static const StdlibXdocEntry STDLIB_XDOC_TABLE[] = {
     { "collections", xdoc_collections_start, xdoc_collections_end },
+    { "core", xdoc_core_start, xdoc_core_end },
     { "math", xdoc_math_start, xdoc_math_end },
 };
 #else

@@ -108,6 +108,23 @@ static XenoHostFn const STDLIB_MATH_FNS[] = {
  * Reallocates arr to hold at least new_cap elements.
  * Zeros any newly added slots. Returns the (possibly moved) array pointer.
  * Called internally by List<T>, Stack<T>, Queue<T> — not for mod use. */
+/* assert(condition: bool, message: string): void */
+static XenoResult fn_assert(XenoVM *vm, int argc, Value *argv, Value *out) {
+    (void)argc;
+    (void)out;
+    if (argv[0].is_null || !argv[0].b) {
+        const char *msg = (argc >= 2 && !argv[1].is_null && argv[1].s)
+                              ? argv[1].s
+                              : "";
+        if (msg[0])
+            xeno_vm_error(vm, "Assertion failed: %s", msg);
+        else
+            xeno_vm_error(vm, "Assertion failed");
+        return XENO_RUNTIME_ERROR;
+    }
+    return XENO_OK;
+}
+
 static XenoResult fn_array_grow(XenoVM *vm, int argc, Value *argv, Value *out) {
     (void)argc;
     XenoArray *arr     = argv[0].arr;
@@ -146,4 +163,8 @@ void stdlib_register_host_fns(XenoVM *vm) {
     int grow_params[2] = { TYPE_ANY, TYPE_INT };
     xeno_register_fn_typed(vm, "__array_grow", fn_array_grow,
                             TYPE_ANY, 2, grow_params);
+
+    int assert_params[2] = { TYPE_BOOL, TYPE_STRING };
+    xeno_register_fn_typed(vm, "assert", fn_assert,
+                            TYPE_VOID, 2, assert_params);
 }

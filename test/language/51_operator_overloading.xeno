@@ -1,0 +1,42 @@
+// Tests: user-defined binary operators
+class Vector2 {
+    public:
+        int x;
+        int y;
+
+        Vector2(int x, int y) {
+            this.x = x;
+            this.y = y;
+        }
+
+        function operator +(Vector2 other): Vector2 {
+            return new Vector2(x + other.x, y + other.y);
+        }
+
+		function operator ==(Vector2 other): bool {
+            return this.x == other.x && this.y == other.y;
+        }
+
+		function toString(): string {
+            return "Vector2(" + x + ", " + y + ")";
+        }
+}
+
+@Mod("operator_overloading", "1.0.0", "Test")
+class OperatorOverloading {
+    public:
+        OperatorOverloading() {
+            Vector2 left = new Vector2(2, 3);
+            Vector2 right = new Vector2(3, 4);
+            Vector2 sum = left + right;
+            Vector2 equal = new Vector2(5, 7);
+            Vector2 unequal = new Vector2(5, 8);
+
+            print(sum.x);
+            print(sum.y);
+            print(sum.x + sum.y);
+            print(sum == equal);
+            print(sum == unequal);
+            print(sum.toString());
+        }
+}

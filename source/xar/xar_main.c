@@ -265,6 +265,8 @@ static CompileResult compile_xeno(const char *file_path,
     lexer_init(&lexer, merged);
     parser_init(&parser, &lexer);
     checker_init(checker, &parser.arena);
+    /* Stdlib defines the language API surface — top-level print/assert etc. */
+    checker->allow_toplevel_fns = true;
     module_init(module);
 
     Type void_t=type_void(), any_t=type_any();

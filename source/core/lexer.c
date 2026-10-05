@@ -130,8 +130,12 @@ static void skip_whitespace_and_comments(Lexer *lexer)
                 if (strncmp(p, "@xeno:line ", 11) == 0) {
                     int new_line = atoi(p + 11);
                     /* Set to new_line - 1 because the newline at end of this
-                     * comment will be consumed and increment line by 1. */
-                    if (new_line > 0) { lexer->line = new_line - 1; lexer->col = 1; }
+                     * comment is not consumed here; the outer loop will see it
+                     * and increment line by 1, landing at new_line. */
+                    if (new_line > 0) {
+                        lexer->line = new_line - 1;
+                        lexer->col = 1;
+                    }
                 }
                 /* Consume everything until newline or EOF.
                  * We DON'T consume the newline itself — the outer loop
@@ -535,6 +539,8 @@ static Token scan_identifier_or_keyword(Lexer *lexer)
         return make_token(lexer, TOK_VIRTUAL);
     if (len == 8 && strncmp(word, "override", 8) == 0)
         return make_token(lexer, TOK_OVERRIDE);
+    if (len == 8 && strncmp(word, "operator", 8) == 0)
+        return make_token(lexer, TOK_OPERATOR);
     if (len == 5 && strncmp(word, "event", 5) == 0)
         return make_token(lexer, TOK_EVENT);
     if (len == 9 && strncmp(word, "interface", 9) == 0)

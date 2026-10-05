@@ -37,6 +37,7 @@
 
 #define MAX_PARAMS      16    /* Maximum parameters per function             */
 #define SCOPE_MAX_SYMS  256   /* Maximum symbols per scope level             */
+#define CHECKER_MAX_SCOPED 2048
 #define MAX_SCOPE_DEPTH 32    /* Maximum nesting depth (scopes on the stack) */
 #define CHECKER_MAX_ERRORS 64
 
@@ -153,6 +154,26 @@ typedef struct {
     /* Scope stack — index 0 is global, higher indices are more nested */
     Scope scopes[MAX_SCOPE_DEPTH];
     int   scope_depth;   /* Index of the CURRENT (innermost) scope */
+
+    /* Persistent snapshot of symbols defined during the check pass.
+     * Locals survive pop_scope so the LSP can offer in-scope completion.
+     * end_line is set when the defining scope is popped (1-based inclusive). */
+    struct {
+        const char *name;
+        int         length;
+        SymbolKind  kind;
+        Type        type;
+        int         def_line;
+        int         def_col;
+        int         end_line;   /* INT_MAX while scope still open */
+        int         depth;
+    } scoped_syms[2048];
+    int scoped_count;
+    int last_src_line;          /* Updated as statements are checked */
+
+    /* When true, top-level function/event declarations are allowed.
+     * Set only while packing the standard library (defines language API). */
+    bool allow_toplevel_fns;
 
     /* The return type of the function currently being type-checked. */
     Type  current_fn_return_type;

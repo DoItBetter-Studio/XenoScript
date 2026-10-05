@@ -64,8 +64,10 @@ xenoscript.vscode-xenoscript/
 # ============================
 # Test Artifacts
 # ============================
-test/*.err
+test/**/*.err
 test/*.out
+!test/language/51_operator_overloading.err
+!test/language/51_operator_overloading.out
 
 # ============================
 # Bin Artifacts

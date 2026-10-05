@@ -871,6 +871,8 @@ struct Stmt {
                 bool            is_constructor;
                 bool            is_virtual;  /* virtual — overridable         */
                 bool            is_override; /* override — must match parent  */
+                bool            is_operator; /* operator + / == / etc.        */
+                int             operator_op; /* TokenType of overloaded op   */
                 AnnotationNode *annotations; /* @Event(...) etc.             */
                 struct ClassMethodNode *next;
             } *methods;

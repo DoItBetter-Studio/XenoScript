@@ -1,0 +1,31 @@
+// XenoScript Standard Library — core I/O helpers
+// These are host-backed: the compiler emits CALL_HOST for print/assert.
+// The bodies below exist so documentation can be extracted into .xdoc.
+
+/* #Docs
+ * # title: "print"
+ * # summary: "Write a value to the console, followed by a newline."
+ * # description: "The primary way to produce output from a mod. Any value may be passed; non-string values are converted to their string form before printing."
+ * # param: $value "Value to print. Strings print as-is; other types are converted."
+ * # returns: "void"
+ * # example: "print(\"hello\");"
+ * # example: "print(42);"
+ * # since: "1.0.0"
+ * #!Docs
+ */
+function print(string value): void {
+}
+
+/* #Docs
+ * # title: "assert"
+ * # summary: "Halt execution if a condition is false."
+ * # description: "Use while developing mods to catch impossible states early. When the condition is false the VM raises a runtime error with the given message and stops. Assertions are always active."
+ * # param: $condition "Expression that must be true."
+ * # param: $message "Message included in the runtime error when the assertion fails."
+ * # returns: "void"
+ * # example: "assert(items.count() > 0, \"inventory must not be empty\");"
+ * # since: "1.0.0"
+ * #!Docs
+ */
+function assert(bool condition, string message): void {
+}

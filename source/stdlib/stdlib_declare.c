@@ -54,4 +54,13 @@ void stdlib_declare_host_fns(Checker *checker, CompilerHostTable *host_table) {
         checker_declare_host(checker, "__array_grow", grow_ret, grow_params, 2);
         compiler_host_table_add(host_table, "__array_grow", host_index, 2);
     }
+
+    /* assert(condition: bool, message: string): void */
+    {
+        Type params[2] = { type_bool(), type_string() };
+        Type v = type_void();
+        int host_index = STDLIB_MATH_HOST_INDEX_BASE + STDLIB_MATH_COUNT + 1;
+        checker_declare_host(checker, "assert", v, params, 2);
+        compiler_host_table_add(host_table, "assert", host_index, 2);
+    }
 }

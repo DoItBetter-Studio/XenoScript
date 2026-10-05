@@ -348,15 +348,17 @@ typedef enum {
     BP_TERNARY    = 2,   /* ? :        right-associative */
     BP_OR         = 3,   /* ||         left-associative  */
     BP_AND        = 4,   /* &&         left-associative  */
-    BP_EQUALITY   = 5,   /* == !=      left-associative  */
-    BP_COMPARISON = 6,   /* < <= > >=  left-associative  */
-    /* GAP: right side of comparison uses min_bp = COMPARISON+1 = 7.
-     * Pratt stops when lbp <= min_bp, so TERM must be > 7 or
-     * `i < size - 1` becomes `(i < size) - 1` (bool - int). */
-    BP_TERM       = 8,   /* + -        left-associative  */
-    BP_FACTOR     = 10,  /* * / %      left-associative  */
-    BP_UNARY      = 12,  /* - !        right-associative (prefix) */
-    BP_CALL       = 14,  /* foo(...)   left-associative  */
+    /* Each level must be at least previous+2 so that parsing the RHS of a
+     * left-associative op with min_bp = lbp+1 still allows the next-tighter
+     * operators to bind. Example bug this fixes:
+     *   a == b && c == d  →  ((a == b) && c) == d   when EQUALITY == AND+1
+     */
+    BP_EQUALITY   = 6,   /* == !=      left-associative  */
+    BP_COMPARISON = 8,   /* < <= > >=  left-associative  */
+    BP_TERM       = 10,  /* + -        left-associative  */
+    BP_FACTOR     = 12,  /* * / %      left-associative  */
+    BP_UNARY      = 14,  /* - !        right-associative (prefix) */
+    BP_CALL       = 16,  /* foo(...)   left-associative  */
 } BindingPower;
 
 /* Forward declaration — parse_expr and parse_prefix call each other
@@ -1258,6 +1260,27 @@ static TypeArgNode *parse_type_arg_list(Parser *p, int *out_count) {
  *
  * Precondition: 'fn' has already been consumed.
  */
+
+/* Map an operator token to the mangled method name used for overloads.
+ * Returns NULL if the operator is not overloadable. */
+static const char *operator_method_name(TokenType op)
+{
+    switch (op) {
+    case TOK_PLUS:    return "op_add";
+    case TOK_MINUS:   return "op_sub";
+    case TOK_STAR:    return "op_mul";
+    case TOK_SLASH:   return "op_div";
+    case TOK_PERCENT: return "op_mod";
+    case TOK_EQ:      return "op_eq";
+    case TOK_NEQ:     return "op_neq";
+    case TOK_LT:      return "op_lt";
+    case TOK_LTE:     return "op_lte";
+    case TOK_GT:      return "op_gt";
+    case TOK_GTE:     return "op_gte";
+    default:          return NULL;
+    }
+}
+
 static Stmt *parse_fn_decl(Parser *p, int line) {
     /* Function name */
     Token name = p->current;
@@ -1576,6 +1599,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             mn->is_constructor = true;
             mn->is_virtual     = false;
             mn->is_override    = false;
+            mn->is_operator    = false;
+            mn->operator_op    = 0;
             mn->annotations    = member_annotations;
             mn->next           = NULL;
             if (!cls->class_decl.methods) {
@@ -1589,7 +1614,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             continue;
         }
 
-        /* ── Method: function name(params): ReturnType { body } ────── */
+        /* ── Method: function name(...): T  /  function operator +(...): T ── */
         if (match(p, TOK_FN)) {
             if (is_final) {
                 if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
@@ -1602,7 +1627,76 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     p->had_error = true;
                 }
             }
-            Stmt *fn = parse_fn_decl(p, member_line);
+
+            Stmt *fn = NULL;
+            bool is_operator = false;
+            TokenType operator_op = TOK_EOF;
+
+            if (match(p, TOK_OPERATOR)) {
+                /* function operator +(Rhs other): Ret { ... } */
+                TokenType op = p->current.type;
+                const char *mname = operator_method_name(op);
+                if (!mname) {
+                    if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                        ParseError *e = &p->errors[p->error_count++];
+                        snprintf(e->message, sizeof(e->message),
+                                 "Operator '%s' cannot be overloaded",
+                                 token_type_name(op));
+                        e->line = p->current.line;
+                        e->col = p->current.col > 0 ? p->current.col : 1;
+                        e->end_col = e->col + 1;
+                        p->had_error = true;
+                    }
+                    advance(p);
+                    /* recover: try to parse as normal-ish */
+                } else {
+                    is_operator = true;
+                    operator_op = op;
+                    advance(p); /* consume the operator token */
+
+                    /* Reuse parameter / return / body parsing from parse_fn_decl
+                     * by synthesizing an IDENT token for the mangled name. */
+                    consume(p, TOK_LPAREN, "Expected '(' after operator");
+                    ParamNode *params = NULL, *params_tail = NULL;
+                    int param_count = 0;
+                    if (!check(p, TOK_RPAREN)) {
+                        do {
+                            Type param_type = parse_type(p);
+                            Token param_name = p->current;
+                            consume(p, TOK_IDENT, "Expected parameter name");
+                            ParamNode *pn = param_node(&p->arena, param_type,
+                                                       param_name.start, param_name.length, NULL);
+                            if (!params) params = params_tail = pn;
+                            else { params_tail->next = pn; params_tail = pn; }
+                            param_count++;
+                        } while (match(p, TOK_COMMA));
+                    }
+                    consume(p, TOK_RPAREN, "Expected ')' after operator parameters");
+                    consume(p, TOK_COLON, "Expected ':' after operator parameters");
+                    Type ret_type = parse_type(p);
+                    Stmt *body = parse_block(p);
+                    int mlen = (int)strlen(mname);
+                    char *name_copy = arena_alloc(&p->arena, mlen + 1);
+                    memcpy(name_copy, mname, (size_t)mlen + 1);
+                    fn = stmt_fn_decl(&p->arena, ret_type, name_copy, mlen,
+                                     params, param_count, body, member_line,
+                                     p->previous.col > 0 ? p->previous.col : 1);
+                    if (param_count != 1) {
+                        if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+                            ParseError *e = &p->errors[p->error_count++];
+                            snprintf(e->message, sizeof(e->message),
+                                     "Operator overload must take exactly one parameter");
+                            e->line = member_line;
+                            e->col = 1;
+                            e->end_col = 2;
+                            p->had_error = true;
+                        }
+                    }
+                }
+            }
+
+            if (!fn)
+                fn = parse_fn_decl(p, member_line);
 
             typedef struct ClassMethodNode CMNode;
             CMNode *mn         = arena_alloc(&p->arena, sizeof(CMNode));
@@ -1612,6 +1706,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             mn->is_constructor = false;
             mn->is_virtual     = is_virtual;
             mn->is_override    = is_override;
+            mn->is_operator    = is_operator;
+            mn->operator_op    = (int)operator_op;
             mn->annotations    = member_annotations;
             mn->next           = NULL;
             if (!cls->class_decl.methods) {

@@ -1194,34 +1194,42 @@ static void handle_completion(long long id, const char *params)
 			completion_add(&b, &count, &first, keywords[i], CIK_KEYWORD, "keyword");
 		}
 
-		/* Top-level (and any remaining) symbols from checker scopes */
+		/* Symbols visible at the cursor: globals + locals whose scope
+		 * still covers this line (from the checker's scoped snapshot). */
 		if (c)
 		{
-			for (int d = 0; d <= c->scope_depth; d++)
+			int cursor_line = (int)line + 1; /* LSP 0-based → 1-based */
+			for (int i = 0; i < c->scoped_count; i++)
 			{
-				Scope *scope = &c->scopes[d];
-				for (int i = 0; i < scope->count; i++)
+				const char *nm = c->scoped_syms[i].name;
+				int nlen = c->scoped_syms[i].length;
+				if (!nm || nlen <= 0)
+					continue;
+				if (c->scoped_syms[i].def_line > cursor_line)
+					continue;
+				if (c->scoped_syms[i].end_line < cursor_line)
+					continue;
+				if (!prefix_match(nm, nlen, prefix, plen))
+					continue;
+				char label[64];
+				int n = nlen < 63 ? nlen : 63;
+				memcpy(label, nm, (size_t)n);
+				label[n] = '\0';
+				int kind = CIK_VARIABLE;
+				const char *detail = NULL;
+				switch (c->scoped_syms[i].kind)
 				{
-					Symbol *s = &scope->symbols[i];
-					if (!prefix_match(s->name, s->length, prefix, plen))
-						continue;
-					char label[64];
-					int n = s->length < 63 ? s->length : 63;
-					memcpy(label, s->name, (size_t)n);
-					label[n] = '\0';
-					int kind = CIK_VARIABLE;
-					const char *detail = NULL;
-					switch (s->kind)
-					{
-					case SYM_FN:        kind = CIK_FUNCTION;  detail = "function"; break;
-					case SYM_CLASS:     kind = CIK_CLASS;     detail = "class"; break;
-					case SYM_ENUM:      kind = CIK_ENUM;      detail = "enum"; break;
-					case SYM_INTERFACE: kind = CIK_INTERFACE; detail = "interface"; break;
-					case SYM_EVENT:     kind = CIK_FUNCTION;  detail = "event"; break;
-					case SYM_VAR:       kind = CIK_VARIABLE;  detail = "variable"; break;
-					}
-					completion_add(&b, &count, &first, label, kind, detail);
+				case SYM_FN:        kind = CIK_FUNCTION;  detail = "function"; break;
+				case SYM_CLASS:     kind = CIK_CLASS;     detail = "class"; break;
+				case SYM_ENUM:      kind = CIK_ENUM;      detail = "enum"; break;
+				case SYM_INTERFACE: kind = CIK_INTERFACE; detail = "interface"; break;
+				case SYM_EVENT:     kind = CIK_FUNCTION;  detail = "event"; break;
+				case SYM_VAR:
+					kind = CIK_VARIABLE;
+					detail = (c->scoped_syms[i].depth > 0) ? "local" : "variable";
+					break;
 				}
+				completion_add(&b, &count, &first, label, kind, detail);
 			}
 		}
 	}

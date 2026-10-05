@@ -324,7 +324,15 @@ stdlib/             Standard library sources (packed + embedded)
   collections/      List, Dictionary, Stack, Queue
 build/              Intermediate build files (XARs, XDocs, object files)
 bin/                Compiled binaries
-test/               Language test suite
+test/               Language test suite, grouped by feature
+  language/         Core language behavior
+  collections/      Collections and enumeration
+  stdlib/           Standard library
+  errors/           Compiler and runtime errors
+  integration/      End-to-end tests
+  reflection/       Type and attribute reflection
+  performance/      Stress and performance tests
+  runtime/          VM capability tests
 xenoscript.vscode-xenoscript/  VS Code extension
 ```
 

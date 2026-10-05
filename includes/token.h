@@ -101,6 +101,7 @@ typedef enum {
     TOK_FINAL,        /* final     — immutable field      */
     TOK_VIRTUAL,      /* virtual   — overridable method   */
     TOK_OVERRIDE,     /* override  — overrides virtual    */
+    TOK_OPERATOR,     /* operator  — operator overload    */
     TOK_EVENT,        /* event     — event declaration    */
     TOK_INTERFACE,    /* interface — interface declaration */
     TOK_WHERE,        /* where     — generic type constraint */

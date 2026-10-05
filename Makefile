@@ -270,7 +270,7 @@ xeno_tests: $(BIN)/xenoc $(BIN)/xenovm
 
 .PHONY: xeno_speed_test
 xeno_speed_test: $(BIN)/xenoc $(BIN)/xenovm
-	@python3 source/tools/run_speed_test.py $(BIN)/xenoc $(BIN)/xenovm test/01_primitives.xeno 1000
+	@python3 source/tools/run_speed_test.py $(BIN)/xenoc $(BIN)/xenovm test/language/01_primitives.xeno 1000
 
 # ==========================================================
 # Clean — tolerate locked Windows binaries (WSL + VS Code LSP)

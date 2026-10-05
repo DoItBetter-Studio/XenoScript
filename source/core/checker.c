@@ -91,7 +91,17 @@ static void push_scope(Checker *c)
 static void pop_scope(Checker *c)
 {
 	if (c->scope_depth > 0)
+	{
+		int depth = c->scope_depth;
+		int end = c->last_src_line > 0 ? c->last_src_line : 1;
+		for (int i = 0; i < c->scoped_count; i++)
+		{
+			if (c->scoped_syms[i].depth == depth &&
+				c->scoped_syms[i].end_line == INT_MAX)
+				c->scoped_syms[i].end_line = end;
+		}
 		c->scope_depth--;
+	}
 }
 
 /*
@@ -119,6 +129,20 @@ static bool define_symbol(Checker *c, Symbol sym)
 		return false; /* Scope full */
 
 	scope->symbols[scope->count++] = sym;
+
+	/* Snapshot for LSP completion (survives pop_scope) */
+	if (c->scoped_count < 2048)
+	{
+		int i = c->scoped_count++;
+		c->scoped_syms[i].name = sym.name;
+		c->scoped_syms[i].length = sym.length;
+		c->scoped_syms[i].kind = sym.kind;
+		c->scoped_syms[i].type = sym.type;
+		c->scoped_syms[i].def_line = sym.def_line > 0 ? sym.def_line : 1;
+		c->scoped_syms[i].def_col = sym.def_col;
+		c->scoped_syms[i].end_line = INT_MAX;
+		c->scoped_syms[i].depth = c->scope_depth;
+	}
 	return true;
 }
 
@@ -683,6 +707,27 @@ static bool generic_base_name(const char *full_name, char *buf, int buf_size)
  * is_generic_type_name — returns true if the class_name looks like a
  * canonical generic instantiation (contains '<').
  */
+
+/* Mangled names for operator overloads — must match parser.c */
+static const char *operator_method_name(TokenType op)
+{
+	switch (op)
+	{
+	case TOK_PLUS:    return "op_add";
+	case TOK_MINUS:   return "op_sub";
+	case TOK_STAR:    return "op_mul";
+	case TOK_SLASH:   return "op_div";
+	case TOK_PERCENT: return "op_mod";
+	case TOK_EQ:      return "op_eq";
+	case TOK_NEQ:     return "op_neq";
+	case TOK_LT:      return "op_lt";
+	case TOK_LTE:     return "op_lte";
+	case TOK_GT:      return "op_gt";
+	case TOK_GTE:     return "op_gte";
+	default:          return NULL;
+	}
+}
+
 static bool is_generic_type_name(const char *name)
 {
 	return name && strchr(name, '<') != NULL;
@@ -1626,6 +1671,68 @@ static Type check_expr(Checker *c, Expr *expr)
 			return resolve(expr, left);
 
 		TokenType op = expr->binary.op;
+
+		/* ── Operator overloading: obj + x → obj.op_add(x) ─────────── */
+		if (left.kind == TYPE_OBJECT && left.class_name)
+		{
+			const char *mname = operator_method_name(op);
+			if (mname)
+			{
+				char base[64];
+				const char *cname = left.class_name;
+				if (is_generic_type_name(cname) && generic_base_name(cname, base, sizeof(base)))
+					cname = base;
+				Symbol *cls = lookup_symbol(c, cname, (int)strlen(cname));
+				bool found = false;
+				if (cls && cls->kind == SYM_CLASS && cls->class_decl)
+				{
+					typedef struct ClassMethodNode CMNode;
+					int mlen = (int)strlen(mname);
+					for (CMNode *m = cls->class_decl->class_decl.methods; m; m = m->next)
+					{
+						if (!m->fn || !m->is_operator)
+							continue;
+						if (m->fn->fn_decl.length == mlen &&
+							memcmp(m->fn->fn_decl.name, mname, (size_t)mlen) == 0)
+						{
+							found = true;
+							break;
+						}
+					}
+				}
+				/* Also search ClassDef methods by mangled name */
+				if (!found && cls && cls->kind == SYM_CLASS && cls->class_def)
+				{
+					ClassDef *def = (ClassDef *)cls->class_def;
+					int mlen = (int)strlen(mname);
+					for (int i = 0; i < def->method_count; i++)
+					{
+						if ((int)strlen(def->methods[i].name) == mlen &&
+							memcmp(def->methods[i].name, mname, (size_t)mlen) == 0)
+						{
+							found = true;
+							break;
+						}
+					}
+				}
+				if (found)
+				{
+					/* Rewrite binary → method call; re-enter check_expr */
+					Expr *recv = expr->binary.left;
+					Expr *arg = expr->binary.right;
+					ArgNode *an = arena_alloc(c->arena, sizeof(ArgNode));
+					an->expr = arg;
+					an->next = NULL;
+					expr->kind = EXPR_METHOD_CALL;
+					expr->method_call.object = recv;
+					expr->method_call.method_name = mname;
+					expr->method_call.method_name_len = (int)strlen(mname);
+					expr->method_call.args = an;
+					expr->method_call.arg_count = 1;
+					return check_expr(c, expr);
+				}
+			}
+		}
 
 		/* Arithmetic: + - * / % */
 		if (op == TOK_PLUS || op == TOK_MINUS ||
@@ -4793,6 +4900,9 @@ static void check_block(Checker *c, Stmt *block_stmt)
 
 static void check_stmt(Checker *c, Stmt *stmt)
 {
+	if (stmt->line > 0)
+		c->last_src_line = stmt->line;
+
 	switch (stmt->kind)
 	{
 
@@ -5834,19 +5944,21 @@ bool checker_check(Checker *c, Program *program)
 	{
 		Stmt *s = n->stmt;
 
-		if (s->kind == STMT_FN_DECL)
+		if (s->kind == STMT_FN_DECL && !c->allow_toplevel_fns)
 		{
-			type_error(c, s->line, s->col, (int)strlen(s->fn_decl.name), "Top-level functions are not allowed in XenoScript");
+			type_error(c, s->line, s->col, s->fn_decl.length,
+					   "Top-level functions are not allowed in XenoScript");
 		}
-		else if (s->kind == STMT_EVENT_DECL)
+		else if (s->kind == STMT_EVENT_DECL && !c->allow_toplevel_fns)
 		{
-			type_error(c, s->line, s->col, (int)strlen(s->event_decl.name), "Top-level events are not allowed in XenoScript");
+			type_error(c, s->line, s->col, s->event_decl.length,
+					   "Top-level events are not allowed in XenoScript");
 		}
 
 		if (s->kind == STMT_IMPORT)
 			continue; /* resolved before checker */
 
-		if (s->kind == STMT_FN_DECL)
+		if (s->kind == STMT_FN_DECL && c->allow_toplevel_fns)
 		{
 			Symbol sym = {0};
 			sym.kind = SYM_FN;
@@ -5898,8 +6010,25 @@ bool checker_check(Checker *c, Program *program)
 			sym_set_loc(&sym, c->source_file, s->line, s->col);
 
 			if (!define_symbol(c, sym))
-				type_error(c, s->line, s->col, s->fn_decl.length, "Function '%.*s' already declared",
-						   s->fn_decl.length, s->fn_decl.name);
+			{
+				/* Host pre-declare (print/assert) or prior definition.
+				 * Prefer attaching the AST so go-to-def/docs work; only
+				 * error on a true second source declaration. */
+				Symbol *existing = lookup_symbol(c, s->fn_decl.name, s->fn_decl.length);
+				if (existing && existing->kind == SYM_FN && !existing->fn_decl_node)
+				{
+					existing->fn_decl_node = s;
+					existing->def_file = (char *)c->source_file;
+					existing->def_line = s->line;
+					existing->def_col = s->col;
+				}
+				else
+				{
+					type_error(c, s->line, s->col, s->fn_decl.length,
+							   "Function '%.*s' already declared",
+							   s->fn_decl.length, s->fn_decl.name);
+				}
+			}
 		}
 		else if (s->kind == STMT_CLASS_DECL)
 		{
