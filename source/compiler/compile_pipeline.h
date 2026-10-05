@@ -362,8 +362,13 @@ static bool pipeline_load_sys_module(PipelineState *s, const char *name,
 
             if (!ok) return false;
 
-            if (s->sys_loaded_count < PIPELINE_MAX_SYS)
-                strncpy(s->sys_loaded[s->sys_loaded_count++], name, 63);
+            if (s->sys_loaded_count < PIPELINE_MAX_SYS) {
+                char *slot = s->sys_loaded[s->sys_loaded_count++];
+                size_t nlen = strlen(name);
+                if (nlen > 63) nlen = 63;
+                memcpy(slot, name, nlen);
+                slot[nlen] = '\0';
+            }
             return true;
         }
     }
@@ -390,8 +395,13 @@ static bool pipeline_load_sys_module(PipelineState *s, const char *name,
         }
         xar_archive_free(&ar);
 
-        if (s->sys_loaded_count < PIPELINE_MAX_SYS)
-            strncpy(s->sys_loaded[s->sys_loaded_count++], name, 63);
+        if (s->sys_loaded_count < PIPELINE_MAX_SYS) {
+            char *slot = s->sys_loaded[s->sys_loaded_count++];
+            size_t nlen = strlen(name);
+            if (nlen > 63) nlen = 63;
+            memcpy(slot, name, nlen);
+            slot[nlen] = '\0';
+        }
         return true;
     }
 
@@ -421,12 +431,30 @@ static char *pipeline_resolve_imports(PipelineState *s,
                                        Module *staging, bool *err) {
     const char *p = source;
     while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        /* Preserve line numbers: every newline we skip must appear in `out`
+         * so checker/LSP diagnostics stay aligned with the user buffer. */
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            if (*p == '\n') {
+                out = pipeline_buf_append(out, len, cap, "\n", 1);
+                if (!out) { *err = true; return out; }
+            }
+            p++;
+        }
         if (!*p) break;
-        if (p[0]=='/'&&p[1]=='/') { while (*p && *p!='\n') p++; continue; }
+        if (p[0]=='/'&&p[1]=='/') {
+            /* Line comment — skip text; trailing newline emitted above/next */
+            while (*p && *p!='\n') p++;
+            continue;
+        }
         if (p[0]=='/'&&p[1]=='*') {
             p += 2;
-            while (*p && !(p[0]=='*' && p[1]=='/')) p++;
+            while (*p && !(p[0]=='*' && p[1]=='/')) {
+                if (*p == '\n') {
+                    out = pipeline_buf_append(out, len, cap, "\n", 1);
+                    if (!out) { *err = true; return out; }
+                }
+                p++;
+            }
             if (*p) p += 2;
             continue;
         }
@@ -501,11 +529,10 @@ static char *pipeline_resolve_imports(PipelineState *s,
                 if (*err || !out) return out;
             }
         }
-        /* Emit a blank line in place of the consumed import statement so that
-         * checker line numbers stay aligned with user-source line numbers.
-         * This matters for LSP hover/definition/references accuracy. */
-        out = pipeline_buf_append(out, len, cap, "\n", 1);
-        if (!out) { *err = true; return out; }
+        /* Do not emit an extra placeholder here: the newline that terminates
+         * the import line is still at *p and the whitespace loop at the top
+         * of the next iteration will copy it into `out`. Emitting both caused
+         * every diagnostic after an import to shift down by one line. */
     }
     out = pipeline_buf_append(out, len, cap, p, strlen(p));
     out = pipeline_buf_append(out, len, cap, "\n", 1);

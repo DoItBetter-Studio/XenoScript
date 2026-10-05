@@ -1,0 +1,9 @@
+// Tests: unknown variable and unknown type name
+@Mod("error_unknown_ident", "1.0.0", "Test")
+class ErrorUnknownIdent {
+    public:
+        ErrorUnknownIdent() {
+            print(noSuchVar);
+            NoSuchType x = null;
+        }
+}

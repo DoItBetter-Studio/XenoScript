@@ -1,0 +1,16 @@
+// Tests: private field is not accessible outside the declaring class
+class Vault {
+    private:
+        int secret;
+    public:
+        Vault() { secret = 42; }
+}
+
+@Mod("error_private_access", "1.0.0", "Test")
+class ErrorPrivateAccess {
+    public:
+        ErrorPrivateAccess() {
+            Vault v = new Vault();
+            print(v.secret);
+        }
+}

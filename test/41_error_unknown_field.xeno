@@ -1,0 +1,16 @@
+// Tests: unknown field / method on a known class
+class Box {
+    public:
+        int value;
+        Box() { value = 1; }
+}
+
+@Mod("error_unknown_field", "1.0.0", "Test")
+class ErrorUnknownField {
+    public:
+        ErrorUnknownField() {
+            Box b = new Box();
+            print(b.nope);
+            b.missing();
+        }
+}

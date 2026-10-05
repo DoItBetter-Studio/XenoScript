@@ -1,0 +1,11 @@
+// Tests: wrong number of generic type arguments
+import <collections>;
+
+@Mod("error_generic_arity", "1.0.0", "Test")
+class ErrorGenericArity {
+    public:
+        ErrorGenericArity() {
+            List<int, string> bad = new List<int, string>();
+            print(bad.count());
+        }
+}

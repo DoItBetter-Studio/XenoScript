@@ -1,0 +1,16 @@
+// Tests: duplicate class declaration
+class Twin {
+    public:
+        Twin() {}
+}
+
+class Twin {
+    public:
+        Twin() {}
+}
+
+@Mod("error_duplicate_class", "1.0.0", "Test")
+class ErrorDuplicateClass {
+    public:
+        ErrorDuplicateClass() {}
+}

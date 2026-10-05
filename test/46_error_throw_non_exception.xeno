@@ -1,0 +1,8 @@
+// Tests: throw requires an Exception-derived object
+@Mod("error_throw_non_exception", "1.0.0", "Test")
+class ErrorThrowNonException {
+    public:
+        ErrorThrowNonException() {
+            throw 42;
+        }
+}

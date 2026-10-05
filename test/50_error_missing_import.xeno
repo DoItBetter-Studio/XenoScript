@@ -1,0 +1,10 @@
+// Tests: local import path that does not exist
+import "does_not_exist.xeno";
+
+@Mod("error_missing_import", "1.0.0", "Test")
+class ErrorMissingImport {
+    public:
+        ErrorMissingImport() {
+            print("unreachable");
+        }
+}

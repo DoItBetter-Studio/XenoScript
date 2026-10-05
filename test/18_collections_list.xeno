@@ -9,20 +9,22 @@ class CollectionsList {
             names.add("Bob");
             names.add("Carol");
             print(names.count());
-            print(names.get(0));
-            print(names.get(2));
+            print(names[0]);
+            print(names[2]);
             print(names.contains("Bob"));
             print(names.contains("Dave"));
             print(names.indexOf("Carol"));
+            names[1] = "Bobby";
+            print(names[1]);
             names.removeAt(1);
             print(names.count());
-            print(names.get(1));
+            print(names[1]);
 
             List<int> nums = new List<int>();
             nums.add(10);
             nums.add(20);
             nums.add(30);
-            print(nums.get(1));
+            print(nums[1]);
             print(nums.count());
         }
 }

@@ -88,6 +88,14 @@ static bool consume(Parser *p, TokenType type, const char *message) {
     return false;
 }
 
+static bool consume_member_name(Parser *p, const char *message) {
+    if (check(p, TOK_IDENT) || check(p, TOK_CLASS)) {
+        advance(p);
+        return true;
+    }
+    return consume(p, TOK_IDENT, message);
+}
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * ERROR RECOVERY — SYNCHRONIZATION
@@ -337,14 +345,18 @@ parse_base_type(Parser *p) {
 typedef enum {
     BP_NONE       = 0,
     BP_ASSIGN     = 1,   /* =          right-associative */
-    BP_OR         = 2,   /* ||         left-associative  */
-    BP_AND        = 3,   /* &&         left-associative  */
-    BP_EQUALITY   = 4,   /* == !=      left-associative  */
-    BP_COMPARISON = 5,   /* < <= > >=  left-associative  */
-    BP_TERM       = 7,   /* + -        left-associative  (gap ensures < right parses + - ) */
-    BP_FACTOR     = 9,   /* * / %      left-associative  */
-    BP_UNARY      = 11,  /* - !        right-associative (prefix) */
-    BP_CALL       = 13,  /* foo(...)   left-associative  */
+    BP_TERNARY    = 2,   /* ? :        right-associative */
+    BP_OR         = 3,   /* ||         left-associative  */
+    BP_AND        = 4,   /* &&         left-associative  */
+    BP_EQUALITY   = 5,   /* == !=      left-associative  */
+    BP_COMPARISON = 6,   /* < <= > >=  left-associative  */
+    /* GAP: right side of comparison uses min_bp = COMPARISON+1 = 7.
+     * Pratt stops when lbp <= min_bp, so TERM must be > 7 or
+     * `i < size - 1` becomes `(i < size) - 1` (bool - int). */
+    BP_TERM       = 8,   /* + -        left-associative  */
+    BP_FACTOR     = 10,  /* * / %      left-associative  */
+    BP_UNARY      = 12,  /* - !        right-associative (prefix) */
+    BP_CALL       = 14,  /* foo(...)   left-associative  */
 } BindingPower;
 
 /* Forward declaration — parse_expr and parse_prefix call each other
@@ -858,6 +870,7 @@ static int left_binding_power(TokenType type) {
         case TOK_ASSIGN: return BP_ASSIGN;
         case TOK_OR:     return BP_OR;
         case TOK_AND:    return BP_AND;
+        case TOK_QUESTION: return BP_TERNARY; /* cond ? then : else */
         case TOK_QUESTION_QUESTION: return BP_OR - 1; /* ?? just below ||  */
         case TOK_EQ:
         case TOK_NEQ:    return BP_EQUALITY;
@@ -940,7 +953,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
     /* Null-safe member access: obj?.field or obj?.method(args) */
     if (op.type == TOK_QUESTION_DOT) {
         Token member = p->current;
-        consume(p, TOK_IDENT, "Expected field or method name after '?.'");
+        consume_member_name(p, "Expected field or method name after '?.'");
 
         if (check(p, TOK_LPAREN)) {
             /* Null-safe method call: obj?.method(args) */
@@ -981,6 +994,14 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
     }
 
     /* Null coalescing: left ?? right */
+    if (op.type == TOK_QUESTION) {
+        /* Ternary: cond ? then : else  (cond is `left`, right-associative) */
+        Expr *then_e = parse_expr(p, BP_TERNARY);
+        consume(p, TOK_COLON, "Expected ':' in ternary expression");
+        Expr *else_e = parse_expr(p, BP_TERNARY); /* right-associative */
+        return expr_ternary(&p->arena, left, then_e, else_e, op.line, op.col);
+    }
+
     if (op.type == TOK_QUESTION_QUESTION) {
         Expr *right = parse_expr(p, lbp); /* right-associative: same bp */
         Expr *e = arena_alloc(&p->arena, sizeof(Expr));
@@ -995,7 +1016,7 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
     /* Member access: obj.field, obj.method(args), obj.field = value */
     if (op.type == TOK_DOT) {
         Token member = p->current;
-        consume(p, TOK_IDENT, "Expected field or method name after '.'");
+        consume_member_name(p, "Expected field or method name after '.'");
 
         if (check(p, TOK_LPAREN)) {
             /* Method call: obj.method(args) */
@@ -1307,7 +1328,7 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
                         ret_type,
                         name.start, name.length,
                         params, param_count,
-                        body, line, p->current.col);
+                        body, line, name.col > 0 ? name.col : 1);
     fn->fn_decl.type_params      = type_params;
     fn->fn_decl.type_param_count = type_param_count;
     return fn;
@@ -1387,7 +1408,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
     Stmt *cls = stmt_class_decl(&p->arena,
                                 class_name.start, class_name.length,
                                 parent_name, parent_len,
-                                line, p->current.col);
+                                line, class_name.col > 0 ? class_name.col : 1);
     /* Stash the raw name list; checker_check() will classify each as
      * parent class or interface and validate accordingly. */
     cls->class_decl.interfaces      = ifaces;
@@ -1424,6 +1445,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
         AnnotationNode *member_annotations     = NULL;
         AnnotationNode *member_annotations_tail = NULL;
         while (check(p, TOK_AT)) {
+            Token at_tok = p->current; /* '@' */
             advance(p);  /* consume '@' */
             Token ann_name = p->current;
             consume(p, TOK_IDENT, "Expected annotation name after '@'");
@@ -1431,6 +1453,12 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             AnnotationNode *ann = arena_alloc(&p->arena, sizeof(AnnotationNode));
             ann->name     = ann_name.start;
             ann->name_len = ann_name.length;
+            ann->line     = at_tok.line;
+            ann->col      = at_tok.col > 0 ? at_tok.col : 1;
+            /* span covers '@' + name for now; extended after optional args */
+            ann->span_len = (ann_name.col + ann_name.length) - ann->col;
+            if (ann->span_len < 1)
+                ann->span_len = 1 + ann_name.length;
             ann->args     = NULL;
             ann->next     = NULL;
 
@@ -1449,6 +1477,13 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     if (!match(p, TOK_COMMA)) break;
                 }
                 consume(p, TOK_RPAREN, "Expected ')' after annotation arguments");
+                /* Full underline: from '@' through ')' */
+                {
+                    int end_col = p->previous.col + p->previous.length;
+                    int span = end_col - ann->col;
+                    if (span > ann->span_len)
+                        ann->span_len = span;
+                }
             }
 
             if (!member_annotations) { member_annotations = member_annotations_tail = ann; }
@@ -1530,7 +1565,8 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             Stmt *body = parse_block(p);
             Stmt *fn   = stmt_fn_decl(&p->arena, type_void(),
                                       class_name.start, class_name.length,
-                                      params, param_count, body, member_line, p->current.col);
+                                      params, param_count, body, member_line,
+                                      class_name.col > 0 ? class_name.col : 1);
 
             typedef struct ClassMethodNode CMNode;
             CMNode *mn         = arena_alloc(&p->arena, sizeof(CMNode));
@@ -1691,6 +1727,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
             en->params      = params;
             en->param_count = param_count;
             en->access      = current_access;
+            en->annotations = member_annotations;
             en->next        = NULL;
             if (!cls->class_decl.events) {
                 cls->class_decl.events = en;
@@ -1738,7 +1775,7 @@ static Stmt *parse_interface_decl(Parser *p, int line) {
 
     Stmt *iface = stmt_interface_decl(&p->arena,
                                       iface_name.start, iface_name.length,
-                                      line, p->current.col);
+                                      line, iface_name.col > 0 ? iface_name.col : 1);
 
     /* Optional generic type parameter list: interface IContainer<T> { } */
     if (check(p, TOK_LT)) {
@@ -1762,8 +1799,27 @@ static Stmt *parse_interface_decl(Parser *p, int line) {
     IMNode *methods_tail = NULL;
 
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+        /* Interfaces are implicitly public (like C# / Java). Access labels
+         * are not part of the language here — reject them and advance so we
+         * never spin forever on the same token (was a SIGSEGV via OOM). */
+        if (p->current.type == TOK_PUBLIC ||
+            p->current.type == TOK_PRIVATE ||
+            p->current.type == TOK_PROTECTED) {
+            record_error_at(p, p->current, true,
+                            "Access labels are not allowed in interfaces "
+                            "(interface members are always public)");
+            advance(p);
+            if (check(p, TOK_COLON))
+                advance(p);
+            continue;
+        }
+
         int sig_line = p->current.line;
-        consume(p, TOK_FN, "Expected 'function' in interface body");
+        if (!consume(p, TOK_FN, "Expected 'function' in interface body")) {
+            /* Avoid infinite loop on unexpected tokens */
+            advance(p);
+            continue;
+        }
 
         Token mname = p->current;
         consume(p, TOK_IDENT, "Expected method name");
@@ -2095,6 +2151,7 @@ static Stmt *parse_stmt(Parser *p) {
         AnnotationNode *annotations_tail = NULL;
 
         while (check(p, TOK_AT)) {
+            Token at_tok = p->current; /* '@' */
             advance(p);  /* consume '@' */
             Token ann_name = p->current;
             consume(p, TOK_IDENT, "Expected annotation name after '@'");
@@ -2102,6 +2159,11 @@ static Stmt *parse_stmt(Parser *p) {
             AnnotationNode *ann = arena_alloc(&p->arena, sizeof(AnnotationNode));
             ann->name      = ann_name.start;
             ann->name_len  = ann_name.length;
+            ann->line      = at_tok.line;
+            ann->col       = at_tok.col > 0 ? at_tok.col : 1;
+            ann->span_len  = (ann_name.col + ann_name.length) - ann->col;
+            if (ann->span_len < 1)
+                ann->span_len = 1 + ann_name.length;
             ann->args      = NULL;
             ann->next      = NULL;
 
@@ -2143,6 +2205,13 @@ static Stmt *parse_stmt(Parser *p) {
                     if (!match(p, TOK_COMMA)) break;
                 }
                 consume(p, TOK_RPAREN, "Expected ')' after annotation arguments");
+                /* Full underline: from '@' through ')' */
+                {
+                    int end_col = p->previous.col + p->previous.length;
+                    int span = end_col - ann->col;
+                    if (span > ann->span_len)
+                        ann->span_len = span;
+                }
             }
 
             if (!annotations) { annotations = annotations_tail = ann; }
@@ -2160,7 +2229,7 @@ static Stmt *parse_stmt(Parser *p) {
             Token enum_name = p->current;
             consume(p, TOK_IDENT, "Expected enum name after 'enum'");
             consume(p, TOK_LBRACE, "Expected '{' after enum name");
-            Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, p->current.col);
+            Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, enum_name.col > 0 ? enum_name.col : 1);
             s->enum_decl.annotations = annotations;
 
             typedef struct EnumMemberNode EMNode;
@@ -2225,7 +2294,7 @@ static Stmt *parse_stmt(Parser *p) {
         consume(p, TOK_IDENT, "Expected enum name after 'enum'");
         consume(p, TOK_LBRACE, "Expected '{' after enum name");
 
-        Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, p->current.col);
+        Stmt *s = stmt_enum_decl(&p->arena, enum_name.start, enum_name.length, line, enum_name.col > 0 ? enum_name.col : 1);
 
         typedef struct EnumMemberNode EMNode;
         int next_value = 0;

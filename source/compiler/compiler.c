@@ -69,6 +69,16 @@ void module_init(Module *m)
 
 static void attr_arg_free(AttrArg *a); /* forward declaration */
 
+static void attribute_instances_free(AttributeInstance *attrs, int count)
+{
+	if (!attrs)
+		return;
+	for (int ai = 0; ai < count; ai++)
+		for (int ki = 0; ki < attrs[ai].arg_count; ki++)
+			attr_arg_free(&attrs[ai].args[ki]);
+	free(attrs);
+}
+
 void module_free(Module *m)
 {
 	for (int i = 0; i < m->count; i++)
@@ -85,17 +95,14 @@ void module_free(Module *m)
 		for (int mi = 0; mi < cls->method_count; mi++)
 		{
 			MethodDef *md = &cls->methods[mi];
-			if (md->attributes)
-			{
-				for (int ai = 0; ai < md->attribute_count; ai++)
-				{
-					AttributeInstance *inst = &md->attributes[ai];
-					for (int ki = 0; ki < inst->arg_count; ki++)
-						attr_arg_free(&inst->args[ki]);
-				}
-				free(md->attributes);
-				md->attributes = NULL;
-			}
+			attribute_instances_free(md->attributes, md->attribute_count);
+			md->attributes = NULL;
+		}
+		for (int ei = 0; ei < cls->event_count; ei++)
+		{
+			EventDef *event = &cls->events[ei];
+			attribute_instances_free(event->attributes, event->attribute_count);
+			event->attributes = NULL;
 		}
 		/* Free class-level AttrArg strings */
 		for (int ai = 0; ai < cls->attribute_count; ai++)
@@ -431,6 +438,19 @@ static void chunk_remap_indices(Chunk *chunk,
 			pc += 3;
 			break;
 
+		/* ── OP_CALL_STATIC: [u8 name_len][name][u8 slot][u8 argc] ── */
+		case OP_CALL_STATIC:
+		{
+			if (pc < n)
+			{
+				uint8_t nlen = code[pc];
+				pc += 1 + nlen + 2; /* name_len + name + slot + argc */
+			}
+			else
+				pc += 1;
+			break;
+		}
+
 		/* ── OP_CALL_SUPER: [uint16 parent_class_idx][uint8 argc]
 		 *   parent_class_idx indexes module->classes[], not chunks.
 		 *   Remap via class_remap. ─────────────────────────────────── */
@@ -450,30 +470,26 @@ static void chunk_remap_indices(Chunk *chunk,
 			break;
 		}
 
-		/* ── OP_NEW: uint16 class_idx + uint8 argc + type-arg bytes ─ */
+		/* ── OP_NEW: [u8 name_len][name][u8 argc][u8 tac][tac kinds]
+		 *   Class resolved by name at runtime — no class_idx to remap. ─ */
 		case OP_NEW:
 		{
-			if (pc + 1 >= n)
-			{
-				pc += 3;
-				break;
-			}
-			int old_ci = (code[pc] << 8) | code[pc + 1];
-			if (old_ci >= 0 && old_ci < class_remap_len && class_remap[old_ci] >= 0)
-			{
-				int new_ci = class_remap[old_ci];
-				code[pc] = (uint8_t)(new_ci >> 8);
-				code[pc + 1] = (uint8_t)(new_ci & 0xFF);
-			}
-			pc += 3; /* skip class_idx(2) + argc(1) */
-			/* consume tac + tac type-arg bytes */
 			if (pc < n)
 			{
-				uint8_t tac = code[pc++];
-				if (tac > 16)
-					tac = 16;
-				pc += tac;
+				uint8_t nlen = code[pc];
+				pc += 1 + nlen; /* name_len + name */
+				if (pc < n)
+					pc += 1; /* argc */
+				if (pc < n)
+				{
+					uint8_t tac = code[pc++];
+					if (tac > 16)
+						tac = 16;
+					pc += tac;
+				}
 			}
+			else
+				pc += 1;
 			break;
 		}
 
@@ -521,6 +537,10 @@ static void chunk_remap_indices(Chunk *chunk,
 		case OP_SET_FIELD:
 		case OP_NEW_ARRAY:
 		case OP_TYPE_FIELD:
+		case OP_TYPE_NAMES:
+		case OP_FIELD_PROP:
+		case OP_METHOD_PROP:
+		case OP_PARAM_PROP:
 			pc += 1;
 			break;
 
@@ -553,10 +573,11 @@ static void chunk_remap_indices(Chunk *chunk,
 		/* ── OP_TYPEOF: variable length ──────────────────────────── */
 		case OP_TYPEOF:
 		{
-			if (pc + 1 < n)
+			/* [tag][flags][name_len][name_bytes...] */
+			if (pc + 2 < n)
 			{
-				uint8_t nlen = code[pc + 1];
-				pc += 2 + nlen;
+				uint8_t nlen = code[pc + 2];
+				pc += 3 + nlen;
 			}
 			else
 			{
@@ -678,6 +699,9 @@ bool module_merge(Module *dst, const Module *src)
 			ClassDef *ed = &dst->classes[existing];
 			if (ed->method_count == 0 && sc->method_count > 0)
 			{
+				for (int j = 0; j < ed->event_count; j++)
+					attribute_instances_free(ed->events[j].attributes,
+											 ed->events[j].attribute_count);
 				/* Drop any leftover attr heap on the hollow shell */
 				for (int ai = 0; ai < ed->attribute_count; ai++)
 				{
@@ -688,6 +712,8 @@ bool module_merge(Module *dst, const Module *src)
 				*ed = *sc;
 				for (int j = 0; j < ed->method_count; j++)
 					ed->methods[j].attributes = NULL;
+				for (int j = 0; j < ed->event_count; j++)
+					ed->events[j].attributes = NULL;
 				if (sc->is_enum)
 				{
 					for (int j = 0; j < sc->enum_member_count; j++)
@@ -713,6 +739,15 @@ bool module_merge(Module *dst, const Module *src)
 							return false;
 					}
 				}
+				for (int j = 0; j < ed->event_count; j++)
+				{
+					const EventDef *se = &sc->events[j];
+					EventDef *de = &ed->events[j];
+					de->attributes = attribute_instances_deep_copy(
+						se->attributes, se->attribute_count);
+					if (se->attribute_count > 0 && !de->attributes)
+						return false;
+				}
 				for (int j = 0; j < ed->attribute_count; j++)
 				{
 					AttributeInstance *di = &ed->attributes[j];
@@ -737,6 +772,8 @@ bool module_merge(Module *dst, const Module *src)
 
 		for (int j = 0; j < dc->method_count; j++)
 			dc->methods[j].attributes = NULL;
+		for (int j = 0; j < dc->event_count; j++)
+			dc->events[j].attributes = NULL;
 
 		if (sc->is_enum)
 		{
@@ -764,6 +801,16 @@ bool module_merge(Module *dst, const Module *src)
 				if (!dm->attributes)
 					return false;
 			}
+		}
+		/* Deep-copy event annotations. */
+		for (int j = 0; j < dc->event_count; j++)
+		{
+			const EventDef *se = &sc->events[j];
+			EventDef *de = &dc->events[j];
+			de->attributes = attribute_instances_deep_copy(
+				se->attributes, se->attribute_count);
+			if (se->attribute_count > 0 && !de->attributes)
+				return false;
 		}
 		/* Deep-copy class-level attribute arg strings */
 		for (int j = 0; j < dc->attribute_count; j++)
@@ -1000,15 +1047,19 @@ void module_strip(Module *module,
 	}
 	module->count = compact_fn;
 
-	/* ── Step 6: drop stripped classes entirely (compact) ────────────────
-	 * Stdlib / dep ClassDefs are not shipped. Bytecode still names them by
-	 * the absolute indices assigned at compile time; the VM re-creates that
-	 * prefix by loading stdlib (and deps) before merging this module. */
+	/* ── Step 6: hollow out stripped classes (keep indices) ─────────────
+	 * Class slots stay at their compile-time indices so OP_NEW / LOAD_STATIC /
+	 * CALL_SUPER keep working. method_count is cleared so module_merge can
+	 * detect the shell and replace it with the real ClassDef from stdlib/deps.
+	 * Field layout / name / parent_index are retained for reflection & layout. */
+	int hollowed = 0;
 	for (int i = 0; i < module->class_count; i++)
 	{
 		if (!strip_cls[i])
 			continue;
 		ClassDef *dc = &module->classes[i];
+
+		/* Free method attributes */
 		for (int mi = 0; mi < dc->method_count; mi++)
 		{
 			MethodDef *md = &dc->methods[mi];
@@ -1024,7 +1075,16 @@ void module_strip(Module *module,
 				md->attributes = NULL;
 				md->attribute_count = 0;
 			}
+			md->fn_index = -1;
 		}
+		for (int ei = 0; ei < dc->event_count; ei++)
+		{
+			EventDef *event = &dc->events[ei];
+			attribute_instances_free(event->attributes, event->attribute_count);
+			event->attributes = NULL;
+			event->attribute_count = 0;
+		}
+		/* Free class-level attributes */
 		for (int ai = 0; ai < dc->attribute_count; ai++)
 		{
 			AttributeInstance *inst = &dc->attributes[ai];
@@ -1032,6 +1092,9 @@ void module_strip(Module *module,
 				attr_arg_free(&inst->args[ki]);
 			inst->arg_count = 0;
 		}
+		dc->attribute_count = 0;
+
+		/* Drop enum member name heap (names only; values stay if needed) */
 		if (dc->is_enum)
 		{
 			for (int j = 0; j < dc->enum_member_count; j++)
@@ -1041,34 +1104,12 @@ void module_strip(Module *module,
 			}
 			dc->enum_member_count = 0;
 		}
-	}
 
-	int stripped_cl = 0;
-	for (int i = 0; i < module->class_count; i++)
-		if (strip_cls[i])
-			stripped_cl++;
-
-	int compact_cl = 0;
-	for (int i = 0; i < module->class_count; i++)
-	{
-		if (strip_cls[i])
-			continue;
-		if (compact_cl != i)
-			module->classes[compact_cl] = module->classes[i];
-		compact_cl++;
-	}
-	/* Zero leftover slots so we don't serialize stale names */
-	for (int i = compact_cl; i < module->class_count; i++)
-		memset(&module->classes[i], 0, sizeof(ClassDef));
-	module->class_count = compact_cl;
-
-	if (stripped_cl > 0)
-	{
-		fprintf(stderr,
-				"xenoc: stripped %d external class(es); %d user class(es) remain\n",
-				stripped_cl, compact_cl);
-		for (int i = 0; i < compact_cl; i++)
-			fprintf(stderr, "xenoc:   keep class '%s'\n", module->classes[i].name);
+		/* Hollow: clear method table so merge replaces this shell */
+		dc->method_count = 0;
+		dc->constructor_index = -1;
+		/* Keep: name, fields, field_count, parent_index, interfaces, type params */
+		hollowed++;
 	}
 
 	free(fn_remap);
@@ -1076,6 +1117,7 @@ void module_strip(Module *module,
 	free(strip_chunk);
 	free(strip_cls);
 }
+
 
 void module_disassemble(const Module *m)
 {
@@ -1604,26 +1646,6 @@ static int find_method_slot(Compiler *c, const char *class_name,
 	return -1;
 }
 
-/* Returns the absolute chunk fn_index for a named method.  Used only for
- * OP_CALL (static method calls with no receiver object) where the class_def
- * is not available at runtime to resolve slots.
- */
-static int find_method_fn_index(Compiler *c, const char *class_name,
-								const char *method_name, int method_len)
-{
-	int ci = module_find_class(c->module, class_name);
-	if (ci < 0)
-		return -1;
-	ClassDef *cls = &c->module->classes[ci];
-	for (int i = 0; i < cls->method_count; i++)
-	{
-		if ((int)strlen(cls->methods[i].name) == method_len &&
-			memcmp(cls->methods[i].name, method_name, method_len) == 0)
-			return cls->methods[i].fn_index;
-	}
-	return -1;
-}
-
 /* ─────────────────────────────────────────────────────────────────────────────
  * EXPRESSION COMPILER
  *
@@ -1848,6 +1870,12 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		}
 		emit_op(c, OP_TYPEOF, line);
 		emit_byte(c, tag, line);
+		{
+			uint8_t flags = 0;
+			if (expr->type_of.operand->resolved_type.is_nullable)
+				flags |= 1;
+			emit_byte(c, flags, line);
+		}
 		/* Emit name inline: [len][bytes...] len=0 means use built-in */
 		if (name_idx != 0xFFFF)
 		{
@@ -1877,6 +1905,27 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		emit_op(c, OP_NULL_ASSERT, line);
 		emit_u16(c, (uint16_t)line, line);
 		break;
+
+	case EXPR_TERNARY:
+	{
+		/* cond ? then : else
+		 *   <cond>
+		 *   JUMP_IF_FALSE else
+		 *   <then>
+		 *   JUMP end
+		 * else:
+		 *   <else>
+		 * end:
+		 */
+		compile_expr(c, expr->ternary.cond);
+		int else_jmp = emit_jump(c, OP_JUMP_IF_FALSE, line);
+		compile_expr(c, expr->ternary.then_e);
+		int end_jmp = emit_jump(c, OP_JUMP, line);
+		patch_jump(c, else_jmp);
+		compile_expr(c, expr->ternary.else_e);
+		patch_jump(c, end_jmp);
+		break;
+	}
 
 	case EXPR_NULL_COALESCE:
 	{
@@ -2823,9 +2872,16 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		/* Emit any missing default constructor args BEFORE the opcode */
 		int ctor_argc = emit_default_args(c, expr->new_expr.resolved_params,
 										  expr->new_expr.arg_count, line);
+		/* Emit class NAME (not index) so OP_NEW survives module_strip_stdlib. */
+		int nlen = (int)strlen(class_name_buf);
+		if (nlen > 255)
+			nlen = 255;
 		emit_op(c, OP_NEW, line);
-		emit_u16(c, (uint16_t)ci, line);
+		emit_byte(c, (uint8_t)nlen, line);
+		for (int i = 0; i < nlen; i++)
+			emit_byte(c, (uint8_t)class_name_buf[i], line);
 		emit_byte(c, (uint8_t)ctor_argc, line);
+		(void)ci;
 		/* Emit concrete type arg kinds so the constructor frame can tag
 		 * generic arrays (new T[n]) with the right elem_kind at runtime.
 		 * Format: [uint8_t type_arg_count][uint8_t kind0][uint8_t kind1]... */
@@ -2940,16 +2996,51 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		/* Push arguments */
 		for (ArgNode *arg = expr->static_call.args; arg; arg = arg->next)
 			compile_expr(c, arg->expr);
-		/* Find the fn_index for static (no-receiver) call */
-		int fn_idx = find_method_fn_index(c, cname, mname, mlen);
-		if (fn_idx < 0)
+
+		/* Resolve method slot on the class; emit class NAME (not index) so
+		 * the call survives module_strip_stdlib and does not depend on
+		 * compile-time vs runtime class ordering. */
+		int slot = find_method_slot(c, cname, mname, mlen);
+		if (slot < 0)
+		{
+			/* Also try staging module for stdlib classes */
+			if (c->staging)
+			{
+				int sci = module_find_class(c->staging, cname);
+				if (sci >= 0)
+				{
+					const ClassDef *scls = &c->staging->classes[sci];
+					for (int i = 0; i < scls->method_count; i++)
+					{
+						if ((int)strlen(scls->methods[i].name) == mlen &&
+							memcmp(scls->methods[i].name, mname, mlen) == 0)
+						{
+							slot = i;
+							break;
+						}
+					}
+				}
+			}
+		}
+		if (slot < 0)
 		{
 			compile_error(c, line, "Class '%s' has no static method '%.*s'",
 						  cname, mlen, mname);
 			break;
 		}
-		emit_op(c, OP_CALL, line);
-		emit_u16(c, (uint16_t)fn_idx, line);
+		if (slot > 255)
+		{
+			compile_error(c, line, "Method slot out of range for static call");
+			break;
+		}
+		int nlen = (int)strlen(cname);
+		if (nlen > 255)
+			nlen = 255;
+		emit_op(c, OP_CALL_STATIC, line);
+		emit_byte(c, (uint8_t)nlen, line);
+		for (int i = 0; i < nlen; i++)
+			emit_byte(c, (uint8_t)cname[i], line);
+		emit_byte(c, (uint8_t)slot, line);
 		emit_byte(c, (uint8_t)expr->static_call.arg_count, line);
 		break;
 	}
@@ -2996,13 +3087,13 @@ static void compile_expr(Compiler *c, const Expr *expr)
 	/* ── obj.field (read) ───────────────────────────────────────────── */
 	case EXPR_FIELD_GET:
 	{
-		/* Type object field access: typeof(x).name / .isArray / etc */
-		if (expr->field_get.object->resolved_type.kind == TYPE_CLASS_REF &&
-			strncmp(expr->field_get.object->resolved_type.class_name, "Type", 4) == 0 &&
-			expr->field_get.object->resolved_type.class_name[4] == '\0')
+		/* Type object field access: typeof(x).name / .base / etc */
+		if ((expr->field_get.object->resolved_type.kind == TYPE_OBJECT ||
+			 expr->field_get.object->resolved_type.kind == TYPE_CLASS_REF) &&
+			expr->field_get.object->resolved_type.class_name &&
+			strcmp(expr->field_get.object->resolved_type.class_name, "Type") == 0)
 		{
 			compile_expr(c, expr->field_get.object);
-			/* Map field name to field_id byte */
 			const char *fn = expr->field_get.field_name;
 			int flen = expr->field_get.field_name_len;
 			uint8_t fid = 0xFF;
@@ -3016,6 +3107,14 @@ static void compile_expr(Compiler *c, const Expr *expr)
 				fid = 3;
 			else if (flen == 7 && strncmp(fn, "isClass", 7) == 0)
 				fid = 4;
+			else if (flen == 4 && strncmp(fn, "kind", 4) == 0)
+				fid = 5;
+			else if (flen == 4 && strncmp(fn, "base", 4) == 0)
+				fid = 6;
+			else if (flen == 11 && strncmp(fn, "elementType", 11) == 0)
+				fid = 7;
+			else if (flen == 10 && strncmp(fn, "isNullable", 10) == 0)
+				fid = 8;
 			else
 			{
 				compile_error(c, line, "Type has no field '%.*s'", flen, fn);
@@ -3023,6 +3122,98 @@ static void compile_expr(Compiler *c, const Expr *expr)
 			}
 			emit_op(c, OP_TYPE_FIELD, line);
 			emit_byte(c, fid, line);
+			break;
+		}
+
+		/* Field / Method / Parameter property access */
+		if (expr->field_get.object->resolved_type.kind == TYPE_OBJECT &&
+			expr->field_get.object->resolved_type.class_name)
+		{
+			const char *cn = expr->field_get.object->resolved_type.class_name;
+			const char *fn = expr->field_get.field_name;
+			int flen = expr->field_get.field_name_len;
+			if (strcmp(cn, "Field") == 0)
+			{
+				compile_expr(c, expr->field_get.object);
+				uint8_t id = 0xFF;
+				if (flen == 4 && strncmp(fn, "name", 4) == 0) id = 0;
+				else if (flen == 4 && strncmp(fn, "type", 4) == 0) id = 1;
+				else if (flen == 8 && strncmp(fn, "isStatic", 8) == 0) id = 2;
+				else if (flen == 7 && strncmp(fn, "isFinal", 7) == 0) id = 3;
+				else if (flen == 10 && strncmp(fn, "isNullable", 10) == 0) id = 4;
+				if (id != 0xFF)
+				{
+					emit_op(c, OP_FIELD_PROP, line);
+					emit_byte(c, id, line);
+					break;
+				}
+			}
+			if (strcmp(cn, "Method") == 0)
+			{
+				compile_expr(c, expr->field_get.object);
+				uint8_t id = 0xFF;
+				if (flen == 4 && strncmp(fn, "name", 4) == 0) id = 0;
+				else if (flen == 10 && strncmp(fn, "returnType", 10) == 0) id = 1;
+				else if (flen == 8 && strncmp(fn, "isStatic", 8) == 0) id = 2;
+				else if (flen == 9 && strncmp(fn, "isVirtual", 9) == 0) id = 3;
+				else if (flen == 10 && strncmp(fn, "paramCount", 10) == 0) id = 4;
+				if (id != 0xFF)
+				{
+					emit_op(c, OP_METHOD_PROP, line);
+					emit_byte(c, id, line);
+					break;
+				}
+			}
+			if (strcmp(cn, "Parameter") == 0)
+			{
+				compile_expr(c, expr->field_get.object);
+				uint8_t id = 0xFF;
+				if (flen == 4 && strncmp(fn, "name", 4) == 0) id = 0;
+				else if (flen == 4 && strncmp(fn, "type", 4) == 0) id = 1;
+				else if (flen == 10 && strncmp(fn, "isNullable", 10) == 0) id = 2;
+				else if (flen == 5 && strncmp(fn, "index", 5) == 0) id = 3;
+				if (id != 0xFF)
+				{
+					emit_op(c, OP_PARAM_PROP, line);
+					emit_byte(c, id, line);
+					break;
+				}
+			}
+		}
+
+		/* expr.class — sugar for typeof(expr) */
+		if (expr->field_get.field_name_len == 5 &&
+			strncmp(expr->field_get.field_name, "class", 5) == 0)
+		{
+			/* Reuse typeof emission via a temporary path: compile operand + OP_TYPEOF */
+			Type rt = expr->field_get.object->resolved_type;
+			if (rt.kind == TYPE_CLASS_REF)
+				emit_op(c, OP_PUSH_NULL, line);
+			else
+				compile_expr(c, expr->field_get.object);
+			uint8_t tag = (uint8_t)rt.kind;
+			emit_op(c, OP_TYPEOF, line);
+			emit_byte(c, tag, line);
+			uint8_t flags = rt.is_nullable ? 1 : 0;
+			emit_byte(c, flags, line);
+			if ((rt.kind == TYPE_OBJECT || rt.kind == TYPE_CLASS_REF) && rt.class_name)
+			{
+				uint8_t nlen = (uint8_t)strlen(rt.class_name);
+				emit_byte(c, nlen, line);
+				for (uint8_t ni = 0; ni < nlen; ni++)
+					emit_byte(c, (uint8_t)rt.class_name[ni], line);
+			}
+			else if (rt.kind == TYPE_ENUM && rt.enum_name)
+			{
+				uint8_t nlen = (uint8_t)strlen(rt.enum_name);
+				emit_byte(c, nlen, line);
+				for (uint8_t ni = 0; ni < nlen; ni++)
+					emit_byte(c, (uint8_t)rt.enum_name[ni], line);
+			}
+			else
+			{
+				emit_byte(c, 0, line);
+			}
 			break;
 		}
 
@@ -3094,7 +3285,7 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		/* ── Type object attribute reflection methods ───────────────────── */
 		{
 			Type obj_rt = expr->method_call.object->resolved_type;
-			if (obj_rt.kind == TYPE_CLASS_REF &&
+			if ( (obj_rt.kind == TYPE_OBJECT || obj_rt.kind == TYPE_CLASS_REF) &&
 				obj_rt.class_name &&
 				strcmp(obj_rt.class_name, "Type") == 0)
 			{
@@ -3117,6 +3308,68 @@ static void compile_expr(Compiler *c, const Expr *expr)
 					emit_op(c, OP_TYPE_GET_ATTR_ARG, line);
 					break;
 				}
+				if (mlen == 16 && memcmp(mname, "isAssignableFrom", 16) == 0)
+				{
+					/* ( other Type, self Type -- bool ) */
+					compile_expr(c, expr->method_call.args->expr);
+					compile_expr(c, expr->method_call.object);
+					emit_op(c, OP_TYPE_IS_ASSIGNABLE, line);
+					break;
+				}
+				if ((mlen == 10 && memcmp(mname, "interfaces", 10) == 0) ||
+					(mlen == 6 && memcmp(mname, "fields", 6) == 0) ||
+					(mlen == 7 && memcmp(mname, "methods", 7) == 0) ||
+					(mlen == 11 && memcmp(mname, "enumMembers", 11) == 0))
+				{
+					compile_expr(c, expr->method_call.object);
+					uint8_t which = 0;
+					if (mlen == 6)
+						which = 1; /* fields */
+					else if (mlen == 7)
+						which = 2; /* methods */
+					else if (mlen == 11)
+						which = 3; /* enumMembers */
+					emit_op(c, OP_TYPE_NAMES, line);
+					emit_byte(c, which, line);
+					break;
+				}
+				if (mlen == 10 && memcmp(mname, "isInstance", 10) == 0)
+				{
+					compile_expr(c, expr->method_call.args->expr);
+					compile_expr(c, expr->method_call.object);
+					emit_op(c, OP_TYPE_IS_INSTANCE, line);
+					break;
+				}
+				if (mlen == 8 && memcmp(mname, "getField", 8) == 0)
+				{
+					compile_expr(c, expr->method_call.object);
+					compile_expr(c, expr->method_call.args->expr);
+					emit_op(c, OP_TYPE_GET_FIELD, line);
+					break;
+				}
+				if (mlen == 9 && memcmp(mname, "getMethod", 9) == 0)
+				{
+					compile_expr(c, expr->method_call.object);
+					compile_expr(c, expr->method_call.args->expr);
+					emit_op(c, OP_TYPE_GET_METHOD, line);
+					break;
+				}
+			}
+		}
+
+		/* Method.paramAt(i) */
+		if (expr->method_call.object->resolved_type.kind == TYPE_OBJECT &&
+			expr->method_call.object->resolved_type.class_name &&
+			strcmp(expr->method_call.object->resolved_type.class_name, "Method") == 0)
+		{
+			const char *mname = expr->method_call.method_name;
+			int mlen = expr->method_call.method_name_len;
+			if (mlen == 7 && memcmp(mname, "paramAt", 7) == 0)
+			{
+				compile_expr(c, expr->method_call.object);
+				compile_expr(c, expr->method_call.args->expr);
+				emit_op(c, OP_METHOD_PARAM_AT, line);
+				break;
 			}
 		}
 
@@ -4027,17 +4280,21 @@ static bool eval_attr_arg(Compiler *c, const Expr *expr, AttrArg *out)
 	}
 }
 
-/* ── Apply all annotations on a class declaration to cls->attributes[] ─── */
-static void compile_class_annotations(Compiler *c, const Stmt *s, ClassDef *cls)
+/* ── Apply annotations to inline ClassDef attribute storage ─────────────── */
+static void compile_inline_annotations(Compiler *c, int line,
+									   AnnotationNode *annotations,
+									   AttributeInstance *attributes,
+									   int *attribute_count,
+									   const char *subject)
 {
-	for (AnnotationNode *ann = s->class_decl.annotations; ann; ann = ann->next)
+	for (AnnotationNode *ann = annotations; ann; ann = ann->next)
 	{
-		if (cls->attribute_count >= CLASS_MAX_ATTRIBUTES)
+		if (*attribute_count >= CLASS_MAX_ATTRIBUTES)
 		{
-			compile_error(c, s->line, "Too many attributes on class '%s'", cls->name);
+			compile_error(c, line, "Too many attributes on '%s'", subject);
 			break;
 		}
-		AttributeInstance *inst = &cls->attributes[cls->attribute_count++];
+		AttributeInstance *inst = &attributes[(*attribute_count)++];
 		memset(inst, 0, sizeof(AttributeInstance));
 
 		int nlen = ann->name_len < CLASS_NAME_MAX - 1 ? ann->name_len : CLASS_NAME_MAX - 1;
@@ -4056,8 +4313,10 @@ static void compile_class_annotations(Compiler *c, const Stmt *s, ClassDef *cls)
 }
 
 /* ── Apply annotations on a method to md->attributes[] ─────────────────── */
-static void compile_method_annotations(Compiler *c, int line,
-									   AnnotationNode *annotations, MethodDef *md)
+static void compile_annotations(Compiler *c, int line,
+								AnnotationNode *annotations,
+								AttributeInstance **out_attributes,
+								int *out_count)
 {
 	/* Count annotations first */
 	int count = 0;
@@ -4065,25 +4324,25 @@ static void compile_method_annotations(Compiler *c, int line,
 		count++;
 	if (count == 0)
 	{
-		md->attributes = NULL;
-		md->attribute_count = 0;
+		*out_attributes = NULL;
+		*out_count = 0;
 		return;
 	}
 	if (count > CLASS_MAX_ATTRIBUTES)
 		count = CLASS_MAX_ATTRIBUTES;
 
-	md->attributes = calloc((size_t)count, sizeof(AttributeInstance));
-	if (!md->attributes)
+	*out_attributes = calloc((size_t)count, sizeof(AttributeInstance));
+	if (!*out_attributes)
 	{
-		compile_error(c, line, "Out of memory for method attributes");
+		compile_error(c, line, "Out of memory for member attributes");
 		return;
 	}
-	md->attribute_count = 0;
+	*out_count = 0;
 
-	for (AnnotationNode *ann = annotations; ann && md->attribute_count < count;
+	for (AnnotationNode *ann = annotations; ann && *out_count < count;
 		 ann = ann->next)
 	{
-		AttributeInstance *inst = &md->attributes[md->attribute_count++];
+		AttributeInstance *inst = &(*out_attributes)[(*out_count)++];
 		memset(inst, 0, sizeof(AttributeInstance));
 
 		int nlen = ann->name_len < CLASS_NAME_MAX - 1 ? ann->name_len : CLASS_NAME_MAX - 1;
@@ -4249,7 +4508,9 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				}
 			}
 
-			compile_class_annotations(c, s, cls);
+			compile_inline_annotations(c, s->line, s->class_decl.annotations,
+									   cls->attributes, &cls->attribute_count,
+									   cls->name);
 
 			/* ── Flatten parent fields and methods into this ClassDef ──────
 			 * Copy ancestor members first so their field indices come before
@@ -4496,7 +4757,9 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 							}
 							md->param_count = pi;
 						}
-						compile_method_annotations(c, s->line, m->annotations, md);
+						compile_annotations(c, s->line, m->annotations,
+											&md->attributes,
+											&md->attribute_count);
 					}
 				}
 			}
@@ -4533,6 +4796,9 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 						cls->enum_member_count++;
 					}
 				}
+				compile_inline_annotations(c, s->line, s->enum_decl.annotations,
+										   cls->attributes, &cls->attribute_count,
+										   cls->name);
 			}
 		}
 	}
@@ -4615,6 +4881,9 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 								CLASS_NAME_MAX - 1);
 					}
 				}
+				compile_annotations(c, s->line, ev->annotations,
+									&ed->attributes,
+									&ed->attribute_count);
 			}
 		}
 	}

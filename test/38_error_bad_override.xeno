@@ -1,0 +1,19 @@
+// Tests: override without a matching virtual parent method
+class Base {
+    public:
+        function greet(): string { return "hi"; }
+}
+
+class Child : Base {
+    public:
+        override function greet(): string { return "hey"; }
+}
+
+@Mod("error_bad_override", "1.0.0", "Test")
+class ErrorBadOverride {
+    public:
+        ErrorBadOverride() {
+            Child c = new Child();
+            print(c.greet());
+        }
+}

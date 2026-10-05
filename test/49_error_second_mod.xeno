@@ -1,0 +1,12 @@
+// Tests: only one @Mod per file
+@Mod("first_mod", "1.0.0", "Test")
+class First {
+    public:
+        First() {}
+}
+
+@Mod("second_mod", "1.0.0", "Test")
+class Second {
+    public:
+        Second() {}
+}

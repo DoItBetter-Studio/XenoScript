@@ -193,6 +193,13 @@ typedef struct {
     UsageRecord usages[CHECKER_MAX_USAGES];
     int         usage_count;
 
+    /* Interned member symbols (methods/fields) so every use of Foo.bar
+     * shares one Symbol* — required for find-references by pointer and
+     * for stable go-to-definition targets. */
+#define CHECKER_MAX_MEMBER_SYMS 1024
+    Symbol *member_syms[CHECKER_MAX_MEMBER_SYMS];
+    int     member_sym_count;
+
     /* Error accumulation */
     CheckError errors[CHECKER_MAX_ERRORS];
     int        error_count;

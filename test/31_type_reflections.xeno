@@ -1,0 +1,65 @@
+// Type reflection: fields, base, elementType, isAssignableFrom, name lists
+import <math>
+
+interface INamed {
+    function getName(): string;
+}
+
+class Animal {
+    public:
+        string label;
+        Animal(string n) { label = n; }
+        function getName(): string { return label; }
+}
+
+class Dog : Animal, INamed {
+    public:
+        Dog(string n) { super(n); }
+        function bark(): void { print("woof"); }
+}
+
+@Mod("type_reflection", "1.0.0", "Test")
+class TypeReflection {
+    public:
+        TypeReflection() {
+            int n = 42;
+            float f = 3.14;
+            int[] nums = new int[3];
+            Dog dog = new Dog("Rex");
+
+            Type tn = typeof(n);
+            Type tf = typeof(f);
+            Type ta = typeof(nums);
+            Type td = typeof(dog);
+
+            print(tn.name);
+            print(tn.isPrimitive);
+            print(tn.isClass);
+
+            print(tf.kind);
+
+            print(ta.isArray);
+            print(ta.elementType != null);
+            print(ta.elementType.name);
+
+            print(td.isClass);
+            print(td.name);
+            print(td.base != null);
+            print(td.base.name);
+
+            Type tAnimal = typeof(new Animal("x"));
+            print(tAnimal.isAssignableFrom(td));
+            print(td.isAssignableFrom(tAnimal));
+
+            string[] ifaces = td.interfaces();
+            print(ifaces.length >= 0);
+
+            string[] flds = td.fields();
+            print(flds.length >= 1);
+
+            string[] mths = td.methods();
+            print(mths.length >= 1);
+
+            print(Math.sqrt(tn.isPrimitive ? 4.0 : 0.0));
+        }
+}

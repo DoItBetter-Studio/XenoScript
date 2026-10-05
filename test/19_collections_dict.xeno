@@ -11,10 +11,10 @@ class CollectionsDict {
             print(d.count());
             print(d.containsKey(2));
             print(d.containsKey(99));
-            print(d.get(1));
-            print(d.get(3));
-            d.set(2, "tower shield");
-            print(d.get(2));
+            print(d[1]);
+            print(d[3]);
+            d[2] = "tower shield";
+            print(d[2]);
             d.remove(1);
             print(d.count());
             print(d.containsKey(1));

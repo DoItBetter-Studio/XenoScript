@@ -189,6 +189,9 @@ struct XenoVM {
 	void **allocs;
 	size_t alloc_count;
 	size_t alloc_cap;
+	XenoObject **objects;
+	size_t object_count;
+	size_t object_cap;
 };
 
 

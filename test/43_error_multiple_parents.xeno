@@ -1,0 +1,21 @@
+// Tests: cannot inherit from more than one class
+class A {
+    public:
+        A() {}
+}
+
+class B {
+    public:
+        B() {}
+}
+
+class C : A, B {
+    public:
+        C() {}
+}
+
+@Mod("error_multiple_parents", "1.0.0", "Test")
+class ErrorMultipleParents {
+    public:
+        ErrorMultipleParents() {}
+}

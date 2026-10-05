@@ -1,0 +1,56 @@
+// Reflection: .class, isNullable, isInstance, enumMembers, Field/Method/Parameter
+import <math>
+
+enum Phase { Dawn = 0, Noon = 1, Dusk = 2 }
+
+class Widget {
+    public:
+        string label;
+        int? count;
+        Widget(string s) { label = s; count = null; }
+        function bump(int n): void { count = n; }
+}
+
+@Mod("reflection_records", "1.0.0", "Test")
+class ReflectionRecords {
+    public:
+        ReflectionRecords() {
+            Widget w = new Widget("ok");
+            Type tw = w.class;
+            print(tw.name);
+            print(tw.isClass);
+
+            int x = 7;
+            print(x.class.name);
+            print(x.class.isPrimitive);
+
+            string? maybe = null;
+            Type tm = typeof(maybe);
+            print(tm.isNullable);
+
+            print(tw.isInstance(w));
+            print(tw.isInstance(x));
+
+            Type te = typeof(Phase.Dawn);
+            string[] mems = te.enumMembers();
+            print(mems.length >= 3);
+
+            Field? f = tw.getField("label");
+            print(f != null);
+            print(f!.name);
+            print(f!.type.name);
+            print(f!.isNullable);
+
+            Field? fc = tw.getField("count");
+            print(fc!.isNullable);
+
+            Method? m = tw.getMethod("bump");
+            print(m != null);
+            print(m!.name);
+            print(m!.paramCount);
+            Parameter? p0 = m!.paramAt(0);
+            print(p0 != null);
+            print(p0!.name);
+            print(p0!.type.name);
+        }
+}

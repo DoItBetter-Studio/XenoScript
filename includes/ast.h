@@ -222,6 +222,7 @@ typedef enum {
     EXPR_NULL_LIT,       /* null                  — the null literal             */
     EXPR_NULL_ASSERT,    /* expr!                 — non-null assertion unwrap     */
     EXPR_NULL_COALESCE,  /* expr ?? expr          — null coalescing operator      */
+    EXPR_TERNARY,        /* cond ? then : else    — conditional expression        */
     EXPR_NULL_SAFE_GET,  /* obj?.field            — null-safe field read          */
     EXPR_NULL_SAFE_CALL, /* obj?.method(args)     — null-safe method call         */
 
@@ -530,6 +531,13 @@ struct Expr {
             Expr *right;
         } null_coalesce;
 
+        /* EXPR_TERNARY — cond ? then_e : else_e */
+        struct {
+            Expr *cond;
+            Expr *then_e;
+            Expr *else_e;
+        } ternary;
+
         /* EXPR_NULL_SAFE_GET — obj?.field */
         struct {
             Expr       *object;
@@ -596,6 +604,9 @@ typedef struct AnnotationKVNode {
 typedef struct AnnotationNode {
     const char         *name;       /* annotation name, e.g. "Mod"          */
     int                 name_len;
+    int                 line;       /* source line of '@' (1-based)         */
+    int                 col;        /* source column of '@' (1-based)       */
+    int                 span_len;   /* chars from '@' through ')' or name   */
     AnnotationKVNode   *args;       /* linked list of key=value pairs        */
     struct AnnotationNode *next;
 } AnnotationNode;
@@ -872,6 +883,7 @@ struct Stmt {
                 ParamNode  *params;
                 int         param_count;
                 AccessLevel access;
+                AnnotationNode *annotations;
                 struct ClassEventNode *next;
             } *events;
             int event_count;
@@ -990,6 +1002,7 @@ Expr *expr_postfix_field(Arena *a, TokenType op, bool is_prefix,
                          Expr *object, const char *field_name, int field_name_len, int line, int col);
 Expr *expr_prefix    (Arena *a, TokenType op, const char *name, int length, int line, int col);
 Expr *expr_binary    (Arena *a, TokenType op, Expr *left, Expr *right, int line, int col);
+Expr *expr_ternary  (Arena *a, Expr *cond, Expr *then_e, Expr *else_e, int line, int col);
 Expr *expr_assign    (Arena *a, const char *name, int len, Expr *value, int line, int col);
 Expr *expr_call      (Arena *a, const char *name, int len, ArgNode *args, int count, int line, int col);
 Expr *expr_new       (Arena *a, const char *class_name, int class_len,

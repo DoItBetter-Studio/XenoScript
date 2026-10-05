@@ -1,0 +1,10 @@
+// Tests: unknown system module import
+import <no_such_module>;
+
+@Mod("error_unknown_module", "1.0.0", "Test")
+class ErrorUnknownModule {
+    public:
+        ErrorUnknownModule() {
+            print("unreachable");
+        }
+}

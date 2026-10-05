@@ -244,9 +244,18 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
             if (!wb_str(wb, fd->class_name))              	return false;
             if (!wb_u8(wb, fd->is_static ? 1 : 0))       	return false;
             if (!wb_u8(wb, fd->is_final  ? 1 : 0))       	return false;
+            if (!wb_u8(wb, fd->is_nullable ? 1 : 0))     	return false;
 			if (!wb_u8(wb, fd->access_flags))				return false;
         }
 
+        /* Enum reflection metadata */
+        if (!wb_u8(wb, cls->is_enum ? 1 : 0)) return false;
+        if (!wb_u8(wb, (uint8_t)cls->enum_member_count)) return false;
+        for (int ei = 0; ei < cls->enum_member_count; ei++) {
+            if (!wb_str(wb, cls->enum_member_names[ei] ?
+                                cls->enum_member_names[ei] : "")) return false;
+            if (!wb_u32(wb, (uint32_t)cls->enum_member_values[ei])) return false;
+        }
         /* Methods */
         if (!wb_u16(wb, (uint16_t)cls->method_count)) return false;
         for (int mi = 0; mi < cls->method_count; mi++) {
@@ -296,6 +305,8 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
                 if (!wb_str(wb, ed->param_class_names[pi]))         return false;
                 if (!wb_u8(wb, ed->param_is_nullable[pi] ? 1 : 0)) return false;
             }
+            if (!wb_attribute_instances(wb, ed->attributes,
+                                        ed->attribute_count)) return false;
         }
     }
 
@@ -429,6 +440,39 @@ static XbcResult rb_attribute_instances(ReadBuf *rb,
     return XBC_OK;
 }
 
+static XbcResult rb_attribute_instances_heap(ReadBuf *rb,
+                                             AttributeInstance **attrs,
+                                             int *count) {
+    uint8_t attr_count = rb_u8(rb);
+    if (rb->error) return XBC_ERR_IO;
+    if (attr_count > CLASS_MAX_ATTRIBUTES) return XBC_ERR_CORRUPT;
+    *count = 0;
+    *attrs = NULL;
+    if (attr_count == 0) return XBC_OK;
+
+    *attrs = calloc(attr_count, sizeof(AttributeInstance));
+    if (!*attrs) return XBC_ERR_OOM;
+    for (int ai = 0; ai < attr_count; ai++) {
+        AttributeInstance *inst = &(*attrs)[ai];
+        char *aname = rb_str(rb);
+        if (rb->error || !aname) return XBC_ERR_OOM;
+        strncpy(inst->class_name, aname, CLASS_NAME_MAX - 1);
+        inst->class_name[CLASS_NAME_MAX - 1] = '\0';
+        free(aname);
+        *count = ai + 1;
+
+        uint8_t arg_count = rb_u8(rb);
+        if (rb->error) return XBC_ERR_IO;
+        if (arg_count > ATTR_MAX_ARGS) return XBC_ERR_CORRUPT;
+        for (int ki = 0; ki < arg_count; ki++) {
+            XbcResult er = rb_attr_arg(rb, &inst->args[ki]);
+            if (er != XBC_OK) return er;
+            inst->arg_count = ki + 1;
+        }
+    }
+    return XBC_OK;
+}
+
 static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
     module_init(module);
 
@@ -439,7 +483,8 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
 
     uint8_t version = rb_u8(rb);
     if (rb->error) return XBC_ERR_IO;
-    if (version != XBC_VERSION) return XBC_ERR_BAD_VERSION;
+    if (version > XBC_VERSION)
+        return XBC_ERR_BAD_VERSION;
 
     uint16_t fn_count    = rb_u16(rb);
     uint16_t class_count = rb_u16(rb);
@@ -499,10 +544,27 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
 
             fd->is_static = rb_u8(rb) != 0;
             fd->is_final  = rb_u8(rb) != 0;
+            if (version >= 20)
+                fd->is_nullable = rb_u8(rb) != 0;
 			fd->access_flags = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
         }
 
+        /* Enum reflection metadata (added in XBC v20) */
+        if (version >= 20) {
+            cls->is_enum = rb_u8(rb) != 0;
+            uint8_t enum_member_count = rb_u8(rb);
+            if (rb->error) return XBC_ERR_IO;
+            if (enum_member_count > 64) return XBC_ERR_CORRUPT;
+            cls->enum_member_count = enum_member_count;
+            for (int ei = 0; ei < cls->enum_member_count; ei++) {
+                char *member_name = rb_str(rb);
+                if (rb->error || !member_name) return XBC_ERR_OOM;
+                cls->enum_member_names[ei] = member_name;
+                cls->enum_member_values[ei] = (int32_t)rb_u32(rb);
+                if (rb->error) return XBC_ERR_IO;
+            }
+        }
         /* Methods */
         uint16_t method_count = rb_u16(rb);
         if (rb->error) return XBC_ERR_IO;
@@ -634,6 +696,11 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
                 strncpy(ed->param_class_names[pi], cn, EVENT_CLASS_NAME_MAX - 1); free(cn);
                 ed->param_is_nullable[pi] = rb_u8(rb) != 0;
                 if (rb->error) return XBC_ERR_IO;
+            }
+            if (version >= 21) {
+                XbcResult ear = rb_attribute_instances_heap(
+                    rb, &ed->attributes, &ed->attribute_count);
+                if (ear != XBC_OK) return ear;
             }
         }
     }

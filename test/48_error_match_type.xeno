@@ -1,0 +1,17 @@
+// Tests: match arm pattern type must match subject
+enum Color { Red = 0, Blue = 1 }
+
+@Mod("error_match_type", "1.0.0", "Test")
+class ErrorMatchType {
+    public:
+        ErrorMatchType() {
+            Color c = Color.Red;
+            match (c) {
+                case 99:
+                    print("nope");
+                    break;
+                default:
+                    print("ok");
+            }
+        }
+}

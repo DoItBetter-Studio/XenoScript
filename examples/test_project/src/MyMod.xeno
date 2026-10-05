@@ -26,10 +26,17 @@ class MyMod {
 
             for (int i = 0; i < config.count(); i++)
             {
-                print(config.get(i));
+                print(config[i]);
             }
 
 			print(MyMod.MOD_ID);
             print(utils.echo(MyMod.MOD_ID));
+
+			myNewFunction();
         }
+
+		function myNewFunction() : void
+		{
+			print("myNewFunction called");
+		}
 }

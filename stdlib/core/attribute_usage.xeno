@@ -3,7 +3,11 @@
 //
 // Example:
 //   @AttributeUsage([AttributeTarget.Method])
-//   class Event : Attribute { ... }
+//   class Instrumented : Attribute { ... }
+//
+// Apply to a class event with AttributeTarget.Event:
+//   @Instrumented("important")
+//   event OnChanged(int value);
 @AttributeUsage([AttributeTarget.Class])
 class AttributeUsage : Attribute {
     public:

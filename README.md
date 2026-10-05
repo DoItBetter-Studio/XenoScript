@@ -55,7 +55,7 @@ This makes XenoScript ideal for secure modding environments.
 - **Erased generics** (`List<T>`, `Dictionary<K, V>`, user-defined generic classes) — distributed as compiled `.xar` binaries, no source shipping required  
 - Access modifiers (`public`, `private`, `protected`)  
 - Virtual dispatch (`virtual` / `override`)  
-- Constructor overloading and default parameter values
+- Single constructor and method name per class (no overloading)
 - Enum `match` expressions
 - Nullable types (`string?`, `int?`, `??`, `!`, `?.`)  
 - Exception handling (`try` / `catch` / `finally` / `throw`)  
@@ -63,17 +63,72 @@ This makes XenoScript ideal for secure modding environments.
 - `foreach` over arrays and any `IEnumerable<T>` implementation  
 - Static fields and methods  
 - `final` fields (compile-time immutability)  
-- User-defined annotations with `@AttributeUsage` enforcement  
+- User-defined annotations with `@AttributeUsage` enforcement on classes, methods, fields, constructors, enums, and events
 - Strongly-typed casting (`as`) — numeric conversions, string conversion, and **runtime** class/interface checks  
 - Type checks (`is`) — static for primitives; **runtime** class hierarchy and interface matching for objects  
-- `typeof` — Type reflection objects; object values report their **runtime** class name  
+- Runtime reflection for types, objects, fields, methods, parameters, enums, annotations, and nullable metadata
 - Structured control flow (`if`, `for`, `foreach`, `while`)  
 - String interpolation  
 - Module imports and `.xar` package archives  
 - Project model (`xeno.project`) with dependency resolution and SemVer matching  
-- Bytecode compilation (XBC v19) with linker stage  
-- Lean mod packages: `xenoc build` strips embedded stdlib/dep ClassDefs from the output `.xar` (VM re-seeds stdlib at load)  
+- Bytecode compilation (XBC v21) with linker stage
+- Lean mod packages: `xenoc build` removes stdlib/dependency bytecode chunks but retains lightweight `ClassDef` stubs at compile-time indices; the VM fills them from loaded stdlib/dependencies
 - API documentation via **XDocs** (`.xdoc` sidecars) for hover, stubs, and parameter names
+
+---
+
+## 🚫 Non-Goals
+
+XenoScript deliberately does **not** include:
+
+| Non-goal | Rationale |
+|----------|-----------|
+| **Function / constructor overloading** | Call resolution, XBC method slots, strip/merge, and LSP all assume one name per member. Duplicate names are a hard error (see test 30). Prefer distinct names (`add` / `addAll`). |
+| **Default parameter values** | Keeps call sites and bytecode signatures simple and explicit. |
+| **`Field.get` / `Method.invoke` / dynamic `new`** | Reflection is **descriptive only**. Runtime capability stays under host control. |
+| **Reified generics** | Generics use erasure (`List<T>` → runtime `List`). Sufficient for mod collections; avoids VM complexity. |
+| **General-purpose I/O in the language** | `print` is a **host** function (index 0). File/network/OS access exists only if the host registers it. |
+| **`assert` keyword** | Use normal `if` + `throw`, or host-provided diagnostics, until a real product need appears. |
+| **Multiple inheritance of classes** | Single class parent + multiple interfaces only. |
+
+If a feature is not on the supported list and not in the test suite, assume it is out of scope until explicitly added.
+
+---
+
+## 🔎 Runtime Reflection
+
+Reflection exposes information already known to the compiler and stored in runtime type metadata. It is read-only: it does not turn XenoScript into a dynamic language.
+
+Given an existing object instance named `dog`:
+
+```xeno
+Type dogType = dog.class;
+Type intType = typeof(42);
+
+print(dogType.name);
+print(dogType.kind);
+print(dogType.base != null);
+print(dogType.isAssignableFrom(typeof(dog)));
+print(dogType.isInstance(dog));
+
+string[] interfaces = dogType.interfaces();
+string[] fields = dogType.fields();
+string[] methods = dogType.methods();
+```
+
+The reflection surface includes:
+
+- `typeof(value)` and `object.class` for `Type` descriptors; object values report their runtime class
+- `Type.name`, `kind`, `base`, `interfaces()`, `elementType`, `fields()`, and `methods()`, plus array, primitive, enum, class, and nullable flags. `fields()` and `methods()` list instance members.
+- `Type.isAssignableFrom(type)` and `Type.isInstance(value)`
+- `Type.enumMembers()` for enum member names
+- `Type.hasAttribute(name)` and `Type.getAttributeArg(name, index)` for annotation metadata
+- Nullable `Type.getField(name)` and `Type.getMethod(name)` lookups, returning read-only `Field` and `Method` records; `Method.paramAt(index)` returns a read-only `Parameter`
+- Nullable metadata for reflected types, fields, method return types, and parameters
+
+`Field` exposes its name, type, and static/final/nullable flags. `Method` exposes its name, return type, static/virtual flags, and parameter count. `Parameter` exposes its name, type, nullability, and index. A missing field or method, or an out-of-range parameter index, returns `null`.
+
+Reflection intentionally does **not** provide field reads/writes, method invocation, dynamic construction, constructor metadata, runtime generic type arguments, or serialization-specific metadata. Generics are erased; reflection reports only type information that exists at runtime.
 
 ---
 
@@ -150,6 +205,20 @@ XDocs for the embedded standard library (`core`, `math`, `collections`) are prod
 | `<core>` | `Exception`, `Attribute`, `IEnumerable<T>`, `IEnumerator<T>`, `string`, `int`, `float`, `bool` helpers |
 | `<math>` | `Math` static class |
 | `<collections>` | `List<T>`, `Dictionary<K,V>`, `Stack<T>`, `Queue<T>` |
+
+Use brackets to read or assign elements in lists and dictionaries:
+
+```xeno
+List<string> names = new List<string>();
+names.add("Alice");
+print(names[0]);
+names[0] = "Alicia";
+
+Dictionary<int, string> items = new Dictionary<int, string>();
+items.add(1, "sword");
+print(items[1]);
+items[1] = "shield";
+```
 
 **Note:** Floating-point values (`float` and `double`) are rounded to 4 decimal places for deterministic behavior and to prevent floating-point precision issues in modding environments.
 
@@ -524,11 +593,12 @@ The language, VM, and standard library are evolving together.
 - ✅ Standard library (`core`, `math`, `collections`)  
 - ✅ Erased generics — stdlib generic classes distributed as compiled `.xar` binaries  
 - ✅ `.xar` packaging and project model with dependency resolution  
-- ✅ Lean mod packages — stdlib/dep ClassDefs stripped from output; VM re-seeds at load  
+- ✅ Lean mod packages — stdlib/dependency bytecode chunks stripped while `ClassDef` stubs retain compile-time indices; VM fills them from loaded modules at runtime
 - ✅ SemVer dependency constraints (`exact`, `^`, `~`, `>=`, `*`)  
 - ✅ `@Mod` entrypoint detection and project id verification  
 - ✅ Attribute reflection (reading annotation data at runtime)  
 - ✅ Runtime `is` / `as` / `typeof` for object class hierarchy and interfaces  
+- ✅ Read-only runtime reflection for `Type`, object `.class`, fields, methods, parameters, enums, and nullable metadata
 - ✅ LSP server (`xenolsp`): diagnostics, hover, definition, references, completion  
 - ✅ Diagnostic ranges with accurate line and column spans  
 - ✅ XDocs: `#Docs` extraction, `.xdoc` sidecars, hover markdown, named params in stubs  

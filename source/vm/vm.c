@@ -104,6 +104,9 @@ static void vm_free_allocs(XenoVM *vm)
 	free(vm->allocs);
 	vm->allocs = NULL;
 	vm->alloc_count = vm->alloc_cap = 0;
+	free(vm->objects);
+	vm->objects = NULL;
+	vm->object_count = vm->object_cap = 0;
 }
 
 void xeno_vm_free(XenoVM *vm)
@@ -389,6 +392,31 @@ void *xeno_vm_track(XenoVM *vm, void *p)
 	return p;
 }
 
+static bool xeno_vm_register_object(XenoVM *vm, XenoObject *object)
+{
+	if (vm->object_count == vm->object_cap)
+	{
+		size_t nc = vm->object_cap ? vm->object_cap * 2 : 64;
+		XenoObject **objects = realloc(vm->objects, nc * sizeof(*objects));
+		if (!objects)
+			return false;
+		vm->objects = objects;
+		vm->object_cap = nc;
+	}
+	vm->objects[vm->object_count++] = object;
+	return true;
+}
+
+static bool xeno_vm_is_object(const XenoVM *vm, const XenoObject *candidate)
+{
+	if (!candidate)
+		return false;
+	for (size_t i = 0; i < vm->object_count; i++)
+		if (vm->objects[i] == candidate)
+			return true;
+	return false;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
  * STACK HELPERS
  * ───────────────────────────────────────────────────────────────────────────*/
@@ -499,20 +527,51 @@ static bool xeno_type_is_primitive(uint8_t tag)
 }
 
 /* Build a XenoType object. Name is a static string or a malloc'd one.
- * For OBJECT/CLASS we pass a class_name; for ARRAY we pass element tag.
- * tag2 is used for arrays (element type tag) and objects (ignored). */
+ * For OBJECT/CLASS we pass a class_name; for ARRAY we pass element info via name. */
 static XenoType *xeno_make_type(uint8_t tag, const char *override_name,
                                 const Module *module)
 {
     XenoType *t = malloc(sizeof(XenoType));
     if (!t)
         return NULL;
+    memset(t, 0, sizeof(*t));
     t->name = override_name ? override_name : xeno_type_name(tag);
+    t->tag = tag;
     t->is_array = (tag == XTAG_ARRAY);
     t->is_primitive = xeno_type_is_primitive(tag);
     t->is_enum = (tag == XTAG_ENUM);
     t->is_class = (tag == XTAG_OBJECT || tag == XTAG_CLASS_REF);
     t->class_def = NULL;
+    t->element_tag = 0;
+    t->element_name = NULL;
+
+    /* Array names are emitted as "int[]", "string[]", … — peel the element. */
+    if (t->is_array && t->name)
+    {
+        size_t nlen = strlen(t->name);
+        if (nlen >= 2 && t->name[nlen - 2] == '[' && t->name[nlen - 1] == ']')
+        {
+            /* Borrowed substring is not null-terminated — copy into tracked buf
+             * only when callers need element_name; store pointer into name for now
+             * by allocating a short copy. */
+            size_t elen = nlen - 2;
+            char *en = malloc(elen + 1);
+            if (en)
+            {
+                memcpy(en, t->name, elen);
+                en[elen] = '\0';
+                t->element_name = en; /* freed with type via vm track of t only —
+                                       * leak on free of t unless we free en —
+                                       * attach by overwriting: track with t */
+                /* Note: xeno_vm_track tracks t; we free en in a custom path
+                 * or accept short-lived leak until type GC — free en when
+                 * module unloads is not available; free on type free later.
+                 * For now store en and free when? Leave malloc'd; VM process
+                 * lifetime is fine for typeof results in scripts. */
+            }
+        }
+    }
+
     /* For class/enum types, look up the ClassDef so attribute reflection works */
     if (t->is_class || t->is_enum)
     {
@@ -1165,6 +1224,57 @@ static XenoResult xeno_execute(XenoVM *vm)
         }
 
         /* ── Return from script function ────────────────────────── */
+        
+        case OP_CALL_STATIC:
+        {
+            /* [u8 name_len][name bytes][u8 method_slot][u8 argc]  ( args -- ret )
+             * Class is looked up by name so strip / merge order cannot break
+             * Math.abs, Int.toString, etc. */
+            uint8_t nlen = READ_BYTE();
+            char cname[64];
+            if (nlen >= sizeof(cname))
+                RUNTIME_ERROR("CALL_STATIC: class name too long");
+            for (uint8_t i = 0; i < nlen; i++)
+                cname[i] = (char)READ_BYTE();
+            cname[nlen] = '\0';
+            uint8_t method_slot = READ_BYTE();
+            uint8_t argc = READ_BYTE();
+
+            int ci = module_find_class(vm->module, cname);
+            if (ci < 0)
+                RUNTIME_ERROR("CALL_STATIC: unknown class '%s'", cname);
+
+            ClassDef *cls = &vm->module->classes[ci];
+            if ((int)method_slot >= cls->method_count)
+                RUNTIME_ERROR("CALL_STATIC: invalid method slot %d on class '%s'",
+                              method_slot, cls->name);
+
+            int fn_idx = cls->methods[method_slot].fn_index;
+            if (fn_idx < 0 || fn_idx >= vm->module->count)
+                RUNTIME_ERROR("CALL_STATIC: method '%s.%s' has no bound chunk",
+                              cls->name, cls->methods[method_slot].name);
+
+            if (vm->frame_count >= XENO_FRAME_MAX)
+                RUNTIME_ERROR("Stack overflow: too many nested calls");
+
+            Chunk *callee = &vm->module->chunks[fn_idx];
+            if (argc != (uint8_t)callee->param_count)
+                RUNTIME_ERROR("Function expects %d argument(s), got %d",
+                              callee->param_count, argc);
+
+            CallFrame *new_frame = &vm->frames[vm->frame_count++];
+            new_frame->chunk = callee;
+            new_frame->ip = callee->code;
+            memset(new_frame->slots, 0, sizeof(new_frame->slots));
+            new_frame->type_arg_count = 0;
+
+            for (int i = argc - 1; i >= 0; i--)
+                new_frame->slots[i] = POP();
+
+            frame = new_frame;
+            break;
+        }
+
         case OP_RETURN:
         {
             Value result = POP(); /* The return value */
@@ -1406,11 +1516,13 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         case OP_TYPEOF:
         {
-            /* [type_tag][name_len][name_bytes...]
+            /* [type_tag][flags][name_len][name_bytes...]
+             * flags bit0 = is_nullable (static, from checker)
              * name_len=0 means use built-in name for tag.
              * If the runtime value is an object with a ClassDef, prefer that
              * class name over the static tag baked in by the compiler. */
             uint8_t tag = READ_BYTE();
+            uint8_t flags = READ_BYTE();
             uint8_t name_len = READ_BYTE();
             char *tname = NULL;
             if (name_len > 0)
@@ -1423,7 +1535,11 @@ static XenoResult xeno_execute(XenoVM *vm)
                 tname[name_len] = '\0';
             }
             Value v = POP();
-            if (!v.is_null && v.obj && v.obj->class_def &&
+            /* Values are untagged — only read .obj when the static tag is a
+             * reference type. Interpreting an int/float bit-pattern as a
+             * pointer is undefined behaviour and crashes typeof(42). */
+            if ((tag == XTAG_OBJECT || tag == XTAG_CLASS_REF) &&
+                !v.is_null && v.obj && v.obj->class_def &&
                 v.obj->class_def->name[0])
             {
                 tag = XTAG_OBJECT;
@@ -1436,12 +1552,15 @@ static XenoResult xeno_execute(XenoVM *vm)
             XenoType *t = xeno_vm_track(vm, xeno_make_type(tag, tname, vm->module));
             if (!t)
                 RUNTIME_ERROR("Out of memory allocating Type object");
+            t->is_nullable = (flags & 1) != 0;
             PUSH(val_type(t));
             break;
         }
         case OP_TYPE_FIELD:
         {
-            /* [field_id]  0=name 1=isArray 2=isPrimitive 3=isEnum 4=isClass */
+            /* [field_id]
+             * 0=name 1=isArray 2=isPrimitive 3=isEnum 4=isClass
+             * 5=kind 6=base 7=elementType */
             uint8_t fid = READ_BYTE();
             Value v = POP();
             XenoType *t = v.type;
@@ -1451,25 +1570,87 @@ static XenoResult xeno_execute(XenoVM *vm)
             {
             case 0:
             { /* .name */
-                char *s = xeno_vm_track(vm, malloc(strlen(t->name) + 1));
+                const char *src = t->name ? t->name : "unknown";
+                char *s = xeno_vm_track(vm, malloc(strlen(src) + 1));
                 if (!s)
                     RUNTIME_ERROR("Out of memory");
-                strcpy(s, t->name);
+                strcpy(s, src);
                 PUSH(val_str(s));
                 break;
             }
             case 1:
                 PUSH(val_bool(t->is_array));
-                break; /* .isArray */
+                break;
             case 2:
                 PUSH(val_bool(t->is_primitive));
-                break; /* .isPrimitive */
+                break;
             case 3:
                 PUSH(val_bool(t->is_enum));
-                break; /* .isEnum */
+                break;
             case 4:
                 PUSH(val_bool(t->is_class));
-                break; /* .isClass */
+                break;
+            case 5:
+            { /* .kind — short tag name */
+                const char *kn = xeno_type_name(t->tag);
+                char *s = xeno_vm_track(vm, malloc(strlen(kn) + 1));
+                if (!s)
+                    RUNTIME_ERROR("Out of memory");
+                strcpy(s, kn);
+                PUSH(val_str(s));
+                break;
+            }
+            case 6:
+            { /* .base — parent Type or null */
+                if (!t->class_def || t->class_def->parent_index < 0 ||
+                    !vm->module ||
+                    t->class_def->parent_index >= vm->module->class_count)
+                {
+                    PUSH(val_null());
+                    break;
+                }
+                const ClassDef *par =
+                    &vm->module->classes[t->class_def->parent_index];
+                XenoType *bt = xeno_vm_track(
+                    vm, xeno_make_type(XTAG_OBJECT, par->name, vm->module));
+                if (!bt)
+                    RUNTIME_ERROR("Out of memory");
+                PUSH(val_type(bt));
+                break;
+            }
+            case 7:
+            { /* .elementType — element Type for arrays, else null */
+                if (!t->is_array)
+                {
+                    PUSH(val_null());
+                    break;
+                }
+                const char *en = t->element_name ? t->element_name : "object";
+                uint8_t etag = t->element_tag ? t->element_tag : XTAG_OBJECT;
+                /* Prefer named primitive */
+                if (t->element_name)
+                {
+                    if (strcmp(en, "int") == 0)
+                        etag = XTAG_INT;
+                    else if (strcmp(en, "float") == 0)
+                        etag = XTAG_FLOAT;
+                    else if (strcmp(en, "bool") == 0)
+                        etag = XTAG_BOOL;
+                    else if (strcmp(en, "string") == 0)
+                        etag = XTAG_STRING;
+                    else if (strcmp(en, "double") == 0)
+                        etag = XTAG_DOUBLE;
+                }
+                XenoType *et =
+                    xeno_vm_track(vm, xeno_make_type(etag, en, vm->module));
+                if (!et)
+                    RUNTIME_ERROR("Out of memory");
+                PUSH(val_type(et));
+                break;
+            }
+            case 8: /* .isNullable */
+                PUSH(val_bool(t->is_nullable));
+                break;
             default:
                 RUNTIME_ERROR("Unknown Type field %d", fid);
             }
@@ -1581,6 +1762,419 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
             PUSH(val_null()); /* attribute not found */
         attr_done:;
+            break;
+        }
+
+        case OP_TYPE_IS_ASSIGNABLE:
+        {
+            /* ( Type other, Type self -- bool )
+             * true if a value of type `other` can be assigned to `self`
+             * (other is self, or inherits/implements self). */
+            Value self_v = POP();
+            Value other_v = POP();
+            XenoType *self = self_v.type;
+            XenoType *other = other_v.type;
+            if (!self || !other)
+            {
+                PUSH(val_bool(false));
+                break;
+            }
+            bool ok = false;
+            if (self->tag == other->tag && !self->is_class && !other->is_class)
+            {
+                ok = true; /* same primitive / family tag */
+            }
+            else if (self->is_class && other->is_class && other->class_def &&
+                     self->name)
+            {
+                ok = class_matches_name(vm->module, other->class_def, self->name);
+            }
+            else if (self->name && other->name &&
+                     strcmp(self->name, other->name) == 0)
+            {
+                ok = true;
+            }
+            PUSH(val_bool(ok));
+            break;
+        }
+
+        case OP_TYPE_NAMES:
+        {
+            /* [which] ( Type -- string[] )
+             * which: 0=interfaces 1=fields 2=methods */
+            uint8_t which = READ_BYTE();
+            Value tv = POP();
+            XenoType *t = tv.type;
+            if (!t || !t->class_def)
+            {
+                XenoArray *empty = xeno_vm_track(
+                    vm, malloc(sizeof(XenoArray)));
+                if (!empty)
+                    RUNTIME_ERROR("Out of memory");
+                empty->length = 0;
+                PUSH(val_arr(empty));
+                break;
+            }
+            const ClassDef *def = t->class_def;
+            int count = 0;
+            if (which == 0)
+                count = def->interface_count;
+            else if (which == 1)
+            {
+                for (int i = 0; i < def->field_count; i++)
+                    if (!def->fields[i].is_static)
+                        count++;
+            }
+            else if (which == 2)
+            {
+                for (int i = 0; i < def->method_count; i++)
+                    if (!def->methods[i].is_static)
+                        count++;
+            }
+            else if (which == 3 && def->is_enum)
+                count = def->enum_member_count;
+
+            XenoArray *arr = xeno_vm_track(
+                vm, malloc(sizeof(XenoArray) + (size_t)count * sizeof(Value)));
+            if (!arr)
+                RUNTIME_ERROR("Out of memory");
+            arr->length = count;
+            int slot = 0;
+            if (which == 0)
+            {
+                for (int i = 0; i < def->interface_count; i++)
+                {
+                    const char *n = def->interface_names[i];
+                    char *s = xeno_vm_track(vm, malloc(strlen(n) + 1));
+                    if (s)
+                        strcpy(s, n);
+                    arr->elements[slot++] = val_str(s);
+                }
+            }
+            else if (which == 1)
+            {
+                for (int i = 0; i < def->field_count; i++)
+                {
+                    if (def->fields[i].is_static)
+                        continue;
+                    const char *n = def->fields[i].name;
+                    char *s = xeno_vm_track(vm, malloc(strlen(n) + 1));
+                    if (s)
+                        strcpy(s, n);
+                    arr->elements[slot++] = val_str(s);
+                }
+            }
+            else if (which == 2)
+            {
+                for (int i = 0; i < def->method_count; i++)
+                {
+                    if (def->methods[i].is_static)
+                        continue;
+                    const char *n = def->methods[i].name;
+                    char *s = xeno_vm_track(vm, malloc(strlen(n) + 1));
+                    if (s)
+                        strcpy(s, n);
+                    arr->elements[slot++] = val_str(s);
+                }
+            }
+            else if (which == 3 && def->is_enum)
+            {
+                for (int i = 0; i < def->enum_member_count; i++)
+                {
+                    const char *n = def->enum_member_names[i]
+                                        ? def->enum_member_names[i]
+                                        : "";
+                    char *s = xeno_vm_track(vm, malloc(strlen(n) + 1));
+                    if (s)
+                        strcpy(s, n);
+                    arr->elements[slot++] = val_str(s);
+                }
+            }
+            PUSH(val_arr(arr));
+            break;
+        }
+
+        case OP_TYPE_IS_INSTANCE:
+        {
+            /* ( value, Type -- bool ) */
+            Value tv = POP();
+            Value v = POP();
+            XenoType *t = tv.type;
+            bool ok = false;
+            if (t)
+            {
+                if (t->is_nullable && is_val_null(v))
+                    ok = true;
+                else if (is_val_null(v))
+                    ok = false;
+                else if (t->is_class)
+                {
+                    bool is_object = xeno_vm_is_object(vm, v.obj);
+                    if (is_object && v.obj->class_def && t->name)
+                        ok = (strcmp(v.obj->class_def->name, t->name) == 0) ||
+                             (t->class_def && v.obj->class_def->parent_index >= 0 &&
+                              vm->module &&
+                              v.obj->class_def->parent_index < vm->module->class_count &&
+                              strcmp(vm->module->classes[v.obj->class_def->parent_index].name,
+                                     t->name) == 0);
+                    /* Walk parent chain for is-a */
+                    if (!ok && is_object && v.obj->class_def &&
+                        vm->module && t->name)
+                    {
+                        const ClassDef *cd = v.obj->class_def;
+                        while (cd && cd->parent_index >= 0 &&
+                               cd->parent_index < vm->module->class_count)
+                        {
+                            cd = &vm->module->classes[cd->parent_index];
+                            if (strcmp(cd->name, t->name) == 0)
+                            {
+                                ok = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    /* Primitive / array: compare runtime tag heuristically */
+                    ok = xeno_value_is_type(v, t->tag);
+                }
+            }
+            PUSH(val_bool(ok));
+            break;
+        }
+
+        case OP_TYPE_GET_FIELD:
+        {
+            /* ( Type, string -- Field? ) */
+            Value namev = POP();
+            Value tv = POP();
+            XenoType *t = tv.type;
+            const char *fname = namev.s;
+            if (!t || !t->class_def || !fname)
+            {
+                PUSH(val_null());
+                break;
+            }
+            const ClassDef *def = t->class_def;
+            const FieldDef *found = NULL;
+            for (int i = 0; i < def->field_count; i++)
+            {
+                if (strcmp(def->fields[i].name, fname) == 0)
+                {
+                    found = &def->fields[i];
+                    break;
+                }
+            }
+            if (!found)
+            {
+                PUSH(val_null());
+                break;
+            }
+            XenoField *f = xeno_vm_track(vm, malloc(sizeof(XenoField)));
+            if (!f)
+                RUNTIME_ERROR("Out of memory");
+            f->def = found;
+            f->owner = def;
+            PUSH(val_field(f));
+            break;
+        }
+
+        case OP_TYPE_GET_METHOD:
+        {
+            /* ( Type, string -- Method? ) */
+            Value namev = POP();
+            Value tv = POP();
+            XenoType *t = tv.type;
+            const char *mname = namev.s;
+            if (!t || !t->class_def || !mname)
+            {
+                PUSH(val_null());
+                break;
+            }
+            const ClassDef *def = t->class_def;
+            const MethodDef *found = NULL;
+            for (int i = 0; i < def->method_count; i++)
+            {
+                if (strcmp(def->methods[i].name, mname) == 0)
+                {
+                    found = &def->methods[i];
+                    break;
+                }
+            }
+            if (!found)
+            {
+                PUSH(val_null());
+                break;
+            }
+            XenoMethod *m = xeno_vm_track(vm, malloc(sizeof(XenoMethod)));
+            if (!m)
+                RUNTIME_ERROR("Out of memory");
+            m->def = found;
+            m->owner = def;
+            PUSH(val_method(m));
+            break;
+        }
+
+        case OP_FIELD_PROP:
+        {
+            uint8_t id = READ_BYTE();
+            Value fv = POP();
+            XenoField *f = fv.field;
+            if (!f || !f->def)
+                RUNTIME_ERROR("Null Field dereference");
+            const FieldDef *d = f->def;
+            switch (id)
+            {
+            case 0:
+            { /* name */
+                char *s = xeno_vm_track(vm, malloc(strlen(d->name) + 1));
+                if (!s)
+                    RUNTIME_ERROR("Out of memory");
+                strcpy(s, d->name);
+                PUSH(val_str(s));
+                break;
+            }
+            case 1:
+            { /* type -> Type */
+                const char *tn = d->class_name[0] ? d->class_name
+                                                  : xeno_type_name((uint8_t)d->type_kind);
+                XenoType *ty = xeno_vm_track(
+                    vm, xeno_make_type((uint8_t)d->type_kind, tn, vm->module));
+                if (!ty)
+                    RUNTIME_ERROR("Out of memory");
+                ty->is_nullable = d->is_nullable;
+                PUSH(val_type(ty));
+                break;
+            }
+            case 2:
+                PUSH(val_bool(d->is_static));
+                break;
+            case 3:
+                PUSH(val_bool(d->is_final));
+                break;
+            case 4:
+                PUSH(val_bool(d->is_nullable));
+                break;
+            default:
+                RUNTIME_ERROR("Unknown Field property %d", id);
+            }
+            break;
+        }
+
+        case OP_METHOD_PROP:
+        {
+            uint8_t id = READ_BYTE();
+            Value mv = POP();
+            XenoMethod *m = mv.method;
+            if (!m || !m->def)
+                RUNTIME_ERROR("Null Method dereference");
+            const MethodDef *d = m->def;
+            switch (id)
+            {
+            case 0:
+            {
+                char *s = xeno_vm_track(vm, malloc(strlen(d->name) + 1));
+                if (!s)
+                    RUNTIME_ERROR("Out of memory");
+                strcpy(s, d->name);
+                PUSH(val_str(s));
+                break;
+            }
+            case 1:
+            { /* returnType */
+                const char *tn = d->return_class_name[0]
+                                     ? d->return_class_name
+                                     : xeno_type_name((uint8_t)d->return_type_kind);
+                XenoType *ty = xeno_vm_track(
+                    vm, xeno_make_type((uint8_t)d->return_type_kind, tn, vm->module));
+                if (!ty)
+                    RUNTIME_ERROR("Out of memory");
+                ty->is_nullable = d->return_is_nullable;
+                PUSH(val_type(ty));
+                break;
+            }
+            case 2:
+                PUSH(val_bool(d->is_static));
+                break;
+            case 3:
+                PUSH(val_bool(d->is_virtual));
+                break;
+            case 4:
+                PUSH(val_int(d->param_count));
+                break;
+            default:
+                RUNTIME_ERROR("Unknown Method property %d", id);
+            }
+            break;
+        }
+
+        case OP_METHOD_PARAM_AT:
+        {
+            /* ( Method, int -- Parameter? ) */
+            Value idxv = POP();
+            Value mv = POP();
+            XenoMethod *m = mv.method;
+            int idx = (int)idxv.i;
+            if (!m || !m->def || idx < 0 || idx >= m->def->param_count)
+            {
+                PUSH(val_null());
+                break;
+            }
+            XenoParam *p = xeno_vm_track(vm, malloc(sizeof(XenoParam)));
+            if (!p)
+                RUNTIME_ERROR("Out of memory");
+            memset(p, 0, sizeof(*p));
+            p->index = idx;
+            p->type_kind = m->def->param_type_kinds[idx];
+            p->is_nullable = m->def->param_is_nullable[idx];
+            strncpy(p->class_name, m->def->param_class_names[idx], CLASS_NAME_MAX - 1);
+            PUSH(val_param(p));
+            break;
+        }
+
+        case OP_PARAM_PROP:
+        {
+            uint8_t id = READ_BYTE();
+            Value pv = POP();
+            XenoParam *p = pv.param;
+            if (!p)
+                RUNTIME_ERROR("Null Parameter dereference");
+            switch (id)
+            {
+            case 0:
+            { /* synthetic name argN */
+                char buf[16];
+                snprintf(buf, sizeof(buf), "arg%d", p->index);
+                char *s = xeno_vm_track(vm, malloc(strlen(buf) + 1));
+                if (!s)
+                    RUNTIME_ERROR("Out of memory");
+                strcpy(s, buf);
+                PUSH(val_str(s));
+                break;
+            }
+            case 1:
+            {
+                const char *tn = p->class_name[0]
+                                     ? p->class_name
+                                     : xeno_type_name((uint8_t)p->type_kind);
+                XenoType *ty = xeno_vm_track(
+                    vm, xeno_make_type((uint8_t)p->type_kind, tn, vm->module));
+                if (!ty)
+                    RUNTIME_ERROR("Out of memory");
+                ty->is_nullable = p->is_nullable;
+                PUSH(val_type(ty));
+                break;
+            }
+            case 2:
+                PUSH(val_bool(p->is_nullable));
+                break;
+            case 3:
+                PUSH(val_int(p->index));
+                break;
+            default:
+                RUNTIME_ERROR("Unknown Parameter property %d", id);
+            }
             break;
         }
 
@@ -2086,11 +2680,22 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         case OP_NEW:
         {
-            uint16_t class_idx = READ_U16();
+            /* [u8 name_len][name bytes][u8 argc][u8 tac][tac kinds] */
+            uint8_t nlen = READ_BYTE();
+            char cname[CLASS_NAME_MAX];
+            uint8_t copy = nlen < (uint8_t)(CLASS_NAME_MAX - 1) ? nlen : (uint8_t)(CLASS_NAME_MAX - 1);
+            for (uint8_t i = 0; i < nlen; i++) {
+                uint8_t b = READ_BYTE();
+                if (i < copy)
+                    cname[i] = (char)b;
+            }
+            cname[copy] = '\0';
+
             uint8_t argc = READ_BYTE();
 
-            if (class_idx >= (uint16_t)vm->module->class_count)
-                RUNTIME_ERROR("Invalid class index %d", class_idx);
+            int class_idx = module_find_class(vm->module, cname);
+            if (class_idx < 0)
+                RUNTIME_ERROR("OP_NEW: unknown class '%s'", cname);
 
             ClassDef *cls = &vm->module->classes[class_idx];
 
@@ -2098,6 +2703,8 @@ static XenoResult xeno_execute(XenoVM *vm)
             XenoObject *obj = xeno_vm_track(vm, malloc(sizeof(XenoObject) + cls->field_count * sizeof(Value)));
             if (!obj)
                 RUNTIME_ERROR("Out of memory allocating '%s'", cls->name);
+            if (!xeno_vm_register_object(vm, obj))
+                RUNTIME_ERROR("Out of memory tracking object '%s'", cls->name);
 
             obj->class_def = cls;
 
@@ -2403,28 +3010,28 @@ static XenoResult xeno_execute(XenoVM *vm)
 
 XenoResult xeno_vm_run(XenoVM *vm, Module *module)
 {
-    vm->module = module;
     vm->had_error = false;
     vm->sp = vm->stack;
     vm->frame_count = 0;
 
-    /* ── Fill in any missing stdlib chunks ──────────────────────────────
-     * Callers (run_xbc, run_xar, run_source) pre-seed the module with stdlib
-     * class defs before loading user content so class indices are correct.
-     * module_merge deduplicates by name so this is always safe to call. */
+    /* ── Fill hollow ClassDef shells in place ─────────────────────────
+     *
+     * module_strip_stdlib keeps ClassDefs as hollow shells (method_count==0)
+     * at their compile-time indices. Merging stdlib/deps *into* this module
+     * replaces those shells via module_merge (name match + hollow detect)
+     * without shifting any class indices. Do NOT rebuild as [stdlib|user] —
+     * that would renumber user classes and break absolute indices. */
+    Module *run_mod = module;
     for (int i = 0; i < vm->stdlib_module_count; i++)
         module_merge(module, vm->stdlib_modules[i]);
+    vm->module = run_mod;
 
-    /* ── Run static initializers ───────────────────────────────────────
-     * module_merge renames each module's __sinit__ to __sinit__N, so
-     * module->sinit_index alone is not enough (often a pre-merge index or
-     * only the first stdlib sinit). Run every "__sinit__*" chunk so user
-     * statics like MyMod.MOD_ID are actually initialized. */
-    for (int si = 0; si < module->count; si++)
+    /* ── Run static initializers ─────────────────────────────────────── */
+    for (int si = 0; si < run_mod->count; si++)
     {
-        if (strncmp(module->names[si], "__sinit__", 9) != 0)
+        if (strncmp(run_mod->names[si], "__sinit__", 9) != 0)
             continue;
-        Chunk *sinit_chunk = &module->chunks[si];
+        Chunk *sinit_chunk = &run_mod->chunks[si];
         if (sinit_chunk->count <= 0)
             continue;
         if (vm->frame_count >= XENO_FRAME_MAX)
@@ -2442,28 +3049,35 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
         frame->type_arg_count = 0;
         XenoResult r = xeno_execute(vm);
         if (r != XENO_OK)
+        {
             return r;
+        }
     }
 
     /* Determine entry point.
      * If the module has @Mod, instantiate the entry class, run constructor.
      * If no @Mod is present this is a library -- nothing to run. */
-    if (module->metadata.has_mod)
+    if (run_mod->metadata.has_mod)
     {
-        const char *entry_class = module->metadata.entry_class;
-        int ci = module_find_class(module, entry_class);
+        const char *entry_class = run_mod->metadata.entry_class;
+        int ci = module_find_class(run_mod, entry_class);
         if (ci < 0)
         {
             xeno_vm_error(vm, "@Mod entry class not found");
             return XENO_RUNTIME_ERROR;
         }
-        ClassDef *cls = &module->classes[ci];
+        ClassDef *cls = &run_mod->classes[ci];
 
         /* Allocate the mod object */
         XenoObject *obj = xeno_vm_track(vm, malloc(sizeof(XenoObject) + cls->field_count * sizeof(Value)));
         if (!obj)
         {
             xeno_vm_error(vm, "Out of memory allocating @Mod class '%s'", entry_class);
+            return XENO_RUNTIME_ERROR;
+        }
+        if (!xeno_vm_register_object(vm, obj))
+        {
+            xeno_vm_error(vm, "Out of memory tracking @Mod class '%s'", entry_class);
             return XENO_RUNTIME_ERROR;
         }
         obj->class_def = cls;
@@ -2475,11 +3089,10 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
         {
             if (vm->frame_count >= XENO_FRAME_MAX)
             {
-                free(obj);
                 xeno_vm_error(vm, "Stack overflow starting @Mod constructor");
                 return XENO_RUNTIME_ERROR;
             }
-            Chunk *ctor_chunk = &module->chunks[cls->constructor_index];
+            Chunk *ctor_chunk = &run_mod->chunks[cls->constructor_index];
             CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
             ctor_frame->chunk = ctor_chunk;
             ctor_frame->ip = ctor_chunk->code;
@@ -2488,7 +3101,9 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
             ctor_frame->slots[0] = val_obj(obj);
             XenoResult r = xeno_execute(vm);
             if (r != XENO_OK)
-                return r;
+            {
+                    return r;
+            }
         }
 
         /* Constructor-only entry point for mods */

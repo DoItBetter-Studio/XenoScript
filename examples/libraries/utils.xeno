@@ -1,9 +1,8 @@
 class Utils
 {
-    private:
+    public:
         static final string ECHO = "echo";
 
-    public:
 		/* #Docs
 	     * # title: Utils
 	     * # summary: "Utility functions for common mod operations."

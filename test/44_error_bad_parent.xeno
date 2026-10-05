@@ -1,0 +1,11 @@
+// Tests: parent name is neither a class nor an interface
+class BadChild : NotAThing {
+    public:
+        BadChild() {}
+}
+
+@Mod("error_bad_parent", "1.0.0", "Test")
+class ErrorBadParent {
+    public:
+        ErrorBadParent() {}
+}

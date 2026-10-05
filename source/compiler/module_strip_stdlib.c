@@ -8,14 +8,16 @@
  * Design:
  *   staging holds stdlib then project deps (e.g. libraries → Utils).
  *   User classes stay fully in the output .xar.
- *   Staging classes/chunks are removed entirely (no hollow shells).
- *   Bytecode keeps absolute compile-time class indices; the VM pre-seeds
- *   stdlib/deps in the same order before merging the mod.
+ *   Stdlib/dep *chunks* (bytecode) are removed.
+ *   ClassDefs are kept as hollow shells (name + field layout, method_count=0)
+ *   so compile-time class indices stay valid and deterministic.
+ *   module_merge replaces hollow shells (method_count==0) with the real
+ *   ClassDef from the runtime stdlib/dep pool.
  *
  * At runtime the VM must:
- *   1. Pre-seed stdlib (same order as compile)
- *   2. Load/merge each dep .xar once from mods/ or deps/
- *   3. Merge this mod (user ClassDefs append after the stdlib prefix)
+ *   1. Load stdlib (and deps) into a pool
+ *   2. module_merge pool into the mod (hollow shells fill in)
+ *   3. Execute — method slots and class indices match compile-time
  *
  * Multiple mods can share one libraries.xar without embedding it.
  */
@@ -53,9 +55,8 @@ void module_strip_stdlib(Module *module, const Module *staging) {
     module->uses_stdlib = had_external;
     if (!had_external) return;
 
-    /* Pass 1: strip everything that lived in staging (stdlib + deps).
-     * ClassDefs and chunks are removed; bytecode class indices are left as
-     * absolute compile-time values for the VM stdlib seed to recreate. */
+    /* Pass 1: strip staging chunks; ClassDefs become hollow shells so
+     * absolute compile-time class indices remain valid. */
     if (staging && (staging->count > 0 || staging->class_count > 0)) {
         const char **names   = malloc((size_t)staging->count * sizeof(char*));
         const char **classes = malloc((size_t)(staging->class_count + 1) * sizeof(char*));

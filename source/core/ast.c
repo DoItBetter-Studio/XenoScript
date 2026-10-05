@@ -271,6 +271,18 @@ Expr *expr_as(Arena *a, Expr *operand, Type check_type, int line, int col) {
     return e;
 }
 
+Expr *expr_ternary(Arena *a, Expr *cond, Expr *then_e, Expr *else_e, int line, int col) {
+    Expr *n = arena_alloc(a, sizeof(Expr));
+    n->kind = EXPR_TERNARY;
+    n->line = line;
+    n->col = col;
+    n->resolved_type = (Type){0};
+    n->ternary.cond = cond;
+    n->ternary.then_e = then_e;
+    n->ternary.else_e = else_e;
+    return n;
+}
+
 Expr *expr_typeof(Arena *a, Expr *operand, int line, int col) {
     Expr *e = arena_alloc(a, sizeof(Expr));
     e->kind           = EXPR_TYPEOF;

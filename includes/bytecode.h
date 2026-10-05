@@ -77,8 +77,11 @@ typedef struct {
  * ClassDef contains a Value array (static_values). */
 typedef struct XenoObject XenoObject;
 typedef struct XenoArray  XenoArray;
+/* Forward decls for Value union members */
 typedef struct XenoType   XenoType;
-
+typedef struct XenoField  XenoField;
+typedef struct XenoMethod XenoMethod;
+typedef struct XenoParam  XenoParam;
 
 /* Value: tagged union representing any XenoScript runtime value.
  * is_null == 1 means this is the null value regardless of the union contents.
@@ -93,6 +96,9 @@ typedef struct Value {
         XenoObject  *obj;
         XenoArray   *arr;
         XenoType    *type;
+        XenoField   *field;   /* reflection Field (data-only) */
+        XenoMethod  *method;  /* reflection Method (data-only) */
+        XenoParam   *param;   /* reflection Parameter (data-only) */
     };
 } Value;
 
@@ -103,6 +109,9 @@ static inline Value val_str  (char       *v) { Value r; r.is_null=0; r.s   = v; 
 static inline Value val_obj  (XenoObject *v) { Value r; r.is_null=0; r.obj = v; return r; }
 static inline Value val_arr  (XenoArray  *v) { Value r; r.is_null=0; r.arr = v; return r; }
 static inline Value val_type (XenoType   *v) { Value r; r.is_null=0; r.type= v; return r; }
+static inline Value val_field(XenoField  *v) { Value r; r.is_null=0; r.field = v; return r; }
+static inline Value val_method(XenoMethod *v){ Value r; r.is_null=0; r.method= v; return r; }
+static inline Value val_param(XenoParam  *v) { Value r; r.is_null=0; r.param = v; return r; }
 /* Null: is_null flag set, union cleared */
 static inline Value val_null (void)          { Value r; r.is_null=1; r.i   = 0; return r; }
 static inline bool  is_val_null(Value v)     { return v.is_null != 0; }
@@ -115,16 +124,20 @@ typedef struct XenoArray {
     Value   elements[];
 } XenoArray;
 
-/* XenoType: runtime type descriptor returned by typeof().
- * Minimal by design — just enough for diagnostics and scripting. */
-typedef struct XenoType {
+/* XenoType: runtime type descriptor returned by typeof() / expr.class.
+ * Read-only reflection — no Field.get / Method.invoke. */
+struct XenoType {
     const char       *name;       /* e.g. "int", "MyMod", "ushort[]", "Phase" */
+    uint8_t           tag;        /* XTAG_* aligned with TypeKind where possible */
     bool              is_array;
     bool              is_primitive;
     bool              is_enum;
     bool              is_class;
-    const struct ClassDef *class_def; /* non-NULL for class/enum types -- enables attribute reflection */
-} XenoType;
+    bool              is_nullable;    /* static nullability from typeof operand */
+    const struct ClassDef *class_def; /* class/enum — attrs + hierarchy */
+    uint8_t           element_tag;    /* meaningful when is_array */
+    const char       *element_name;   /* e.g. "int" for int[]; may be NULL */
+};
 
 
 typedef struct {
@@ -179,6 +192,8 @@ typedef struct {
     int  param_type_kinds[EVENT_MAX_PARAMS];
     char param_class_names[EVENT_MAX_PARAMS][EVENT_CLASS_NAME_MAX];
     bool param_is_nullable[EVENT_MAX_PARAMS];
+    AttributeInstance *attributes;
+    int attribute_count;
 } EventDef;
 
 typedef struct ClassDef {
@@ -203,7 +218,6 @@ typedef struct ClassDef {
     int         enum_member_count;
     char       *enum_member_names[64];
     int         enum_member_values[64]; /* parallel array: integer value per member */
-
     /* Compile-time attributes applied to this class, e.g. @Mod(...) */
     AttributeInstance attributes[CLASS_MAX_ATTRIBUTES];
     int               attribute_count;
@@ -223,6 +237,25 @@ typedef struct ClassDef {
     int  interface_count;
     char interface_names[8][64]; /* up to 8 interfaces, name+typearg up to 63 chars */
 } ClassDef;
+
+/* Data-only reflection mirrors (no get/set/invoke). */
+struct XenoField {
+    const FieldDef  *def;
+    const ClassDef  *owner;
+};
+
+struct XenoMethod {
+    const MethodDef *def;
+    const ClassDef  *owner;
+};
+
+struct XenoParam {
+    int      index;
+    int      type_kind;
+    bool     is_nullable;
+    char     class_name[CLASS_NAME_MAX];
+};
+
 
 
 /* ═════════════════════════════════════════════════════════════════════════════
@@ -396,9 +429,12 @@ typedef enum {
      * These implement the class/object system.
      *
      * OP_NEW: allocate a new object of a given class and run its constructor.
-     *   Operand: uint16_t class_index (into module->classes[])
-     *            uint8_t  argc        (constructor argument count)
+     *   Operand: uint8 name_len + name bytes (class name, not index)
+     *            uint8  argc        (constructor argument count)
+     *            uint8  tac + tac type-arg kinds
      *   Stack:   ( args -- obj )
+     *   Class is resolved by name at runtime so module_strip_stdlib cannot
+     *   shift absolute class indices out from under the bytecode.
      *
      * OP_GET_FIELD: push the value of a field on an object.
      *   Operand: uint8_t field_index
@@ -417,7 +453,8 @@ typedef enum {
      *            uint8_t  argc
      *   Stack:   ( obj args -- retval )
      *            obj is passed as 'this' (slot 0) in the method's frame */
-    OP_NEW,               /* [uint16_t class_idx][uint8_t argc]  ( args -- obj   ) */
+    OP_NEW,               /* [u8 name_len][name bytes][u8 argc][u8 tac][tac kinds]
+                             ( args -- obj )  class looked up by name at runtime */
     OP_GET_FIELD,         /* [uint8_t  field_idx]                ( obj  -- val   ) */
     OP_SET_FIELD,         /* [uint8_t  field_idx]                ( obj val -- )    */
     OP_LOAD_THIS,         /* (no operands)                       ( -- obj )        */
@@ -442,10 +479,15 @@ typedef enum {
     OP_AS_TYPE,           /* [tag][name_len][name...]  ( val -- val )   expr as T */
 	OP_I2F,				  /* [uint8_t conversion_tag]  ( int -- float )       */
 	OP_F2I,				  /* [uint8_t conversion_tag]  ( float -- int )       */
-    OP_TYPEOF,            /* [uint8_t type_tag][uint8_t name_len][name_bytes] */
-    OP_TYPE_FIELD,        /* [uint8_t field_id]  ( Type -- val )              */
+    OP_TYPEOF,            /* [uint8_t type_tag][uint8_t flags][uint8_t name_len][name_bytes]
+                           * flags: bit0 = is_nullable (static) */
+    OP_TYPE_FIELD,        /* [uint8_t field_id]  ( Type -- val )
+                           * 0=name 1=isArray 2=isPrimitive 3=isEnum 4=isClass
+                           * 5=kind 6=base(Type?) 7=elementType(Type?)        */
     OP_TYPE_HAS_ATTR,     /* ( Type string -- bool )  hasAttribute(name)      */
     OP_TYPE_GET_ATTR_ARG, /* ( Type string int -- string? ) getAttributeArg   */
+    /* NOTE: new Type opcodes MUST be appended at the end of OpCode so
+     * embedded stdlib .xar bytecode keeps stable numeric opcode values. */
 
     /* ── Nullable operators ─────────────────────────────────────────────── */
     OP_PUSH_NULL,         /*                     ( -- null )  push null value */
@@ -477,6 +519,27 @@ typedef enum {
                                     ( obj -- ) unsubscribe fn from member event on obj */
     OP_EVENT_FIRE_MEMBER,        /* [u8 name_len][name_bytes][u8 arg_count]
                                     ( obj arg0..argN -- ) fire member event on obj */
+
+    /* ── Type reflection (appended — do not reorder older opcodes) ─────── */
+    OP_TYPE_IS_ASSIGNABLE,/* ( Type other, Type self -- bool ) isAssignableFrom */
+    OP_TYPE_NAMES,        /* [uint8_t which] ( Type -- string[] )
+                           * which: 0=interfaces 1=fields 2=methods 3=enumMembers */
+    OP_TYPE_IS_INSTANCE,  /* ( value, Type -- bool ) type.isInstance(value)  */
+    OP_TYPE_GET_FIELD,    /* ( Type, string -- Field? )  type.getField(name) */
+    OP_TYPE_GET_METHOD,   /* ( Type, string -- Method? ) type.getMethod(name)*/
+    OP_FIELD_PROP,        /* [u8 id] ( Field -- val )
+                           * 0=name 1=type 2=isStatic 3=isFinal 4=isNullable */
+    OP_METHOD_PROP,       /* [u8 id] ( Method -- val )
+                           * 0=name 1=returnType 2=isStatic 3=isVirtual 4=paramCount */
+    OP_METHOD_PARAM_AT,   /* ( Method, int -- Parameter? ) method.paramAt(i) */
+    OP_PARAM_PROP,        /* [u8 id] ( Parameter -- val )
+                           * 0=name 1=type 2=isNullable 3=index */
+
+    /* Static method call by class index + method slot (survives stdlib strip).
+     * Prefer this over OP_CALL for ClassName.method() — absolute chunk
+     * indices break once module_strip_stdlib removes stdlib chunks. */
+    OP_CALL_STATIC,       /* [uint8 name_len][name bytes][uint8 method_slot][uint8 argc]
+                             ( args -- ret )  class looked up by name at runtime */
 
 } OpCode;
 

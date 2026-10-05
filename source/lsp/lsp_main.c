@@ -47,6 +47,91 @@ static XdocArchive g_docs;
 static DocStore g_store;
 static bool g_shutdown = false;
 
+/* Build a VS Code-safe file:// URI from a native path or existing URI.
+ * Windows: d:/foo  →  file:///d:/foo   (three slashes — NOT file://d:/ which
+ * is parsed as UNC host "d:").
+ * Unix:    /home/x →  file:///home/x */
+static void path_to_file_uri(const char *path, char *out, size_t sz)
+{
+	if (!path || !path[0])
+	{
+		out[0] = '\0';
+		return;
+	}
+	if (strncmp(path, "file://", 7) == 0)
+	{
+		/* Already a URI — fix file://d:/… → file:///d:/… */
+		const char *rest = path + 7;
+		if (rest[0] && rest[1] == ':' && (rest[2] == '/' || rest[2] == '\\'))
+		{
+			/* host-looking drive letter → file:///D:/... */
+			const char *tail = rest[3] ? rest + 3 : "";
+			size_t i = 0;
+			const char *pre = "file:///";
+			while (*pre && i + 1 < sz)
+				out[i++] = *pre++;
+			if (i + 1 < sz)
+				out[i++] = rest[0];
+			if (i + 1 < sz)
+				out[i++] = ':';
+			if (i + 1 < sz)
+				out[i++] = '/';
+			while (*tail && i + 1 < sz)
+			{
+				out[i++] = (*tail == '\\') ? '/' : *tail;
+				tail++;
+			}
+			out[i] = '\0';
+			return;
+		}
+		size_t i = 0;
+		while (path[i] && i + 1 < sz)
+		{
+			out[i] = (path[i] == '\\') ? '/' : path[i];
+			i++;
+		}
+		out[i] = '\0';
+		return;
+	}
+
+	/* Native path — leave room for "file:///" prefix (8 chars) + NUL */
+	char norm[DOC_URI_MAX];
+	const size_t max_norm = (sz > 16) ? (sz - 16) : 0;
+	size_t n = 0;
+	for (const char *p = path; *p && n + 1 < sizeof(norm) && n < max_norm; p++)
+		norm[n++] = (*p == '\\') ? '/' : *p;
+	norm[n] = '\0';
+
+	const char *prefix;
+	if (((norm[0] >= 'A' && norm[0] <= 'Z') ||
+		 (norm[0] >= 'a' && norm[0] <= 'z')) &&
+		norm[1] == ':')
+	{
+		prefix = "file:///"; /* Windows drive */
+	}
+	else if (norm[0] == '/')
+	{
+		prefix = "file://"; /* Unix absolute — path already starts with / */
+	}
+	else
+	{
+		prefix = "file:///";
+	}
+
+	size_t plen = strlen(prefix);
+	if (plen >= sz)
+	{
+		out[0] = '\0';
+		return;
+	}
+	memcpy(out, prefix, plen);
+	size_t copy = n;
+	if (plen + copy >= sz)
+		copy = sz - plen - 1;
+	memcpy(out + plen, norm, copy);
+	out[plen + copy] = '\0';
+}
+
 /* ── Response helpers ─────────────────────────────────────────────────── */
 
 /* Send a success response with a JSON result value */
@@ -550,31 +635,15 @@ static void handle_definition(long long id, const char *params)
 	{
 		cdef = (const ClassDef *)sym->class_def;
 	}
+	/* Method/field owned by a binary class */
+	if (!cdef && (sym->kind == SYM_FN || sym->kind == SYM_VAR) && sym->class_def)
+		cdef = (const ClassDef *)sym->class_def;
 
-	if (cdef)
+	/* Prefer real source definition when we have one (project methods/fields). */
+	if (sym->def_file && sym->def_line > 0)
 	{
-		/* Came from a binary / stdlib ClassDef → always use stub */
-		char stub_uri[256];
-		snprintf(stub_uri, sizeof(stub_uri), "xeno-stub:///%s.xeno", cdef->name);
-
-		json_buf_raw(&b, "{\"uri\":");
-		json_buf_str(&b, stub_uri);
-		json_buf_raw(&b,
-					 ",\"range\":{\"start\":{\"line\":0,\"character\":0},"
-					 "\"end\":{\"line\":0,\"character\":0}}}");
-	}
-	else if (sym->def_file && sym->def_line > 0)
-	{
-		/* Normal source file */
 		char def_uri[DOC_URI_MAX];
-		if (strncmp(sym->def_file, "file://", 7) == 0)
-		{
-			snprintf(def_uri, sizeof(def_uri), "%s", sym->def_file);
-		}
-		else
-		{
-			snprintf(def_uri, sizeof(def_uri), "file://%s", sym->def_file);
-		}
+		path_to_file_uri(sym->def_file, def_uri, sizeof(def_uri));
 		int def_line = sym->def_line > 0 ? sym->def_line - 1 : 0;
 		int def_col = sym->def_col > 0 ? sym->def_col - 1 : 0;
 
@@ -583,6 +652,23 @@ static void handle_definition(long long id, const char *params)
 		json_buf_rawf(&b, ",\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
 						  "\"end\":{\"line\":%d,\"character\":%d}}}",
 					  def_line, def_col, def_line, def_col + sym->length);
+	}
+	else if (cdef || (sym->class_name_buf[0] && sym->class_def))
+	{
+		/* Binary / stdlib class or member → generated stub */
+		const char *stub_name = cdef ? cdef->name : sym->class_name_buf;
+		if (sym->class_name_buf[0] &&
+			(sym->kind == SYM_FN || sym->kind == SYM_VAR))
+			stub_name = sym->class_name_buf;
+
+		char stub_uri[256];
+		snprintf(stub_uri, sizeof(stub_uri), "xeno-stub:///%s.xeno", stub_name);
+
+		json_buf_raw(&b, "{\"uri\":");
+		json_buf_str(&b, stub_uri);
+		json_buf_raw(&b,
+					 ",\"range\":{\"start\":{\"line\":0,\"character\":0},"
+					 "\"end\":{\"line\":0,\"character\":0}}}");
 	}
 	else
 	{
@@ -643,20 +729,13 @@ static void handle_references(long long id, const char *params)
 
 		const char *ref_file = usages[i].file ? usages[i].file : "";
 		char ref_uri[DOC_URI_MAX];
-		if (strncmp(ref_file, "file://", 7) == 0)
-		{
-			snprintf(ref_uri, sizeof(ref_uri), "%s", ref_file);
-		}
-		else if (ref_file[0])
-		{
-			snprintf(ref_uri, sizeof(ref_uri), "file://%s", ref_file);
-		}
+		if (ref_file[0])
+			path_to_file_uri(ref_file, ref_uri, sizeof(ref_uri));
 		else
-		{
 			ref_uri[0] = '\0';
-		}
 
-		int ref_line = usages[i].line; /* already 0-based */
+		/* Checker lines are 1-based; LSP expects 0-based. */
+		int ref_line = usages[i].line > 0 ? usages[i].line - 1 : 0;
 		int ref_col = usages[i].col > 0 ? usages[i].col - 1 : 0;
 		int ref_end = ref_col + usages[i].length;
 
@@ -800,6 +879,8 @@ static void completion_add(JsonBuf *b, int *count, int *first,
 	json_buf_raw(b, "}");
 	(*count)++;
 }
+
+/* type_kind_name() comes from ast.c via checker.h / ast.h */
 
 static void complete_from_class_def(JsonBuf *b, int *count, int *first,
 									const ClassDef *def,

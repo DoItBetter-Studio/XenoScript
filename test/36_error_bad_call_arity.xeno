@@ -1,0 +1,12 @@
+// Tests: method arity mismatch
+import <collections>;
+
+@Mod("error_bad_call_arity", "1.0.0", "Test")
+class ErrorBadCallArity {
+    public:
+        ErrorBadCallArity() {
+            List<string> names = new List<string>();
+            names.add();
+            names.add("a", "b");
+        }
+}

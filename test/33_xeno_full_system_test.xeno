@@ -1,0 +1,229 @@
+import <collections>
+
+@Mod("My Mod", "1.0.0", "Tigga")
+class Example
+{
+    public:
+        float decimalNumber = 3.14;
+        string name = "xeno";
+        string greeting = $"Hello, {name}";
+        bool isTrue = true;
+
+        Greeter greeter = new Greeter();
+
+        Example()
+        {
+            if (decimalNumber > 0.0)
+            {
+                print(decimalNumber);
+            }
+
+            string str = name as string;
+
+            if (str is string)
+            {
+                print($"str {typeof(str)}");
+            }
+
+            if (greeter is Greetable)
+            {
+                print(greeter.greet());
+            }
+
+            for (int j = 0; j < number; j++)
+            {
+                float output = decimalNumber * j.toFloat();
+                print(output);
+            }
+
+            method();
+
+			TestScript testScript = new TestScript();
+
+			testScript.controlFlowExample();
+			testScript.matchCaseExample();
+			testScript.loopExample();
+			testScript.enumExample();
+			testScript.greetExample();
+			testScript.collectionExamples();
+
+			print(StaticClass.greet());
+        }
+
+        function method(): void
+        {
+            print(greeting);
+        }
+
+        static function staticFunction(int a, int b): int
+        {
+            return a + b;
+        }
+
+    private:
+        int number = 10;
+        ushort shortNumber = 25000;
+        List<double> doublesList = new List<double>();
+        Dictionary<string, int> stringIntDict =
+            new Dictionary<string, int>();
+
+}
+
+enum DaysOfWeek
+{
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    Sunday
+}
+
+interface Greetable
+{
+    function greet(): string;
+}
+
+class Greeter : Greetable
+{
+    public:
+        override function greet(): string
+        {
+            return "Hello, world!";
+        }
+}
+
+class StaticClass
+{
+    public:
+        static function greet(): string
+        {
+            return "Hello, world!";
+        }
+}
+
+class TestScript
+{
+    public:
+        int intValue = 42;
+        float floatValue = 3.14159;
+        string stringValue = "Test String";
+        char charValue = 'A';
+        bool boolValue = true;
+        int[] intArray = new int[6];
+
+        TestScript()
+        {
+            intArray[0] = 1;
+            intArray[1] = 2;
+            intArray[2] = 3;
+            intArray[3] = 4;
+            intArray[4] = 5;
+            intArray[5] = 6;
+        }
+
+        function controlFlowExample(): void
+        {
+            if (intValue > 10)
+            {
+                print("intValue is greater than 10");
+            }
+            else if (floatValue < 5.0)
+            {
+                print("floatValue is less than 5.0");
+            }
+            else
+            {
+                print("Else case");
+            }
+        }
+
+        function matchCaseExample(): void
+        {
+            match (boolValue)
+            {
+                case true:
+                    print("boolValue is true");
+                    break;
+
+                case false:
+                    print("boolValue is false");
+                    break;
+
+                default:
+                    print("Default case");
+            }
+        }
+
+        function loopExample(): void
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                print("Loop iteration: " + i);
+            }
+
+            foreach (int num in intArray)
+            {
+                print("Foreach value: " + num);
+            }
+        }
+
+        function enumExample(): void
+        {
+            DaysOfWeek today = DaysOfWeek.Wednesday;
+
+            match (today)
+            {
+                case DaysOfWeek.Monday:
+                    print("It's Monday");
+                    break;
+
+                case DaysOfWeek.Wednesday:
+                    print("It's Wednesday");
+                    break;
+
+                default:
+                    print("It's another day");
+            }
+        }
+
+        function greetExample(): void
+        {
+            Greeter greeter = new Greeter();
+            print(greeter.greet());
+        }
+
+        function collectionExamples(): void
+        {
+            List<string> stringList = new List<string>();
+
+            stringList.add("Item 1");
+            stringList.add("Item 2");
+
+            print(
+                $"List contents: {stringList[0]}, {stringList[1]}"
+            );
+
+            Dictionary<int, string> intStringDict =
+                new Dictionary<int, string>();
+
+            intStringDict.add(1, "Value 1");
+            intStringDict.add(2, "Value 2");
+
+            print(
+                $"Dictionary contents: Key 1 -> {intStringDict[1]}, " +
+                $"Key 2 -> {intStringDict[2]}"
+            );
+
+            foreach (string item in stringList)
+            {
+                print($"List item: {item}");
+            }
+        }
+
+    protected:
+        string[] arrayTest;
+        Dictionary<string, List<int>> dictTest =
+            new Dictionary<string, List<int>>();
+}

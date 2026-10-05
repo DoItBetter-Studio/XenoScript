@@ -1,0 +1,360 @@
+import <core>;
+import <collections>;
+import <math>;
+
+@AttributeUsage([AttributeTarget.Class, AttributeTarget.Method, AttributeTarget.Constructor, AttributeTarget.Enum, AttributeTarget.Event])
+class TestTag : Attribute {
+    public:
+        string name;
+
+        TestTag(string name) {
+            this.name = name;
+        }
+}
+
+@TestTag("phase-enum")
+enum RunPhase {
+    Setup = 0,
+    Running = 1,
+    Complete = 2
+}
+
+interface INamed {
+    function getName(): string;
+}
+
+@TestTag("base")
+class BaseDevice : INamed {
+    protected:
+        string name;
+
+    public:
+        BaseDevice(string name) {
+            this.name = name;
+        }
+
+        function getName(): string {
+            return this.name;
+        }
+
+        virtual function status(): string {
+            return $"device:{this.name}";
+        }
+}
+
+class SmartDevice : BaseDevice {
+    public:
+        int? signal;
+
+        @TestTag("device-ctor")
+        SmartDevice(string name) {
+            super(name);
+            signal = null;
+        }
+
+        @TestTag("override")
+        override function status(): string {
+            return $"smart:{this.name}";
+        }
+
+        function update(int value): void {
+            signal = value;
+        }
+}
+
+class Cell<T> {
+    public:
+        T value;
+
+        Cell(T value) {
+            this.value = value;
+        }
+
+        function read(): T {
+            return value;
+        }
+}
+
+class SignalListener {
+    public:
+        int total;
+
+        SignalListener() {
+            total = 0;
+        }
+
+        @TestTag("event-handler")
+        function receive(int value): void {
+            total = total + value;
+        }
+}
+
+class TextCursor : IEnumerator<string> {
+    private:
+        string[] items;
+        int index;
+
+    public:
+        TextCursor(string[] items) {
+            this.items = items;
+            index = -1;
+        }
+
+        function moveNext(): bool {
+            index = index + 1;
+            return index < items.length;
+        }
+
+        function current(): string {
+            return items[index];
+        }
+}
+
+class TextBatch : IEnumerable<string> {
+    private:
+        string[] items;
+        int size;
+
+    public:
+        TextBatch() {
+            items = new string[4];
+            size = 0;
+        }
+
+        function add(string item): void {
+            items[size] = item;
+            size = size + 1;
+        }
+
+        function getEnumerator(): IEnumerator<string> {
+            string[] copy = new string[size];
+            for (int i = 0; i < size; i++) {
+                copy[i] = items[i];
+            }
+            return new TextCursor(copy);
+        }
+}
+
+class SuiteError : Exception {
+    public:
+        int code;
+
+        SuiteError(string message, int code) {
+            super(message);
+            this.code = code;
+        }
+}
+
+@TestTag("vm-capabilities")
+@Mod("vm_capabilities", "1.0.0", "XenoScript")
+class VmCapabilities {
+    static int sharedTotal = 0;
+
+    public:
+        final int version = 1;
+        string? optionalLabel;
+        @TestTag("signal-event")
+        event OnSignal(int value);
+        event OnComplete(string message);
+
+        @TestTag("entry-ctor")
+        VmCapabilities() {
+            print("== vm capabilities ==");
+            testPrimitivesAndOperators();
+            testObjectsAndReflection();
+            testCollectionsAndIteration();
+            testEventsAndExceptions();
+            testStaticStateAndMath();
+            print("== complete ==");
+        }
+
+        @TestTag("primitives")
+        function testPrimitivesAndOperators(): void {
+            byte b = 255;
+            sbyte sb = -12 as sbyte;
+            short sh = -300 as short;
+            ushort ush = 60000;
+            int i = 40;
+            uint ui = 42;
+            long l = 9000000;
+            ulong ul = 10000000;
+            float f = 1.25;
+            double d = 2.5;
+            char c = 'X';
+            bool enabled = true;
+            string text = $"types:{b},{sb},{sh},{ush},{i + 2},{ui},{l},{ul},{f + d},{c},{enabled}";
+            print(text);
+            print((i is int) && (text is string));
+            print(enabled ? "ternary-yes" : "ternary-no");
+
+            int[] values = [2, 4, 6];
+            values[1] = values[0] + values[2];
+            int sum = 0;
+            for (int n = 0; n < values.length; n++) {
+                sum = sum + values[n];
+            }
+            print($"array:{values.length}:{sum}");
+            foreach (int value in values) {
+                print($"foreach-array:{value}");
+            }
+
+            int steps = 0;
+            while (steps < 2) {
+                steps++;
+            }
+            print($"while:{steps}");
+        }
+
+        @TestTag("objects")
+        function testObjectsAndReflection(): void {
+            SmartDevice device = new SmartDevice("Aster");
+            BaseDevice base = device;
+            INamed named = device;
+            print(base.status());
+            print(named.getName());
+            print((device is BaseDevice) && (device is INamed));
+            SmartDevice? maybeDevice = null;
+            int? maybeSignal = maybeDevice?.signal;
+            print(maybeSignal ?? 0);
+            device.update(7);
+            print(device.signal ?? 0);
+
+            Cell<string> cell = new Cell<string>("generic");
+            print(cell.read());
+
+            Type deviceType = typeof(device);
+            print(deviceType.name);
+            print(deviceType.base.name);
+            print(deviceType.isInstance(device));
+            print(deviceType.isAssignableFrom(typeof(base)));
+            print(deviceType.interfaces().length >= 0);
+            print(deviceType.fields().length >= 1);
+            print(deviceType.methods().length >= 1);
+
+            Field? nameField = typeof(BaseDevice).getField("name");
+            Field? labelField = typeof(VmCapabilities).getField("optionalLabel");
+            Method? updateMethod = deviceType.getMethod("update");
+            Parameter? updateParam = updateMethod!.paramAt(0);
+            print(nameField != null);
+            print(nameField!.name);
+            print(labelField!.isNullable);
+            print(updateMethod!.name);
+            print(updateMethod!.paramCount);
+            print(updateParam != null);
+            print(updateParam!.name);
+            print(updateParam!.type.name);
+
+            print(typeof(VmCapabilities).hasAttribute("TestTag"));
+            print(typeof(VmCapabilities).getAttributeArg("TestTag", 0));
+
+            RunPhase phase = RunPhase.Running;
+            Type phaseType = typeof(phase);
+            string[] phaseNames = phaseType.enumMembers();
+            print($"enum-members:{phaseNames.length}:{phaseNames[1]}");
+            print($"enum-attribute:{phaseType.hasAttribute("TestTag")}");
+            match (phase) {
+                case RunPhase.Setup:
+                    print("phase:setup");
+                    break;
+                case RunPhase.Running:
+                    print("phase:running");
+                    break;
+                case RunPhase.Complete:
+                    print("phase:complete");
+                    break;
+            }
+        }
+
+        @TestTag("collections")
+        function testCollectionsAndIteration(): void {
+            List<string> names = new List<string>();
+            names.add("Ada");
+            names.add("Lin");
+            names[1] = "Linus";
+            print($"list:{names.count()}:{names[1]}:{names.contains("Ada")}");
+
+            Dictionary<string, List<int>> scores =
+                new Dictionary<string, List<int>>();
+            List<int> points = new List<int>();
+            points.add(8);
+            points.add(13);
+            scores.add("team", points);
+            scores["team"][1] = 21;
+            print($"dictionary:{scores["team"][0]}:{scores["team"][1]}");
+
+            Stack<int> stack = new Stack<int>();
+            stack.push(3);
+            stack.push(5);
+            print($"stack:{stack.peek()}:{stack.pop()}:{stack.count()}");
+
+            Queue<string> queue = new Queue<string>();
+            queue.enqueue("first");
+            queue.enqueue("second");
+            print($"queue:{queue.dequeue()}:{queue.peek()}:{queue.count()}");
+
+            foreach (string name in names) {
+                print($"foreach-list:{name}");
+            }
+
+            foreach (int n in new Range(1, 3)) {
+                print($"range:{n}");
+            }
+
+            TextBatch batch = new TextBatch();
+            batch.add("alpha");
+            batch.add("beta");
+            foreach (string item in batch) {
+                print($"foreach-interface:{item}");
+            }
+        }
+
+        @TestTag("events-exceptions")
+        function testEventsAndExceptions(): void {
+            SignalListener listener = new SignalListener();
+            OnSignal += listener.receive;
+            OnSignal(4);
+            OnSignal(6);
+            OnSignal -= listener.receive;
+            OnSignal(100);
+            print($"event:{listener.total}");
+
+            OnComplete += this.completed;
+            OnComplete("done");
+            OnComplete += staticCompleted;
+            OnComplete("again");
+            OnComplete -= staticCompleted;
+            print("event-fired");
+
+            try {
+                throw new SuiteError("expected", 17);
+            } catch (SuiteError error) {
+                print($"caught:{error.code}:{error.message}");
+            } finally {
+                print("finally");
+            }
+
+            string? missing = null;
+            print($"coalesce:{missing ?? "fallback"}");
+        }
+
+        @TestTag("static-state")
+        function testStaticStateAndMath(): void {
+            VmCapabilities.addToSharedTotal(4);
+            VmCapabilities.addToSharedTotal(5);
+            print($"static:{VmCapabilities.sharedTotal}:{this.version}");
+            print($"math:{Math.sqrt(81.0)}");
+        }
+
+        static function addToSharedTotal(int amount): void {
+            VmCapabilities.sharedTotal = VmCapabilities.sharedTotal + amount;
+        }
+
+        static function staticCompleted(string message): void {
+            print($"static-completed:{message}");
+        }
+
+        @TestTag("completion-handler")
+        function completed(string message): void {
+            print($"completed:{message}");
+        }
+}

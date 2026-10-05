@@ -1,3 +1,129 @@
 {
-  "xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe"
+"xenoscript.lspPath": "D:/Projects/XenoScript/bin/xenolsp.exe",
+"python-envs.defaultEnvManager": "ms-python.python:system",
+"editor.tokenColorCustomizations": {
+  "textMateRules": [
+    {
+      "scope": [
+        "comment.line.double-slash.xeno",
+        "comment.block.xeno",
+        "punctuation.definition.comment.begin.xeno",
+        "punctuation.definition.comment.end.xeno"
+      ],
+      "settings": { "foreground": "#6A9955", "fontStyle": "italic" }
+    },
+    {
+      "scope": [
+        "string.quoted.double.xeno",
+        "string.other.module.xeno"
+      ],
+      "settings": { "foreground": "#d66539" }
+    },
+    {
+      "scope": "constant.character.escape.xeno",
+      "settings": { "foreground": "#D7BA7D" }
+    },
+    {
+      "scope": [
+        "punctuation.definition.string.begin.xeno",
+        "punctuation.definition.string.end.xeno"
+      ],
+      "settings": { "foreground": "#d66539" }
+    },
+    {
+      "scope": [
+        "punctuation.section.interpolation.begin.xeno",
+        "punctuation.section.interpolation.end.xeno"
+      ],
+      "settings": { "foreground": "#D4D4D4" }
+    },
+    {
+      "scope": [
+        "punctuation.definition.attribute.xeno",
+        "entity.name.tag.xeno"
+      ],
+      "settings": { "foreground": "#ffd000", "fontStyle": "bold" }
+    },
+    {
+      "scope": "keyword.control.import.xeno",
+      "settings": { "foreground": "#C586C0" }
+    },
+    {
+      "scope": [
+        "keyword.control.xeno",
+        "keyword.declaration.xeno",
+        "storage.modifier.xeno",
+        "keyword.operator.new.xeno",
+        "keyword.operator.typeof.xeno",
+        "keyword.operator.cast.xeno",
+        "keyword.other.xeno"
+      ],
+      "settings": { "foreground": "#569CD6" }
+    },
+    {
+      "scope": [
+        "constant.language.boolean.xeno",
+        "constant.language.null.xeno",
+        "constant.other.xeno"
+      ],
+      "settings": { "foreground": "#D7BA7D" }
+    },
+    {
+      "scope": [
+        "constant.numeric.float.xeno",
+        "constant.numeric.integer.xeno"
+      ],
+      "settings": { "foreground": "#B5CEA8" }
+    },
+    {
+      "scope": "support.type.builtin.xeno",
+      "settings": { "foreground": "#4EC9B0" }
+    },
+    {
+      "scope": "entity.name.type.xeno",
+      "settings": { "foreground": "#4EC9B0" }
+    },
+    {
+      "scope": "entity.name.function.xeno",
+      "settings": { "foreground": "#DCDCAA", "fontStyle": "bold" }
+    },
+    {
+      "scope": "entity.name.type.generic.container.xeno",
+      "settings": { "foreground": "#4EC9B0", "fontStyle": "bold" }
+    },
+    {
+      "scope": "entity.name.type.generic.argument.xeno",
+      "settings": { "foreground": "#9CDCFE", "fontStyle": "bold" }
+    },
+    {
+      "scope": "variable.other.xeno",
+      "settings": { "foreground": "#9CDCFE" }
+    },
+    {
+      "scope": [
+        "punctuation.definition.generic.begin.xeno",
+        "punctuation.definition.generic.end.xeno",
+        "punctuation.definition.block.begin.xeno",
+        "punctuation.definition.block.end.xeno",
+        "punctuation.definition.parameters.begin.xeno",
+        "punctuation.definition.parameters.end.xeno",
+        "punctuation.terminator.statement.xeno",
+        "punctuation.separator.comma.xeno",
+        "punctuation.separator.colon.xeno",
+        "punctuation.accessor.xeno"
+      ],
+      "settings": { "foreground": "#D4D4D4" }
+    },
+    {
+      "scope": [
+        "keyword.operator.arithmetic.xeno",
+        "keyword.operator.comparison.xeno",
+        "keyword.operator.logical.xeno",
+        "keyword.operator.assignment.xeno",
+        "keyword.operator.nullable.xeno"
+      ],
+      "settings": { "foreground": "#D4D4D4" }
+    }
+  ]
+}
 }

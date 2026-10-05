@@ -1,0 +1,706 @@
+@Mod("compaction_30kb", "1.0.0", "XenoScript")
+class BytecodeSizeProbe {
+    public:
+        BytecodeSizeProbe() {
+            int checksum = 0;
+            int seed = 7;
+            checksum = (checksum + this.compute000(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute001(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute002(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute003(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute004(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute005(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute006(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute007(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute008(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute009(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute010(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute011(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute012(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute013(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute014(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute015(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute016(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute017(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute018(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute019(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute020(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute021(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute022(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute023(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute024(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute025(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute026(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute027(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute028(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute029(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute030(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute031(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute032(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute033(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute034(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute035(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute036(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute037(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute038(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute039(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            checksum = (checksum + this.compute040(seed)) % 1000003;
+            seed = (seed * 3 + 11) % 997;
+            print(checksum);
+        }
+        function compute000(int seed): int {
+            int value = seed + 11;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 11) % 1009;
+                value = (value * 5 + 22) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 11) % 997;
+                } else {
+                    value = (value + round * 7 + 11) % 991;
+                }
+                value = (value * 7 + round + 11) % 983;
+                value = (value + value / 5 + 11) % 977;
+            }
+            return value;
+        }
+        function compute001(int seed): int {
+            int value = seed + 18;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 18) % 1009;
+                value = (value * 5 + 36) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 18) % 997;
+                } else {
+                    value = (value + round * 7 + 18) % 991;
+                }
+                value = (value * 7 + round + 18) % 983;
+                value = (value + value / 5 + 18) % 977;
+            }
+            return value;
+        }
+        function compute002(int seed): int {
+            int value = seed + 25;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 25) % 1009;
+                value = (value * 5 + 50) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 25) % 997;
+                } else {
+                    value = (value + round * 7 + 25) % 991;
+                }
+                value = (value * 7 + round + 25) % 983;
+                value = (value + value / 5 + 25) % 977;
+            }
+            return value;
+        }
+        function compute003(int seed): int {
+            int value = seed + 32;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 32) % 1009;
+                value = (value * 5 + 64) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 32) % 997;
+                } else {
+                    value = (value + round * 7 + 32) % 991;
+                }
+                value = (value * 7 + round + 32) % 983;
+                value = (value + value / 5 + 32) % 977;
+            }
+            return value;
+        }
+        function compute004(int seed): int {
+            int value = seed + 39;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 39) % 1009;
+                value = (value * 5 + 78) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 39) % 997;
+                } else {
+                    value = (value + round * 7 + 39) % 991;
+                }
+                value = (value * 7 + round + 39) % 983;
+                value = (value + value / 5 + 39) % 977;
+            }
+            return value;
+        }
+        function compute005(int seed): int {
+            int value = seed + 46;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 46) % 1009;
+                value = (value * 5 + 92) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 46) % 997;
+                } else {
+                    value = (value + round * 7 + 46) % 991;
+                }
+                value = (value * 7 + round + 46) % 983;
+                value = (value + value / 5 + 46) % 977;
+            }
+            return value;
+        }
+        function compute006(int seed): int {
+            int value = seed + 53;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 53) % 1009;
+                value = (value * 5 + 106) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 53) % 997;
+                } else {
+                    value = (value + round * 7 + 53) % 991;
+                }
+                value = (value * 7 + round + 53) % 983;
+                value = (value + value / 5 + 53) % 977;
+            }
+            return value;
+        }
+        function compute007(int seed): int {
+            int value = seed + 60;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 60) % 1009;
+                value = (value * 5 + 120) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 60) % 997;
+                } else {
+                    value = (value + round * 7 + 60) % 991;
+                }
+                value = (value * 7 + round + 60) % 983;
+                value = (value + value / 5 + 60) % 977;
+            }
+            return value;
+        }
+        function compute008(int seed): int {
+            int value = seed + 67;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 67) % 1009;
+                value = (value * 5 + 134) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 67) % 997;
+                } else {
+                    value = (value + round * 7 + 67) % 991;
+                }
+                value = (value * 7 + round + 67) % 983;
+                value = (value + value / 5 + 67) % 977;
+            }
+            return value;
+        }
+        function compute009(int seed): int {
+            int value = seed + 74;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 74) % 1009;
+                value = (value * 5 + 148) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 74) % 997;
+                } else {
+                    value = (value + round * 7 + 74) % 991;
+                }
+                value = (value * 7 + round + 74) % 983;
+                value = (value + value / 5 + 74) % 977;
+            }
+            return value;
+        }
+        function compute010(int seed): int {
+            int value = seed + 81;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 81) % 1009;
+                value = (value * 5 + 162) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 81) % 997;
+                } else {
+                    value = (value + round * 7 + 81) % 991;
+                }
+                value = (value * 7 + round + 81) % 983;
+                value = (value + value / 5 + 81) % 977;
+            }
+            return value;
+        }
+        function compute011(int seed): int {
+            int value = seed + 88;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 88) % 1009;
+                value = (value * 5 + 176) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 88) % 997;
+                } else {
+                    value = (value + round * 7 + 88) % 991;
+                }
+                value = (value * 7 + round + 88) % 983;
+                value = (value + value / 5 + 88) % 977;
+            }
+            return value;
+        }
+        function compute012(int seed): int {
+            int value = seed + 12;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 12) % 1009;
+                value = (value * 5 + 24) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 12) % 997;
+                } else {
+                    value = (value + round * 7 + 12) % 991;
+                }
+                value = (value * 7 + round + 12) % 983;
+                value = (value + value / 5 + 12) % 977;
+            }
+            return value;
+        }
+        function compute013(int seed): int {
+            int value = seed + 19;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 19) % 1009;
+                value = (value * 5 + 38) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 19) % 997;
+                } else {
+                    value = (value + round * 7 + 19) % 991;
+                }
+                value = (value * 7 + round + 19) % 983;
+                value = (value + value / 5 + 19) % 977;
+            }
+            return value;
+        }
+        function compute014(int seed): int {
+            int value = seed + 26;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 26) % 1009;
+                value = (value * 5 + 52) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 26) % 997;
+                } else {
+                    value = (value + round * 7 + 26) % 991;
+                }
+                value = (value * 7 + round + 26) % 983;
+                value = (value + value / 5 + 26) % 977;
+            }
+            return value;
+        }
+        function compute015(int seed): int {
+            int value = seed + 33;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 33) % 1009;
+                value = (value * 5 + 66) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 33) % 997;
+                } else {
+                    value = (value + round * 7 + 33) % 991;
+                }
+                value = (value * 7 + round + 33) % 983;
+                value = (value + value / 5 + 33) % 977;
+            }
+            return value;
+        }
+        function compute016(int seed): int {
+            int value = seed + 40;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 40) % 1009;
+                value = (value * 5 + 80) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 40) % 997;
+                } else {
+                    value = (value + round * 7 + 40) % 991;
+                }
+                value = (value * 7 + round + 40) % 983;
+                value = (value + value / 5 + 40) % 977;
+            }
+            return value;
+        }
+        function compute017(int seed): int {
+            int value = seed + 47;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 47) % 1009;
+                value = (value * 5 + 94) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 47) % 997;
+                } else {
+                    value = (value + round * 7 + 47) % 991;
+                }
+                value = (value * 7 + round + 47) % 983;
+                value = (value + value / 5 + 47) % 977;
+            }
+            return value;
+        }
+        function compute018(int seed): int {
+            int value = seed + 54;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 54) % 1009;
+                value = (value * 5 + 108) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 54) % 997;
+                } else {
+                    value = (value + round * 7 + 54) % 991;
+                }
+                value = (value * 7 + round + 54) % 983;
+                value = (value + value / 5 + 54) % 977;
+            }
+            return value;
+        }
+        function compute019(int seed): int {
+            int value = seed + 61;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 61) % 1009;
+                value = (value * 5 + 122) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 61) % 997;
+                } else {
+                    value = (value + round * 7 + 61) % 991;
+                }
+                value = (value * 7 + round + 61) % 983;
+                value = (value + value / 5 + 61) % 977;
+            }
+            return value;
+        }
+        function compute020(int seed): int {
+            int value = seed + 68;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 68) % 1009;
+                value = (value * 5 + 136) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 68) % 997;
+                } else {
+                    value = (value + round * 7 + 68) % 991;
+                }
+                value = (value * 7 + round + 68) % 983;
+                value = (value + value / 5 + 68) % 977;
+            }
+            return value;
+        }
+        function compute021(int seed): int {
+            int value = seed + 75;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 75) % 1009;
+                value = (value * 5 + 150) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 75) % 997;
+                } else {
+                    value = (value + round * 7 + 75) % 991;
+                }
+                value = (value * 7 + round + 75) % 983;
+                value = (value + value / 5 + 75) % 977;
+            }
+            return value;
+        }
+        function compute022(int seed): int {
+            int value = seed + 82;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 82) % 1009;
+                value = (value * 5 + 164) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 82) % 997;
+                } else {
+                    value = (value + round * 7 + 82) % 991;
+                }
+                value = (value * 7 + round + 82) % 983;
+                value = (value + value / 5 + 82) % 977;
+            }
+            return value;
+        }
+        function compute023(int seed): int {
+            int value = seed + 89;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 89) % 1009;
+                value = (value * 5 + 178) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 89) % 997;
+                } else {
+                    value = (value + round * 7 + 89) % 991;
+                }
+                value = (value * 7 + round + 89) % 983;
+                value = (value + value / 5 + 89) % 977;
+            }
+            return value;
+        }
+        function compute024(int seed): int {
+            int value = seed + 13;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 13) % 1009;
+                value = (value * 5 + 26) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 13) % 997;
+                } else {
+                    value = (value + round * 7 + 13) % 991;
+                }
+                value = (value * 7 + round + 13) % 983;
+                value = (value + value / 5 + 13) % 977;
+            }
+            return value;
+        }
+        function compute025(int seed): int {
+            int value = seed + 20;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 20) % 1009;
+                value = (value * 5 + 40) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 20) % 997;
+                } else {
+                    value = (value + round * 7 + 20) % 991;
+                }
+                value = (value * 7 + round + 20) % 983;
+                value = (value + value / 5 + 20) % 977;
+            }
+            return value;
+        }
+        function compute026(int seed): int {
+            int value = seed + 27;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 27) % 1009;
+                value = (value * 5 + 54) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 27) % 997;
+                } else {
+                    value = (value + round * 7 + 27) % 991;
+                }
+                value = (value * 7 + round + 27) % 983;
+                value = (value + value / 5 + 27) % 977;
+            }
+            return value;
+        }
+        function compute027(int seed): int {
+            int value = seed + 34;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 34) % 1009;
+                value = (value * 5 + 68) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 34) % 997;
+                } else {
+                    value = (value + round * 7 + 34) % 991;
+                }
+                value = (value * 7 + round + 34) % 983;
+                value = (value + value / 5 + 34) % 977;
+            }
+            return value;
+        }
+        function compute028(int seed): int {
+            int value = seed + 41;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 41) % 1009;
+                value = (value * 5 + 82) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 41) % 997;
+                } else {
+                    value = (value + round * 7 + 41) % 991;
+                }
+                value = (value * 7 + round + 41) % 983;
+                value = (value + value / 5 + 41) % 977;
+            }
+            return value;
+        }
+        function compute029(int seed): int {
+            int value = seed + 48;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 48) % 1009;
+                value = (value * 5 + 96) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 48) % 997;
+                } else {
+                    value = (value + round * 7 + 48) % 991;
+                }
+                value = (value * 7 + round + 48) % 983;
+                value = (value + value / 5 + 48) % 977;
+            }
+            return value;
+        }
+        function compute030(int seed): int {
+            int value = seed + 55;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 55) % 1009;
+                value = (value * 5 + 110) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 55) % 997;
+                } else {
+                    value = (value + round * 7 + 55) % 991;
+                }
+                value = (value * 7 + round + 55) % 983;
+                value = (value + value / 5 + 55) % 977;
+            }
+            return value;
+        }
+        function compute031(int seed): int {
+            int value = seed + 62;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 62) % 1009;
+                value = (value * 5 + 124) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 62) % 997;
+                } else {
+                    value = (value + round * 7 + 62) % 991;
+                }
+                value = (value * 7 + round + 62) % 983;
+                value = (value + value / 5 + 62) % 977;
+            }
+            return value;
+        }
+        function compute032(int seed): int {
+            int value = seed + 69;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 69) % 1009;
+                value = (value * 5 + 138) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 69) % 997;
+                } else {
+                    value = (value + round * 7 + 69) % 991;
+                }
+                value = (value * 7 + round + 69) % 983;
+                value = (value + value / 5 + 69) % 977;
+            }
+            return value;
+        }
+        function compute033(int seed): int {
+            int value = seed + 76;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 76) % 1009;
+                value = (value * 5 + 152) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 76) % 997;
+                } else {
+                    value = (value + round * 7 + 76) % 991;
+                }
+                value = (value * 7 + round + 76) % 983;
+                value = (value + value / 5 + 76) % 977;
+            }
+            return value;
+        }
+        function compute034(int seed): int {
+            int value = seed + 83;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 83) % 1009;
+                value = (value * 5 + 166) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 83) % 997;
+                } else {
+                    value = (value + round * 7 + 83) % 991;
+                }
+                value = (value * 7 + round + 83) % 983;
+                value = (value + value / 5 + 83) % 977;
+            }
+            return value;
+        }
+        function compute035(int seed): int {
+            int value = seed + 90;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 90) % 1009;
+                value = (value * 5 + 180) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 90) % 997;
+                } else {
+                    value = (value + round * 7 + 90) % 991;
+                }
+                value = (value * 7 + round + 90) % 983;
+                value = (value + value / 5 + 90) % 977;
+            }
+            return value;
+        }
+        function compute036(int seed): int {
+            int value = seed + 14;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 14) % 1009;
+                value = (value * 5 + 28) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 14) % 997;
+                } else {
+                    value = (value + round * 7 + 14) % 991;
+                }
+                value = (value * 7 + round + 14) % 983;
+                value = (value + value / 5 + 14) % 977;
+            }
+            return value;
+        }
+        function compute037(int seed): int {
+            int value = seed + 21;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 21) % 1009;
+                value = (value * 5 + 42) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 21) % 997;
+                } else {
+                    value = (value + round * 7 + 21) % 991;
+                }
+                value = (value * 7 + round + 21) % 983;
+                value = (value + value / 5 + 21) % 977;
+            }
+            return value;
+        }
+        function compute038(int seed): int {
+            int value = seed + 28;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 28) % 1009;
+                value = (value * 5 + 56) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 28) % 997;
+                } else {
+                    value = (value + round * 7 + 28) % 991;
+                }
+                value = (value * 7 + round + 28) % 983;
+                value = (value + value / 5 + 28) % 977;
+            }
+            return value;
+        }
+        function compute039(int seed): int {
+            int value = seed + 35;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 35) % 1009;
+                value = (value * 5 + 70) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 35) % 997;
+                } else {
+                    value = (value + round * 7 + 35) % 991;
+                }
+                value = (value * 7 + round + 35) % 983;
+                value = (value + value / 5 + 35) % 977;
+            }
+            return value;
+        }
+        function compute040(int seed): int {
+            int value = seed + 42;
+            for (int round = 0; round < 8; round++) {
+                value = (value * 3 + round + 42) % 1009;
+                value = (value * 5 + 84) % 1013;
+                if (value % 3 == 0) {
+                    value = (value / 3 + 42) % 997;
+                } else {
+                    value = (value + round * 7 + 42) % 991;
+                }
+                value = (value * 7 + round + 42) % 983;
+                value = (value + value / 5 + 42) % 977;
+            }
+            return value;
+        }
+}

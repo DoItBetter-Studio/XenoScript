@@ -105,8 +105,8 @@ void   module_strip(Module *module,
                     const char **strip_names,   int strip_fn_count,
                     const char **strip_classes, int strip_cl_count);
 
-/* module_strip_stdlib — strip all embedded stdlib chunks/classes from module,
- * set module->uses_stdlib, and remap remaining operands.
+/* module_strip_stdlib — strip stdlib/dep *chunks* from module, hollow out
+ * their ClassDefs (keep slots, method_count=0), set uses_stdlib, remap fn ops.
  * `staging` provides the non-generic stdlib chunk names (core/math primitives).
  * Requires stdlib_xar.h to be included before compiler.h. */
 void   module_strip_stdlib(Module *module, const Module *staging);

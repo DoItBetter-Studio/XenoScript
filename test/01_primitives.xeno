@@ -37,6 +37,22 @@ class Primitives {
 
 			print(u);
 
+			u = 255 as byte;
+			u++;
+			print(u);
+
+			sb = 127 as sbyte;
+			sb++;
+			print(sb);
+
+			sh = 32767 as short;
+			sh++;
+			print(sh);
+
+			us = 65535 as ushort;
+			us++;
+			print(us);
+
 			Box box = new Box(300);
 			print(box.b);
         }

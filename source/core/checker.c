@@ -153,37 +153,117 @@ static void record_usage(Checker *c, Symbol *sym, int line, int col, int length)
  * This implements lexical scoping: inner declarations shadow outer ones
  * because we search from the top of the stack downward.
  */
-/* Ephemeral SYM_FN for method hover / go-to. class_name_buf holds owner class. */
-static Symbol *make_method_sym(Checker *c, Symbol *cls_sym,
-							   const char *mname, int mlen, Type ret)
+/* Fill class_name_buf on a member symbol from its owning class symbol. */
+static void member_set_owner(Symbol *s, Symbol *cls_sym)
 {
+	if (!s || !cls_sym)
+		return;
+	if (cls_sym->class_name_buf[0])
+		memcpy(s->class_name_buf, cls_sym->class_name_buf, sizeof(s->class_name_buf));
+	else if (cls_sym->name && cls_sym->length > 0)
+	{
+		int n = cls_sym->length < 63 ? cls_sym->length : 63;
+		memcpy(s->class_name_buf, cls_sym->name, n);
+		s->class_name_buf[n] = '\0';
+	}
+	s->class_def = cls_sym->class_def;
+	s->class_decl = cls_sym->class_decl;
+}
+
+/* Intern a method/field Symbol so all usages share one pointer. */
+static Symbol *intern_member_sym(Checker *c, SymbolKind kind, Symbol *cls_sym,
+								 const char *mname, int mlen, Type type)
+{
+	if (!c || !mname || mlen <= 0)
+		return NULL;
+
+	char owner[64];
+	owner[0] = '\0';
+	if (cls_sym)
+	{
+		if (cls_sym->class_name_buf[0])
+			memcpy(owner, cls_sym->class_name_buf, sizeof(owner));
+		else if (cls_sym->name && cls_sym->length > 0)
+		{
+			int n = cls_sym->length < 63 ? cls_sym->length : 63;
+			memcpy(owner, cls_sym->name, n);
+			owner[n] = '\0';
+		}
+	}
+
+	for (int i = 0; i < c->member_sym_count; i++)
+	{
+		Symbol *s = c->member_syms[i];
+		if (!s || s->kind != kind)
+			continue;
+		if (s->length != mlen || memcmp(s->name, mname, mlen) != 0)
+			continue;
+		if (strcmp(s->class_name_buf, owner) != 0)
+			continue;
+		return s;
+	}
+
 	Symbol *s = arena_alloc(c->arena, sizeof(Symbol));
 	if (!s)
 		return NULL;
 	memset(s, 0, sizeof(*s));
-	s->kind = SYM_FN;
+	s->kind = kind;
 	s->name = mname;
 	s->length = mlen;
-	s->type = ret;
-	if (cls_sym)
+	s->type = type;
+	member_set_owner(s, cls_sym);
+
+	/* Definition site: prefer the member's own AST location. */
+	if (cls_sym && cls_sym->class_decl && kind == SYM_FN)
 	{
-		if (cls_sym->class_name_buf[0])
-			memcpy(s->class_name_buf, cls_sym->class_name_buf, sizeof(s->class_name_buf));
-		else if (cls_sym->name && cls_sym->length > 0)
+		typedef struct ClassMethodNode CMNode;
+		for (CMNode *m = cls_sym->class_decl->class_decl.methods; m; m = m->next)
 		{
-			int n = cls_sym->length < 63 ? cls_sym->length : 63;
-			memcpy(s->class_name_buf, cls_sym->name, n);
-			s->class_name_buf[n] = '\0';
+			if (!m->fn)
+				continue;
+			if (m->fn->fn_decl.length == mlen &&
+				memcmp(m->fn->fn_decl.name, mname, mlen) == 0)
+			{
+				s->fn_decl_node = m->fn;
+				s->def_file = cls_sym->def_file ? cls_sym->def_file
+												: (char *)c->source_file;
+				s->def_line = m->fn->line;
+				s->def_col = m->fn->col;
+				break;
+			}
 		}
-		s->class_def = cls_sym->class_def;
-		s->class_decl = cls_sym->class_decl;
+	}
+	else if (cls_sym && cls_sym->class_decl && kind == SYM_VAR)
+	{
+		typedef struct ClassFieldNode CFNode;
+		for (CFNode *f = cls_sym->class_decl->class_decl.fields; f; f = f->next)
+		{
+			if (f->length == mlen && memcmp(f->name, mname, mlen) == 0)
+			{
+				s->def_file = cls_sym->def_file ? cls_sym->def_file
+												: (char *)c->source_file;
+				/* Field nodes store type token position; best available. */
+				s->def_line = f->type_line > 0 ? f->type_line : cls_sym->def_line;
+				s->def_col = f->type_col > 0 ? f->type_col : cls_sym->def_col;
+				break;
+			}
+		}
+	}
+
+	/* XAR / stdlib class: no source — definition goes to stub via class_def */
+	if (!s->def_file && cls_sym)
+	{
 		if (cls_sym->def_file)
 		{
 			s->def_file = cls_sym->def_file;
 			s->def_line = cls_sym->def_line;
 			s->def_col = cls_sym->def_col;
 		}
+		/* class_def already set in member_set_owner — LSP uses stub URI */
 	}
+
+	if (c->member_sym_count < CHECKER_MAX_MEMBER_SYMS)
+		c->member_syms[c->member_sym_count++] = s;
 	return s;
 }
 
@@ -195,9 +275,19 @@ static void record_method_usage(Checker *c, Expr *expr, Symbol *cls_sym, Type re
 	int mlen = expr->method_call.method_name_len;
 	if (!mname || mlen <= 0)
 		return;
-	Symbol *ms = make_method_sym(c, cls_sym, mname, mlen, ret);
+	Symbol *ms = intern_member_sym(c, SYM_FN, cls_sym, mname, mlen, ret);
 	if (ms)
 		record_usage(c, ms, expr->line, expr->col, mlen);
+}
+
+static void record_field_usage(Checker *c, Expr *expr, Symbol *cls_sym,
+							   const char *fname, int flen, Type ft)
+{
+	if (!expr || !fname || flen <= 0)
+		return;
+	Symbol *fs = intern_member_sym(c, SYM_VAR, cls_sym, fname, flen, ft);
+	if (fs)
+		record_usage(c, fs, expr->line, expr->col, flen);
 }
 
 
@@ -1772,7 +1862,7 @@ static Type check_expr(Checker *c, Expr *expr)
 								  "'%s' operator requires an int variable, got %s",
 								  op_str, type_kind_name(sym->type.kind));
 			}
-			return resolve(expr, type_int());
+			return resolve(expr, sym->type);
 		}
 	postfix_field:;
 		{
@@ -1827,7 +1917,7 @@ static Type check_expr(Checker *c, Expr *expr)
 									  op_str, type_kind_name(ft.kind));
 				}
 				expr->postfix.is_static_field = true;
-				return resolve(expr, type_int());
+				return resolve(expr, ft);
 			}
 
 			if (obj_type.kind != TYPE_OBJECT)
@@ -1859,7 +1949,7 @@ static Type check_expr(Checker *c, Expr *expr)
 									  "'%s' operator requires an int field, got %s",
 									  op_str, type_kind_name(ft.kind));
 				}
-				return resolve(expr, type_int());
+				return resolve(expr, ft);
 			}
 		}
 	}
@@ -2297,7 +2387,12 @@ static Type check_expr(Checker *c, Expr *expr)
 		{
 			if (!is_generic_new)
 			{
-				type_error(c, expr->line, expr->col, expr->ident.length,
+				int el = expr->new_expr.class_line > 0 ? expr->new_expr.class_line : expr->line;
+				int ec = expr->new_expr.class_col > 0 ? expr->new_expr.class_col : expr->col;
+				int nlen = expr->new_expr.class_name_len > 0
+							   ? expr->new_expr.class_name_len
+							   : (int)strlen(cls_sym->class_name_buf);
+				type_error(c, el, ec, nlen,
 						   "Class '%s' is generic and requires type arguments",
 						   cls_sym->class_name_buf);
 			}
@@ -2322,7 +2417,13 @@ static Type check_expr(Checker *c, Expr *expr)
 
 				if (concrete_count != cls_type_param_count)
 				{
-					type_error(c, expr->line, expr->col, expr->ident.length,
+					int el = expr->new_expr.class_line > 0 ? expr->new_expr.class_line : expr->line;
+					int ec = expr->new_expr.class_col > 0 ? expr->new_expr.class_col : expr->col;
+					int nlen = expr->new_expr.class_name_len > 0
+								   ? expr->new_expr.class_name_len
+								   : (int)strlen(cls_sym->class_name_buf);
+					if (nlen < 1) nlen = 1;
+					type_error(c, el, ec, nlen,
 							   "Class '%s' expects %d type argument(s), got %d",
 							   cls_sym->class_name_buf,
 							   cls_type_param_count,
@@ -2337,7 +2438,12 @@ static Type check_expr(Checker *c, Expr *expr)
 						if (!check_type_constraint(c, concrete_args[i],
 												   tp->constraint, tp->constraint_len))
 						{
-							type_error(c, expr->line, expr->col, expr->ident.length,
+							int el = expr->new_expr.class_line > 0 ? expr->new_expr.class_line : expr->line;
+							int ec = expr->new_expr.class_col > 0 ? expr->new_expr.class_col : expr->col;
+							int nlen = expr->new_expr.class_name_len > 0
+										   ? expr->new_expr.class_name_len
+										   : (int)strlen(cls_sym->class_name_buf);
+							type_error(c, el, ec, nlen,
 									   "Type argument %d for '%s': '%s' does not satisfy constraint '%.*s'",
 									   i + 1, cls_sym->class_name_buf,
 									   type_kind_name(concrete_args[i].kind),
@@ -2349,7 +2455,12 @@ static Type check_expr(Checker *c, Expr *expr)
 		}
 		else if (is_generic_new && expr->new_expr.type_arg_count > 0)
 		{
-			type_error(c, expr->line, expr->col, expr->ident.length,
+			int el = expr->new_expr.class_line > 0 ? expr->new_expr.class_line : expr->line;
+			int ec = expr->new_expr.class_col > 0 ? expr->new_expr.class_col : expr->col;
+			int nlen = expr->new_expr.class_name_len > 0
+						   ? expr->new_expr.class_name_len
+						   : (int)strlen(cls_sym->class_name_buf);
+			type_error(c, el, ec, nlen,
 					   "Class '%s' is not generic but was given type arguments",
 					   cls_sym->class_name_buf);
 		}
@@ -2470,11 +2581,10 @@ static Type check_expr(Checker *c, Expr *expr)
 
 	case EXPR_TYPEOF:
 	{
-		/* typeof(expr) -> Type object */
+		/* typeof(expr) -> Type object (built-in reflection type) */
 		check_expr(c, expr->type_of.operand);
-		/* Return TYPE_OBJECT with class name "Type" so it prints nicely
-		 * and allows .name / .isArray / etc field access */
-		return resolve(expr, type_class_ref("Type"));
+		/* TYPE_OBJECT "Type" matches `Type x = typeof(...)` annotations */
+		return resolve(expr, type_object("Type"));
 	}
 
 		/* ── Nullable operators ──────────────────────────────────────────── */
@@ -2530,6 +2640,40 @@ static Type check_expr(Checker *c, Expr *expr)
 						   "'?\?' operator: both sides must have the same base type");
 			}
 		}
+		return resolve(expr, result);
+	}
+
+
+	case EXPR_TERNARY:
+	{
+		/* cond ? then : else — cond must be bool; branches share a result type */
+		Type ct = check_expr(c, expr->ternary.cond);
+		if (ct.kind != TYPE_BOOL && ct.kind != TYPE_ANY && !is_unknown(ct))
+		{
+			type_error(c, expr->line, expr->col, 1,
+					   "Ternary condition must be bool, got %s",
+					   type_kind_name(ct.kind));
+		}
+		Type then_t = check_expr(c, expr->ternary.then_e);
+		Type else_t = check_expr(c, expr->ternary.else_e);
+		if (!is_unknown(then_t) && !is_unknown(else_t) &&
+			then_t.kind != TYPE_ANY && else_t.kind != TYPE_ANY)
+		{
+			Type a = then_t, b = else_t;
+			a.is_nullable = false;
+			b.is_nullable = false;
+			/* Same kind is enough for primitives; object names compared by type_equals */
+			if (!type_equals(a, b) && a.kind != b.kind)
+			{
+				type_error(c, expr->line, expr->col, 1,
+						   "Ternary branches have incompatible types (%s vs %s)",
+						   type_kind_name(then_t.kind), type_kind_name(else_t.kind));
+			}
+		}
+		/* Prefer non-unknown branch; if either nullable, result is nullable */
+		Type result = is_unknown(then_t) ? else_t : then_t;
+		if (then_t.is_nullable || else_t.is_nullable)
+			result.is_nullable = true;
 		return resolve(expr, result);
 	}
 
@@ -2816,23 +2960,94 @@ static Type check_expr(Checker *c, Expr *expr)
 		/* ── Array .length ─────────────────────────────────────────────
 		 * arr.length is a special built-in property on arrays. */
 		/* ── Type object fields ──────────────────────────────────
-		 * typeof(x).name / .isArray / .isPrimitive / .isEnum / .isClass */
-		if (obj_type.kind == TYPE_CLASS_REF &&
-			strncmp(obj_type.class_name, "Type", 4) == 0 &&
-			obj_type.class_name[4] == '\0')
+		 * typeof(x).name / .kind / .base / .elementType / flags */
+		if ((obj_type.kind == TYPE_OBJECT || obj_type.kind == TYPE_CLASS_REF) &&
+			obj_type.class_name &&
+			strcmp(obj_type.class_name, "Type") == 0)
 		{
 			const char *fn = expr->field_get.field_name;
 			int flen = expr->field_get.field_name_len;
 			if (flen == 4 && strncmp(fn, "name", 4) == 0)
-				return resolve(expr, (Type){.kind = TYPE_STRING});
+				return resolve(expr, type_string());
+			if (flen == 4 && strncmp(fn, "kind", 4) == 0)
+				return resolve(expr, type_string());
 			if ((flen == 7 && strncmp(fn, "isArray", 7) == 0) ||
 				(flen == 11 && strncmp(fn, "isPrimitive", 11) == 0) ||
 				(flen == 6 && strncmp(fn, "isEnum", 6) == 0) ||
-				(flen == 7 && strncmp(fn, "isClass", 7) == 0))
-				return resolve(expr, (Type){.kind = TYPE_BOOL});
+				(flen == 7 && strncmp(fn, "isClass", 7) == 0) ||
+				(flen == 10 && strncmp(fn, "isNullable", 10) == 0))
+				return resolve(expr, type_bool());
+			if (flen == 4 && strncmp(fn, "base", 4) == 0)
+			{
+				Type tr = type_object("Type");
+				tr.is_nullable = true;
+				return resolve(expr, tr);
+			}
+			if (flen == 11 && strncmp(fn, "elementType", 11) == 0)
+			{
+				Type tr = type_object("Type");
+				tr.is_nullable = true;
+				return resolve(expr, tr);
+			}
 			return error_type(c, expr, expr->line, expr->col, flen,
-							  "Type has no field '%.*s' (available: name, isArray, isPrimitive, isEnum, isClass)",
+							  "Type has no field '%.*s' (available: name, kind, isArray, "
+							  "isPrimitive, isEnum, isClass, isNullable, base, elementType)",
 							  flen, fn);
+		}
+
+		/* Field / Method / Parameter reflection records (data-only) */
+		if (obj_type.kind == TYPE_OBJECT && obj_type.class_name)
+		{
+			const char *fn = expr->field_get.field_name;
+			int flen = expr->field_get.field_name_len;
+			if (strcmp(obj_type.class_name, "Field") == 0)
+			{
+				if (flen == 4 && strncmp(fn, "name", 4) == 0)
+					return resolve(expr, type_string());
+				if (flen == 4 && strncmp(fn, "type", 4) == 0)
+					return resolve(expr, type_object("Type"));
+				if ((flen == 8 && strncmp(fn, "isStatic", 8) == 0) ||
+					(flen == 7 && strncmp(fn, "isFinal", 7) == 0) ||
+					(flen == 10 && strncmp(fn, "isNullable", 10) == 0))
+					return resolve(expr, type_bool());
+				return error_type(c, expr, expr->line, expr->col, flen,
+								  "Field has no field '%.*s'", flen, fn);
+			}
+			if (strcmp(obj_type.class_name, "Method") == 0)
+			{
+				if (flen == 4 && strncmp(fn, "name", 4) == 0)
+					return resolve(expr, type_string());
+				if (flen == 10 && strncmp(fn, "returnType", 10) == 0)
+					return resolve(expr, type_object("Type"));
+				if ((flen == 8 && strncmp(fn, "isStatic", 8) == 0) ||
+					(flen == 9 && strncmp(fn, "isVirtual", 9) == 0))
+					return resolve(expr, type_bool());
+				if (flen == 10 && strncmp(fn, "paramCount", 10) == 0)
+					return resolve(expr, type_int());
+				return error_type(c, expr, expr->line, expr->col, flen,
+								  "Method has no field '%.*s'", flen, fn);
+			}
+			if (strcmp(obj_type.class_name, "Parameter") == 0)
+			{
+				if (flen == 4 && strncmp(fn, "name", 4) == 0)
+					return resolve(expr, type_string());
+				if (flen == 4 && strncmp(fn, "type", 4) == 0)
+					return resolve(expr, type_object("Type"));
+				if (flen == 10 && strncmp(fn, "isNullable", 10) == 0)
+					return resolve(expr, type_bool());
+				if (flen == 5 && strncmp(fn, "index", 5) == 0)
+					return resolve(expr, type_int());
+				return error_type(c, expr, expr->line, expr->col, flen,
+								  "Parameter has no field '%.*s'", flen, fn);
+			}
+		}
+
+		/* expr.class -> Type (sugar for typeof(expr)) */
+		{
+			const char *fn = expr->field_get.field_name;
+			int flen = expr->field_get.field_name_len;
+			if (flen == 5 && strncmp(fn, "class", 5) == 0)
+				return resolve(expr, type_object("Type"));
 		}
 
 		if (obj_type.kind == TYPE_ARRAY)
@@ -3053,7 +3268,58 @@ static Type check_expr(Checker *c, Expr *expr)
 										 fg_type_params, fg_concrete_args,
 										 fg_concrete_count);
 			if (ft.kind != TYPE_UNKNOWN)
+			{
+				/* Access control — helper only resolves type; enforce visibility here */
+				if (cls_sym->class_decl)
+				{
+					typedef struct ClassFieldNode CFN;
+					for (CFN *f = cls_sym->class_decl->class_decl.fields; f; f = f->next)
+					{
+						if (f->length == flen && memcmp(f->name, fname, flen) == 0)
+						{
+							if (f->access != ACCESS_PUBLIC)
+							{
+								bool allow_sub = (f->access == ACCESS_PROTECTED);
+								if (!same_class_check(c, fg_lookup_name, allow_sub))
+								{
+									return error_type(c, expr, expr->line, expr->col, flen,
+													  "%s field '%.*s' of class '%s' is not accessible here",
+													  f->access == ACCESS_PRIVATE ? "Private" : "Protected",
+													  flen, fname, fg_lookup_name);
+								}
+							}
+							break;
+						}
+					}
+				}
+				else if (cls_sym->class_def)
+				{
+					const ClassDef *def = (const ClassDef *)cls_sym->class_def;
+					for (int fi = 0; fi < def->field_count; fi++)
+					{
+						const FieldDef *fd = &def->fields[fi];
+						if ((int)strlen(fd->name) == flen &&
+							memcmp(fd->name, fname, flen) == 0)
+						{
+							/* ACCESS_PUBLIC == 0; non-zero means restricted */
+							if (fd->access_flags != 0 /* ACCESS_PUBLIC */)
+							{
+								bool allow_sub = (fd->access_flags == 2 /* PROTECTED */);
+								if (!same_class_check(c, fg_lookup_name, allow_sub))
+								{
+									return error_type(c, expr, expr->line, expr->col, flen,
+													  "%s field '%.*s' of class '%s' is not accessible here",
+													  fd->access_flags == 1 ? "Private" : "Protected",
+													  flen, fname, fg_lookup_name);
+								}
+							}
+							break;
+						}
+					}
+				}
+				record_field_usage(c, expr, cls_sym, fname, flen, ft);
 				return resolve(expr, ft);
+			}
 			/* Not found on this class -- fall through to inheritance walk (AST path) */
 			if (!cls_sym->class_decl)
 			{
@@ -3100,6 +3366,8 @@ static Type check_expr(Checker *c, Expr *expr)
 										? substitute_type(f->type, fg_type_params,
 														  fg_concrete_args, fg_concrete_count)
 										: f->type;
+					record_field_usage(c, expr, cls_sym, expr->field_get.field_name,
+									   expr->field_get.field_name_len, fg_ftype);
 					return resolve(expr, fg_ftype);
 				}
 			}
@@ -3128,6 +3396,7 @@ static Type check_expr(Checker *c, Expr *expr)
 							ft.kind = fd->type_kind;
 							if (ft.kind == TYPE_OBJECT && fd->class_name[0])
 								ft.class_name = fd->class_name;
+							record_field_usage(c, expr, cls_sym, fname, flen, ft);
 							return resolve(expr, ft);
 						}
 					}
@@ -3436,8 +3705,8 @@ static Type check_expr(Checker *c, Expr *expr)
 	{
 		Type obj_type = check_expr(c, expr->method_call.object);
 
-		/* ── Type object methods: typeof(x).hasAttribute / .getAttributeArg ── */
-		if (obj_type.kind == TYPE_CLASS_REF &&
+		/* ── Type object methods ───────────────────────────────────── */
+		if ((obj_type.kind == TYPE_OBJECT || obj_type.kind == TYPE_CLASS_REF) &&
 			obj_type.class_name &&
 			strcmp(obj_type.class_name, "Type") == 0)
 		{
@@ -3445,7 +3714,6 @@ static Type check_expr(Checker *c, Expr *expr)
 			int mlen = expr->method_call.method_name_len;
 			if (mlen == 12 && memcmp(mname, "hasAttribute", 12) == 0)
 			{
-				/* hasAttribute(name: string) -> bool */
 				if (expr->method_call.arg_count != 1)
 				{
 					return error_type(c, expr, expr->line, expr->col, mlen,
@@ -3457,7 +3725,6 @@ static Type check_expr(Checker *c, Expr *expr)
 			}
 			if (mlen == 15 && memcmp(mname, "getAttributeArg", 15) == 0)
 			{
-				/* getAttributeArg(name: string, index: int) -> string? */
 				if (expr->method_call.arg_count != 2)
 				{
 					return error_type(c, expr, expr->line, expr->col, mlen,
@@ -3471,8 +3738,94 @@ static Type check_expr(Checker *c, Expr *expr)
 				ret.is_nullable = true;
 				return resolve(expr, ret);
 			}
+			if (mlen == 16 && memcmp(mname, "isAssignableFrom", 16) == 0)
+			{
+				if (expr->method_call.arg_count != 1)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "isAssignableFrom expects 1 argument (Type), got %d",
+									  expr->method_call.arg_count);
+				}
+				check_expr(c, expr->method_call.args->expr);
+				return resolve(expr, type_bool());
+			}
+			/* interfaces() / fields() / methods() / enumMembers() -> string[] */
+			if ((mlen == 10 && memcmp(mname, "interfaces", 10) == 0) ||
+				(mlen == 6 && memcmp(mname, "fields", 6) == 0) ||
+				(mlen == 7 && memcmp(mname, "methods", 7) == 0) ||
+				(mlen == 11 && memcmp(mname, "enumMembers", 11) == 0))
+			{
+				if (expr->method_call.arg_count != 0)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "%.*s() takes no arguments", mlen, mname);
+				}
+				Type *elem = arena_alloc(c->arena, sizeof(Type));
+				*elem = type_string();
+				return resolve(expr, type_array(elem));
+			}
+			if (mlen == 10 && memcmp(mname, "isInstance", 10) == 0)
+			{
+				if (expr->method_call.arg_count != 1)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "isInstance expects 1 argument, got %d",
+									  expr->method_call.arg_count);
+				}
+				check_expr(c, expr->method_call.args->expr);
+				return resolve(expr, type_bool());
+			}
+			if (mlen == 8 && memcmp(mname, "getField", 8) == 0)
+			{
+				if (expr->method_call.arg_count != 1)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "getField expects 1 string argument, got %d",
+									  expr->method_call.arg_count);
+				}
+				check_expr(c, expr->method_call.args->expr);
+				Type ft = type_object("Field");
+				ft.is_nullable = true;
+				return resolve(expr, ft);
+			}
+			if (mlen == 9 && memcmp(mname, "getMethod", 9) == 0)
+			{
+				if (expr->method_call.arg_count != 1)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "getMethod expects 1 string argument, got %d",
+									  expr->method_call.arg_count);
+				}
+				check_expr(c, expr->method_call.args->expr);
+				Type mt = type_object("Method");
+				mt.is_nullable = true;
+				return resolve(expr, mt);
+			}
 			return error_type(c, expr, expr->line, expr->col, mlen,
-							  "Type has no method '%.*s' (available: hasAttribute, getAttributeArg)",
+							  "Type has no method '%.*s'", mlen, mname);
+		}
+
+		/* Method.paramAt(i) -> Parameter? */
+		if (obj_type.kind == TYPE_OBJECT && obj_type.class_name &&
+			strcmp(obj_type.class_name, "Method") == 0)
+		{
+			const char *mname = expr->method_call.method_name;
+			int mlen = expr->method_call.method_name_len;
+			if (mlen == 7 && memcmp(mname, "paramAt", 7) == 0)
+			{
+				if (expr->method_call.arg_count != 1)
+				{
+					return error_type(c, expr, expr->line, expr->col, mlen,
+									  "paramAt expects 1 int argument, got %d",
+									  expr->method_call.arg_count);
+				}
+				check_expr(c, expr->method_call.args->expr);
+				Type pt = type_object("Parameter");
+				pt.is_nullable = true;
+				return resolve(expr, pt);
+			}
+			return error_type(c, expr, expr->line, expr->col, mlen,
+							  "Method has no method '%.*s' (available: paramAt)",
 							  mlen, mname);
 		}
 
@@ -3922,6 +4275,27 @@ static Type check_expr(Checker *c, Expr *expr)
 			int mlen = expr->method_call.method_name_len;
 			for (ArgNode *a = expr->method_call.args; a; a = a->next)
 				check_expr(c, a->expr);
+			/* Arity check from MethodDef.param_count when available */
+			if (cls_sym->class_def)
+			{
+				const ClassDef *cdef = (const ClassDef *)cls_sym->class_def;
+				for (int mi = 0; mi < cdef->method_count; mi++)
+				{
+					const MethodDef *md = &cdef->methods[mi];
+					if ((int)strlen(md->name) == mlen &&
+						memcmp(md->name, mname, mlen) == 0)
+					{
+						int argc = expr->method_call.arg_count;
+						if (argc != md->param_count)
+						{
+							type_error(c, expr->line, expr->col, mlen,
+									   "Method '%.*s' expects %d argument(s), got %d",
+									   mlen, mname, md->param_count, argc);
+						}
+						break;
+					}
+				}
+			}
 			Type rt = checker_method_return_type(cls_sym, mname, mlen,
 												 mc_type_params, mc_concrete_args,
 												 mc_concrete_count);
@@ -4465,7 +4839,10 @@ static void check_stmt(Checker *c, Stmt *stmt)
 								tp_count = ((ClassDef *)cls_sym->class_def)->type_param_count;
 							if (tp_count > 0 && targ_count != tp_count)
 							{
-								type_error(c, stmt->line, stmt->col, (int)strlen(base),
+								int gcol = stmt->var_decl.type_col > 0
+											   ? stmt->var_decl.type_col
+											   : stmt->col;
+								type_error(c, stmt->line, gcol, (int)strlen(base),
 										   "Class '%s' expects %d type argument(s), got %d",
 										   base, tp_count, targ_count);
 							}
@@ -5051,7 +5428,15 @@ static void check_stmt(Checker *c, Stmt *stmt)
 		 * We accept TYPE_ANY for dep-loaded classes. */
 		if (thrown.kind != TYPE_OBJECT && thrown.kind != TYPE_ANY && !is_unknown(thrown))
 		{
-			type_error(c, stmt->line, stmt->col, (int)strlen(type_kind_name(thrown.kind)),
+			Expr *tv = stmt->throw_stmt.value;
+			int tline = tv ? tv->line : stmt->line;
+			int tcol = tv ? tv->col : stmt->col;
+			int tlen = 1;
+			if (tv && tv->kind == EXPR_INT_LIT)
+				tlen = 2; /* approximate; better than "int" strlen on throw */
+			if (tv && tv->kind == EXPR_IDENT)
+				tlen = tv->ident.length > 0 ? tv->ident.length : 1;
+			type_error(c, tline, tcol, tlen,
 					   "throw requires an object type, got %s",
 					   type_kind_name(thrown.kind));
 		}
@@ -5535,16 +5920,47 @@ bool checker_check(Checker *c, Program *program)
 			{
 				/* Class was pre-seeded from staging (stdlib/dep ClassDef).
 				 * Now that we have the AST (inlined source), update class_decl
-				 * so generic type params and field/method lookup work correctly. */
+				 * so generic type params and field/method lookup work correctly.
+				 * If it already has an AST class_decl, this is a true duplicate. */
 				Symbol *existing = lookup_symbol(c, s->class_decl.name, s->class_decl.length);
 				if (existing && existing->kind == SYM_CLASS && !existing->class_decl)
 					existing->class_decl = s;
+				else if (existing && existing->kind == SYM_CLASS && existing->class_decl)
+				{
+					type_error(c, s->line, s->col, s->class_decl.length,
+							   "Class '%.*s' already declared",
+							   s->class_decl.length, s->class_decl.name);
+				}
 			}
 			else
 			{
 				Symbol *stored = lookup_symbol(c, s->class_decl.name, s->class_decl.length);
 				if (stored)
 					stored->type.class_name = stored->class_name_buf;
+			}
+
+			/* Intern methods/fields so go-to-def and find-refs work on the
+			 * declaration itself even before any call/use is type-checked. */
+			{
+				Symbol *cls_sym = lookup_symbol(c, s->class_decl.name, s->class_decl.length);
+				if (cls_sym && cls_sym->kind == SYM_CLASS)
+				{
+					typedef struct ClassMethodNode CMNode;
+					typedef struct ClassFieldNode CFNode;
+					for (CMNode *m = s->class_decl.methods; m; m = m->next)
+					{
+						if (!m->fn || m->is_constructor)
+							continue;
+						intern_member_sym(c, SYM_FN, cls_sym,
+										  m->fn->fn_decl.name, m->fn->fn_decl.length,
+										  m->fn->fn_decl.return_type);
+					}
+					for (CFNode *f = s->class_decl.fields; f; f = f->next)
+					{
+						intern_member_sym(c, SYM_VAR, cls_sym,
+										  f->name, f->length, f->type);
+					}
+				}
 			}
 		}
 		else if (s->kind == STMT_ENUM_DECL)
@@ -5918,15 +6334,15 @@ bool checker_check(Checker *c, Program *program)
 	}
 	/* ── PASS 1c: Validate annotations ──────────────────────────────────── */
 
-	/* Target enum ordinals — must match Target enum declaration order in stdlib:
-	 *   enum Target { Class, Method, Field, Constructor, Enum }  */
+	/* Target ordinals must match AttributeTarget's declaration order. */
 	enum
 	{
 		TARGET_CLASS = 0,
 		TARGET_METHOD = 1,
 		TARGET_FIELD = 2,
 		TARGET_CONSTRUCTOR = 3,
-		TARGET_ENUM = 4
+		TARGET_ENUM = 4,
+		TARGET_EVENT = 5
 	};
 
 	/* check_attribute_usage — looks up the annotation class, finds its
@@ -6126,7 +6542,10 @@ bool checker_check(Checker *c, Program *program)
 								check_expr(c, kv->value);
 						c->error_count = saved_ec;
 						c->had_error = saved_he;
-						CHECK_ATTR_USAGE(ann, TARGET_ENUM, s->line, s->col, s->enum_decl.length,
+						CHECK_ATTR_USAGE(ann, TARGET_ENUM,
+										 ann->line > 0 ? ann->line : s->line,
+										 ann->col > 0 ? ann->col : s->col,
+										 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : s->enum_decl.length),
 										 "enum '%.*s'",
 										 s->enum_decl.length, s->enum_decl.name);
 					}
@@ -6151,7 +6570,10 @@ bool checker_check(Checker *c, Program *program)
 					}
 					c->error_count = saved_ec;
 					c->had_error = saved_he;
-					CHECK_ATTR_USAGE(ann, TARGET_CLASS, s->line, s->col, s->class_decl.length,
+					CHECK_ATTR_USAGE(ann, TARGET_CLASS,
+									 ann->line > 0 ? ann->line : s->line,
+									 ann->col > 0 ? ann->col : s->col,
+									 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : s->class_decl.length),
 									 "class '%.*s'",
 									 s->class_decl.length, s->class_decl.name);
 				}
@@ -6163,7 +6585,9 @@ bool checker_check(Checker *c, Program *program)
 				mod_count++;
 				if (mod_count > 1)
 				{
-					type_error(c, s->line, s->col, 4,
+					type_error(c, ann->line > 0 ? ann->line : s->line,
+							   ann->col > 0 ? ann->col : s->col,
+							   ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : 4),
 							   "@Mod can only appear on one class per file");
 				}
 
@@ -6202,7 +6626,10 @@ bool checker_check(Checker *c, Program *program)
 								check_expr(c, kv->value);
 						c->error_count = saved_ec;
 						c->had_error = saved_he;
-						CHECK_ATTR_USAGE(ann, TARGET_FIELD, s->line, s->col, f->length,
+						CHECK_ATTR_USAGE(ann, TARGET_FIELD,
+										 ann->line > 0 ? ann->line : s->line,
+										 ann->col > 0 ? ann->col : s->col,
+										 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : f->length),
 										 "field '%.*s'", f->length, f->name);
 					}
 				}
@@ -6226,15 +6653,45 @@ bool checker_check(Checker *c, Program *program)
 						c->had_error = saved_he;
 						if (m->is_constructor)
 						{
-							CHECK_ATTR_USAGE(ann, placement, s->line, s->col, s->class_decl.length,
+							CHECK_ATTR_USAGE(ann, placement,
+											 ann->line > 0 ? ann->line : s->line,
+											 ann->col > 0 ? ann->col : s->col,
+											 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : s->class_decl.length),
 											 "constructor of '%.*s'",
 											 s->class_decl.length, s->class_decl.name);
 						}
 						else
 						{
-							CHECK_ATTR_USAGE(ann, placement, s->line, s->col, s->class_decl.length,
+							CHECK_ATTR_USAGE(ann, placement,
+											 ann->line > 0 ? ann->line : s->line,
+											 ann->col > 0 ? ann->col : s->col,
+											 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : s->class_decl.length),
 											 "method '%.*s'",
 											 s->class_decl.length, s->class_decl.name);
+						}
+					}
+				}
+
+				/* ── Event annotations ────────────────────────────────────────── */
+				if (stdlib_in_scope)
+				{
+					typedef struct ClassEventNode CENode;
+					for (CENode *event = s->class_decl.events; event; event = event->next)
+					{
+						for (AnnotationNode *ann = event->annotations; ann; ann = ann->next)
+						{
+							int saved_ec = c->error_count;
+							bool saved_he = c->had_error;
+							for (AnnotationKVNode *kv = ann->args; kv; kv = kv->next)
+								if (kv->value)
+									check_expr(c, kv->value);
+							c->error_count = saved_ec;
+							c->had_error = saved_he;
+							CHECK_ATTR_USAGE(ann, TARGET_EVENT,
+											 ann->line > 0 ? ann->line : s->line,
+											 ann->col > 0 ? ann->col : s->col,
+											 ann->span_len > 0 ? ann->span_len : (ann->name_len > 0 ? ann->name_len : event->length),
+											 "event '%.*s'", event->length, event->name);
 						}
 					}
 				}
@@ -6593,7 +7050,9 @@ void checker_print_errors(const Checker *c)
 /* ── LSP query API ───────────────────────────────────────────────────────── */
 
 /* Return the symbol whose usage record best covers (line, col).
- * "Best" means: same line, col falls within [record.col, record.col+length). */
+ * "Best" means: same line, col falls within [record.col, record.col+length).
+ * If no usage hits, fall back to definition sites (scopes + interned members)
+ * so go-to-def / find-refs work when the cursor is on the declaration itself. */
 Symbol *checker_find_symbol_at(const Checker *c, int line, int col)
 {
 	Symbol *best = NULL;
@@ -6612,6 +7071,44 @@ Symbol *checker_find_symbol_at(const Checker *c, int line, int col)
 			best_len = r->length;
 		}
 	}
+	if (best)
+		return best;
+
+	/* Definition-site fallback: interned methods/fields */
+	for (int i = 0; i < c->member_sym_count; i++)
+	{
+		Symbol *s = c->member_syms[i];
+		if (!s || s->def_line != line || s->length <= 0)
+			continue;
+		int dc = s->def_col > 0 ? s->def_col : 1;
+		if (col < dc || col >= dc + s->length)
+			continue;
+		if (s->length < best_len)
+		{
+			best = s;
+			best_len = s->length;
+		}
+	}
+
+	/* Scope symbols (locals, top-level fns/classes) */
+	for (int d = 0; d <= c->scope_depth; d++)
+	{
+		const Scope *scope = &c->scopes[d];
+		for (int i = 0; i < scope->count; i++)
+		{
+			Symbol *s = (Symbol *)&scope->symbols[i];
+			if (s->def_line != line || s->length <= 0)
+				continue;
+			int dc = s->def_col > 0 ? s->def_col : 1;
+			if (col < dc || col >= dc + s->length)
+				continue;
+			if (s->length < best_len)
+			{
+				best = s;
+				best_len = s->length;
+			}
+		}
+	}
 	return best;
 }
 
@@ -6627,15 +7124,40 @@ int checker_usages_of(const Checker *c, int line, int col,
 	if (!target)
 		return 0;
 	int count = 0;
+
+	/* Include the definition site first (LSP "includeDeclaration"). */
+	if (target->def_line > 0 && count < max)
+	{
+		UsageRecord def = {0};
+		def.file = target->def_file ? target->def_file : c->source_file;
+		def.line = target->def_line;
+		def.col = target->def_col > 0 ? target->def_col : 1;
+		def.length = target->length > 0 ? target->length : 1;
+		def.sym = target;
+		out[count++] = def;
+	}
+
 	for (int i = 0; i < c->usage_count && count < max; i++)
 	{
 		const UsageRecord *r = &c->usages[i];
-		/* Match by pointer identity only — this is the only way to
-		 * distinguish two different variables that happen to share the same
-		 * name (e.g. a parameter 'n' and a local variable 'n' in a nested
-		 * scope). Name-text matching was previously used as a fallback but
-		 * caused false positives. */
+		if (!r->sym)
+			continue;
+		/* Skip if same span as definition we already added */
+		if (target->def_line > 0 &&
+			r->line == target->def_line &&
+			r->col == (target->def_col > 0 ? target->def_col : 1))
+			continue;
+
 		if (r->sym == target)
+		{
+			out[count++] = *r;
+			continue;
+		}
+		if (target->class_name_buf[0] && r->sym->class_name_buf[0] &&
+			r->sym->kind == target->kind &&
+			r->sym->length == target->length &&
+			memcmp(r->sym->name, target->name, target->length) == 0 &&
+			strcmp(r->sym->class_name_buf, target->class_name_buf) == 0)
 		{
 			out[count++] = *r;
 		}

@@ -1,0 +1,12 @@
+// Tests: catch type must extend Exception
+@Mod("error_catch_non_exception", "1.0.0", "Test")
+class ErrorCatchNonException {
+    public:
+        ErrorCatchNonException() {
+            try {
+                print("x");
+            } catch (int e) {
+                print(e);
+            }
+        }
+}

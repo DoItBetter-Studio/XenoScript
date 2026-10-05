@@ -1,0 +1,9 @@
+// Tests: null assigned to non-nullable type
+@Mod("error_nullable_assign", "1.0.0", "Test")
+class ErrorNullableAssign {
+    public:
+        ErrorNullableAssign() {
+            string s = null;
+            print(s);
+        }
+}

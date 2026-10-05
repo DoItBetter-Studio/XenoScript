@@ -40,7 +40,7 @@
 #include <stdio.h>
 
 #define XBC_MAGIC    "XBC\0"
-#define XBC_VERSION  19
+#define XBC_VERSION  21
 
 typedef enum {
     XBC_OK,

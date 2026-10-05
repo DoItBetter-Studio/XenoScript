@@ -131,7 +131,7 @@ static void skip_whitespace_and_comments(Lexer *lexer)
                     int new_line = atoi(p + 11);
                     /* Set to new_line - 1 because the newline at end of this
                      * comment will be consumed and increment line by 1. */
-                    if (new_line > 0) { lexer->line = new_line; lexer->col = 1; }
+                    if (new_line > 0) { lexer->line = new_line - 1; lexer->col = 1; }
                 }
                 /* Consume everything until newline or EOF.
                  * We DON'T consume the newline itself — the outer loop
