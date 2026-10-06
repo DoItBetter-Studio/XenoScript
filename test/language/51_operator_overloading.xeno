@@ -17,6 +17,14 @@ class Vector2 {
             return this.x == other.x && this.y == other.y;
         }
 
+		function operator -(): Vector2 {
+			return new Vector2(-x, -y);
+		}
+
+		function operator -(Vector2 other): Vector2 {
+			return new Vector2(this.x - other.x, this.y - other.y);
+		}
+
 		function toString(): string {
             return "Vector2(" + x + ", " + y + ")";
         }
@@ -32,11 +40,17 @@ class OperatorOverloading {
             Vector2 equal = new Vector2(5, 7);
             Vector2 unequal = new Vector2(5, 8);
 
+			Vector2 neg = -left;
+
             print(sum.x);
             print(sum.y);
             print(sum.x + sum.y);
             print(sum == equal);
             print(sum == unequal);
             print(sum.toString());
+			print(neg.toString());
+
+			neg += unequal;
+			print(neg.toString());
         }
 }

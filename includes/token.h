@@ -113,8 +113,11 @@ typedef enum {
     TOK_STAR,         /* *  */
     TOK_PLUS_PLUS,    /* ++ */
     TOK_MINUS_MINUS,  /* -- */
-    TOK_PLUS_ASSIGN,  /* += */
-    TOK_MINUS_ASSIGN, /* -= */
+    TOK_PLUS_ASSIGN,    /* += */
+    TOK_MINUS_ASSIGN,   /* -= */
+    TOK_STAR_ASSIGN,    /* *= */
+    TOK_SLASH_ASSIGN,   /* /= */
+    TOK_PERCENT_ASSIGN, /* %= */
     TOK_SLASH,        /* /  */
     TOK_PERCENT,      /* %  */
 

@@ -687,10 +687,13 @@ Token lexer_next_token(Lexer *lexer)
         if (match(lexer, '=')) return make_token(lexer, TOK_MINUS_ASSIGN);
         return make_token(lexer, TOK_MINUS);
     case '*':
+        if (match(lexer, '=')) return make_token(lexer, TOK_STAR_ASSIGN);
         return make_token(lexer, TOK_STAR);
     case '/':
+        if (match(lexer, '=')) return make_token(lexer, TOK_SLASH_ASSIGN);
         return make_token(lexer, TOK_SLASH);
     case '%':
+        if (match(lexer, '=')) return make_token(lexer, TOK_PERCENT_ASSIGN);
         return make_token(lexer, TOK_PERCENT);
 
     /* Two-character tokens: we use match() for the second character.
@@ -850,6 +853,12 @@ const char *token_type_name(TokenType type)
         return "++";
     case TOK_MINUS_MINUS:
         return "--";
+    case TOK_STAR_ASSIGN:
+        return "*=";
+    case TOK_SLASH_ASSIGN:
+        return "/=";
+    case TOK_PERCENT_ASSIGN:
+        return "%=";
     case TOK_PLUS_ASSIGN:
         return "+=";
     case TOK_MINUS_ASSIGN:

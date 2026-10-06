@@ -217,6 +217,10 @@ typedef struct {
     int    current_class_idx;
     Stmt  *current_class_ast;
 
+    /* Source file path for the unit being compiled (may be NULL).
+     * Copied (as basename) onto each Chunk for file-scoped debug. */
+    const char *source_path;
+
     /* Errors */
     CompileError errors[COMPILER_MAX_ERRORS];
     int          error_count;
@@ -250,5 +254,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
                               const Module *staging);
 
 void compiler_print_errors(const Compiler *c);
+
+void compiler_set_source_path(Compiler *c, const char *path);
 
 #endif /* COMPILER_H */

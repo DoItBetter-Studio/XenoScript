@@ -148,7 +148,6 @@ static XenoResult fn_array_grow(XenoVM *vm, int argc, Value *argv, Value *out) {
     return XENO_OK;
 }
 
-
 void stdlib_register_host_fns(XenoVM *vm) {
     for (int i = 0; i < STDLIB_MATH_COUNT; i++) {
         const StdlibMathEntry *e = &STDLIB_MATH_TABLE[i];

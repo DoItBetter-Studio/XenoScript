@@ -1636,7 +1636,55 @@ static Type check_expr(Checker *c, Expr *expr)
 
 		if (expr->unary.op == TOK_MINUS)
 		{
-			/* Negation: operand must be numeric */
+			/* Operator overload: -obj → obj.op_neg() */
+			if (operand.kind == TYPE_OBJECT && operand.class_name)
+			{
+				const char *mname = "op_neg";
+				char base[64];
+				const char *cname = operand.class_name;
+				if (is_generic_type_name(cname) && generic_base_name(cname, base, sizeof(base)))
+					cname = base;
+				Symbol *cls = lookup_symbol(c, cname, (int)strlen(cname));
+				bool found = false;
+				if (cls && cls->kind == SYM_CLASS && cls->class_decl)
+				{
+					typedef struct ClassMethodNode CMNode;
+					for (CMNode *m = cls->class_decl->class_decl.methods; m; m = m->next)
+					{
+						if (m->fn && m->is_operator &&
+							m->fn->fn_decl.length == 6 &&
+							memcmp(m->fn->fn_decl.name, "op_neg", 6) == 0)
+						{
+							found = true;
+							break;
+						}
+					}
+				}
+				if (!found && cls && cls->kind == SYM_CLASS && cls->class_def)
+				{
+					ClassDef *def = (ClassDef *)cls->class_def;
+					for (int i = 0; i < def->method_count; i++)
+					{
+						if (strcmp(def->methods[i].name, "op_neg") == 0)
+						{
+							found = true;
+							break;
+						}
+					}
+				}
+				if (found)
+				{
+					Expr *recv = expr->unary.operand;
+					expr->kind = EXPR_METHOD_CALL;
+					expr->method_call.object = recv;
+					expr->method_call.method_name = mname;
+					expr->method_call.method_name_len = 6;
+					expr->method_call.args = NULL;
+					expr->method_call.arg_count = 0;
+					return check_expr(c, expr);
+				}
+			}
+			/* Built-in: operand must be numeric */
 			if (!type_is_numeric(operand))
 			{
 				return error_type(c, expr, expr->line, expr->col, (int)strlen(type_kind_name(operand.kind)),
@@ -4683,6 +4731,26 @@ static Type check_expr(Checker *c, Expr *expr)
 			}
 			if (!esym || esym->kind != SYM_EVENT)
 			{
+				/* Not an event — treat as compound assign when the RHS was a
+				 * bare identifier:  neg += left  →  neg = neg + left
+				 * Bound forms (this.m / obj.m) stay event-only. */
+				if (expr->event_sub.object == NULL && hname && hlen > 0)
+				{
+					TokenType bop = (expr->kind == EXPR_EVENT_SUBSCRIBE)
+										? TOK_PLUS
+										: TOK_MINUS;
+					Expr *lhs = expr_ident(c->arena, ename, elen,
+										   expr->line, expr->col);
+					Expr *rhs = expr_ident(c->arena, hname, hlen,
+										   expr->line, expr->col);
+					Expr *bin = expr_binary(c->arena, bop, lhs, rhs,
+											expr->line, expr->col);
+					expr->kind = EXPR_ASSIGN;
+					expr->assign.name = ename;
+					expr->assign.length = elen;
+					expr->assign.value = bin;
+					return check_expr(c, expr);
+				}
 				return error_type(c, expr, expr->line, expr->col, elen,
 								  "'%.*s' is not a declared event", elen, ename);
 			}

@@ -6,6 +6,7 @@
  *   xenovm <script.xbc>      Load and run pre-compiled bytecode
  *   xenovm <mod.xar>         Load and run a built mod archive
  *   xenovm <project-dir/>    Build-and-run a project directory
+ *   xenovm --debug [--break N]... <path>
  *   xenovm --help
  *
  * Exit codes:
@@ -53,16 +54,77 @@ static void register_std_fns(XenoVM *vm) {
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
 static void print_usage(void) {
-    printf("Usage: xenovm <script.xeno|script.xbc|mod.xar|project-dir/>\n");
+    printf("Usage: xenovm [options] <script.xeno|script.xbc|mod.xar|project-dir/>\n");
     printf("       xenovm --help\n\n");
     printf("  .xeno  Compile and run from source\n");
     printf("  .xbc   Run pre-compiled bytecode\n");
     printf("  .xar   Run a built mod archive\n");
     printf("  dir/   Build-and-run a project directory (needs xeno.project)\n");
+    printf("\nDebugger options:\n");
+    printf("  --debug          Enable the interactive line debugger\n");
+    printf("  --break <line>         Break on source line (any file)\n");
+    printf("  --break <file>:<line>  Break only in that source file\n");
+    printf("  --debug-sinit    Also stop inside __sinit__ static initializers\n");
+    printf("\nWhen stopped, type a command and press Enter:\n");
+    printf("  c / continue     Resume until the next breakpoint\n");
+    printf("  s / step         Step to the next source line\n");
+    printf("  q / quit         Abort execution\n");
     printf("\nNote: there is no 'build' subcommand. To run a built mod:\n");
     printf("  xenovm path/to/mod.xar\n");
     printf("To build a project, use xenoc:\n");
     printf("  xenoc build path/to/project/\n");
+}
+
+/* ── Interactive stdin debugger ───────────────────────────────────────── */
+
+static int g_debug_abort = 0;
+
+static void xenovm_debug_on_break(XenoVM *vm)
+{
+    int line = xeno_vm_debug_hit_line(vm);
+    int off  = xeno_vm_debug_hit_offset(vm);
+    const char *fn = vm->debug_hit_fn[0] ? vm->debug_hit_fn : "?";
+    const char *sf = vm->debug_hit_file[0] ? vm->debug_hit_file : NULL;
+    if (sf)
+        fprintf(stderr, "\n[xeno debug] %s (%s:%d)\n", fn, sf, line);
+    else
+        fprintf(stderr, "\n[xeno debug] %s — line %d\n", fn, line);
+    (void)off;
+    fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+    fflush(stderr);
+
+    char buf[128];
+    for (;;) {
+        if (!fgets(buf, sizeof(buf), stdin)) {
+            /* EOF — treat as continue so pipes don't hang forever */
+            xeno_vm_debug_continue(vm);
+            return;
+        }
+        /* trim */
+        char *p = buf;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\n' || *p == '\0') {
+            fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+            fflush(stderr);
+            continue;
+        }
+        if (p[0] == 'c' || strncmp(p, "continue", 8) == 0) {
+            xeno_vm_debug_continue(vm);
+            return;
+        }
+        if (p[0] == 's' || strncmp(p, "step", 4) == 0) {
+            xeno_vm_debug_step_over(vm);
+            return;
+        }
+        if (p[0] == 'q' || strncmp(p, "quit", 4) == 0) {
+            g_debug_abort = 1;
+            /* Leave paused so the VM aborts with a stop error */
+            return;
+        }
+        fprintf(stderr, "[xeno debug] unknown command — use c, s, or q\n");
+        fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+        fflush(stderr);
+    }
 }
 
 static bool has_ext(const char *path, const char *ext) {
@@ -131,6 +193,7 @@ static int run_source(XenoVM *vm, const char *path) {
     if (!source) return 2;
 
     ts_start_ns = xeno_time_ns();
+    xeno_vm_set_compile_source_path(vm, path);
     XenoResult r = xeno_vm_run_source(vm, source);
     ts_end_ns = xeno_time_ns();
     free(source);
@@ -402,18 +465,101 @@ static int run_project(XenoVM *vm, const char *project_dir) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { print_usage(); return 3; }
-    if (strcmp(argv[1], "--help") == 0) { print_usage(); return 0; }
 
-    /* Catch xenoc-style "build" misuse: xenovm build <path> */
-    if (strcmp(argv[1], "build") == 0) {
-        fprintf(stderr,
-                "xenovm: there is no 'build' subcommand.\n"
-                "  Build with:  xenoc build <project-dir>\n"
-                "  Run with:    xenovm <mod.xar>   or   xenovm <project-dir>\n");
-        return 3;
+    bool debug = false;
+    int breaks[XENO_BREAKPOINT_MAX];
+    char break_files[XENO_BREAKPOINT_MAX][128];
+    int break_count = 0;
+    const char *path = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage();
+            return 0;
+        }
+        if (strcmp(argv[i], "build") == 0) {
+            fprintf(stderr,
+                    "xenovm: there is no 'build' subcommand.\n"
+                    "  Build with:  xenoc build <project-dir>\n"
+                    "  Run with:    xenovm <mod.xar>   or   xenovm <project-dir>\n");
+            return 3;
+        }
+        if (strcmp(argv[i], "--debug") == 0) {
+            debug = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--break") == 0 || strncmp(argv[i], "--break=", 8) == 0) {
+            const char *arg;
+            if (strncmp(argv[i], "--break=", 8) == 0)
+                arg = argv[i] + 8;
+            else {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "xenovm: --break requires <line> or <file>:<line>\n");
+                    return 3;
+                }
+                arg = argv[++i];
+            }
+            /* Parse optional file:line */
+            const char *colon = strrchr(arg, ':');
+            int line = 0;
+            char filebuf[128];
+            filebuf[0] = '\0';
+            if (colon && colon > arg && colon[1]) {
+                /* Could be Windows drive C:\... or file:line — only split if after colon is digits */
+                int all_digit = 1;
+                for (const char *p = colon + 1; *p; p++) {
+                    if (*p < '0' || *p > '9') { all_digit = 0; break; }
+                }
+                if (all_digit) {
+                    size_t flen = (size_t)(colon - arg);
+                    if (flen >= sizeof(filebuf)) flen = sizeof(filebuf) - 1;
+                    memcpy(filebuf, arg, flen);
+                    filebuf[flen] = '\0';
+                    /* basename only */
+                    const char *base = filebuf;
+                    const char *sl = strrchr(filebuf, '/');
+#ifdef _WIN32
+                    const char *bs = strrchr(filebuf, '\\');
+                    if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+                    if (sl) base = sl + 1;
+                    if (base != filebuf)
+                        memmove(filebuf, base, strlen(base) + 1);
+                    line = atoi(colon + 1);
+                } else {
+                    line = atoi(arg);
+                }
+            } else {
+                line = atoi(arg);
+            }
+            if (line <= 0) {
+                fprintf(stderr, "xenovm: invalid breakpoint '%s'\n", arg);
+                return 3;
+            }
+            if (break_count < XENO_BREAKPOINT_MAX) {
+                breaks[break_count] = line;
+                snprintf(break_files[break_count], sizeof(break_files[break_count]),
+                         "%s", filebuf);
+                break_count++;
+            }
+            debug = true; /* --break implies --debug */
+            continue;
+        }
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "xenovm: unknown option '%s'\n", argv[i]);
+            return 3;
+        }
+        if (path) {
+            fprintf(stderr, "xenovm: unexpected argument '%s'\n", argv[i]);
+            return 3;
+        }
+        path = argv[i];
     }
 
-    const char *path = argv[1];
+    if (!path) {
+        print_usage();
+        return 3;
+    }
 
     XenoVM *vm = malloc(sizeof(XenoVM));
     if (!vm) { fprintf(stderr, "xenovm: out of memory\n"); return 1; }
@@ -421,6 +567,33 @@ int main(int argc, char **argv) {
     xeno_vm_init(vm);
     register_std_fns(vm);
     xeno_vm_load_stdlib(vm);
+
+    if (debug) {
+        xeno_vm_debug_enable(vm, true);
+        xeno_vm_debug_set_callback(vm, xenovm_debug_on_break);
+        for (int i = 0; i < break_count; i++) {
+            if (break_files[i][0])
+                xeno_vm_debug_add_breakpoint_file(vm, breaks[i], break_files[i]);
+            else
+                xeno_vm_debug_add_breakpoint(vm, breaks[i]);
+        }
+        /* No breakpoints: stop on the first source line so the session starts usefully. */
+        if (break_count == 0)
+            xeno_vm_debug_step_over(vm);
+        fprintf(stderr, "xenovm: debugger on");
+        if (break_count > 0) {
+            fprintf(stderr, " — breakpoints:");
+            for (int i = 0; i < break_count; i++) {
+                if (break_files[i][0])
+                    fprintf(stderr, " %s:%d", break_files[i], breaks[i]);
+                else
+                    fprintf(stderr, " %d", breaks[i]);
+            }
+        } else {
+            fprintf(stderr, " — stopping at first source line");
+        }
+        fprintf(stderr, "\n");
+    }
 
     clock_t start = clock();        // start timing
 

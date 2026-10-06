@@ -97,6 +97,98 @@ void xeno_vm_init(XenoVM *vm)
     vm->has_source_module = false;
 }
 
+/* ── Debugger API ────────────────────────────────────────────────────────── */
+
+void xeno_vm_debug_enable(XenoVM *vm, bool enabled)
+{
+    vm->debug_enabled = enabled;
+    if (!enabled)
+    {
+        vm->debug_paused = false;
+        vm->debug_step_over = false;
+        vm->debug_ignore_line = 0;
+    }
+}
+
+void xeno_vm_debug_include_sinit(XenoVM *vm, bool include)
+{
+    vm->debug_include_sinit = include;
+}
+
+void xeno_vm_set_compile_source_path(XenoVM *vm, const char *path)
+{
+    vm->compile_source_path = path;
+}
+
+bool xeno_vm_debug_add_breakpoint(XenoVM *vm, int line)
+{
+    return xeno_vm_debug_add_breakpoint_file(vm, line, NULL);
+}
+
+bool xeno_vm_debug_add_breakpoint_file(XenoVM *vm, int line, const char *file)
+{
+    if (line <= 0 || vm->breakpoint_count >= XENO_BREAKPOINT_MAX)
+        return false;
+    for (int i = 0; i < vm->breakpoint_count; i++) {
+        if (vm->breakpoints[i] == line) {
+            const char *ef = vm->breakpoint_files[i];
+            if ((!file || !file[0]) && (!ef || !ef[0]))
+                return true;
+            if (file && ef && strcmp(file, ef) == 0)
+                return true;
+        }
+    }
+    int i = vm->breakpoint_count++;
+    vm->breakpoints[i] = line;
+    if (file && file[0])
+        snprintf(vm->breakpoint_files[i], sizeof(vm->breakpoint_files[i]), "%s", file);
+    else
+        vm->breakpoint_files[i][0] = '\0';
+    return true;
+}
+
+void xeno_vm_debug_clear_breakpoints(XenoVM *vm)
+{
+    vm->breakpoint_count = 0;
+}
+
+void xeno_vm_debug_continue(XenoVM *vm)
+{
+    vm->debug_paused = false;
+    /* Skip further stops on this line until the IP moves to another line */
+    vm->debug_ignore_line = vm->debug_hit_line;
+}
+
+void xeno_vm_debug_step_over(XenoVM *vm)
+{
+    vm->debug_step_over = true;
+    /* Before the first frame exists, accept any depth so "stop at first line" works. */
+    vm->debug_step_frame = vm->frame_count > 0 ? vm->frame_count : XENO_FRAME_MAX;
+    vm->debug_paused = false;
+    vm->debug_ignore_line = vm->debug_hit_line;
+}
+
+bool xeno_vm_debug_is_paused(const XenoVM *vm)
+{
+    return vm->debug_paused;
+}
+
+int xeno_vm_debug_hit_line(const XenoVM *vm)
+{
+    return vm->debug_hit_line;
+}
+
+int xeno_vm_debug_hit_offset(const XenoVM *vm)
+{
+    return vm->debug_hit_offset;
+}
+
+void xeno_vm_debug_set_callback(XenoVM *vm, void (*on_break)(XenoVM *vm))
+{
+    vm->debug_on_break = on_break;
+}
+
+
 static void vm_free_allocs(XenoVM *vm)
 {
 	for (size_t i = 0; i < vm->alloc_count; i++)
@@ -768,6 +860,113 @@ static XenoResult xeno_execute(XenoVM *vm)
     for (;;)
     {
     dispatch:;
+        /* Refresh frame in case a call/return updated frame_count */
+        frame = &vm->frames[vm->frame_count - 1];
+
+        /* ── Debugger: breakpoint / step before fetching the opcode ───
+         * Only stop at the *start* of a line run (first opcode tagged with
+         * that line after a different line). This avoids stopping on every
+         * intermediate bytecode that still carries a sub-expression line. */
+        if (vm->debug_enabled && frame->chunk && frame->chunk->lines)
+        {
+            int offset = (int)(frame->ip - frame->chunk->code);
+            if (offset >= 0 && offset < frame->chunk->count)
+            {
+                int line = frame->chunk->lines[offset];
+                bool line_entry = (line > 0) &&
+                    (offset == 0 || frame->chunk->lines[offset - 1] != line);
+
+                if (line_entry)
+                {
+                    /* Resolve chunk name early — skip library static inits by default */
+                    const char *fn = NULL;
+                    if (vm->module)
+                    {
+                        for (int fi = 0; fi < vm->module->count; fi++)
+                        {
+                            if (&vm->module->chunks[fi] == frame->chunk)
+                            {
+                                fn = vm->module->names[fi];
+                                break;
+                            }
+                        }
+                    }
+                    if (!vm->debug_include_sinit && fn &&
+                        strncmp(fn, "__sinit__", 9) == 0)
+                    {
+                        /* Still clear ignore when leaving a line inside sinit */
+                        if (vm->debug_ignore_line != 0 &&
+                            line != vm->debug_ignore_line)
+                            vm->debug_ignore_line = 0;
+                        goto debug_done;
+                    }
+
+                    if (vm->debug_ignore_line != 0 &&
+                        line != vm->debug_ignore_line)
+                        vm->debug_ignore_line = 0;
+
+                    bool stop = false;
+                    if (vm->debug_ignore_line == 0 ||
+                        line != vm->debug_ignore_line)
+                    {
+                        if (vm->debug_step_over)
+                        {
+                            if (vm->frame_count <= vm->debug_step_frame &&
+                                line != vm->debug_hit_line)
+                                stop = true;
+                        }
+                        else if (vm->breakpoint_count > 0)
+                        {
+                            const char *srcf = frame->chunk->source_file;
+                            for (int bi = 0; bi < vm->breakpoint_count; bi++)
+                            {
+                                if (vm->breakpoints[bi] != line)
+                                    continue;
+                                const char *bf = vm->breakpoint_files[bi];
+                                if (bf[0] && srcf[0] && strcmp(bf, srcf) != 0)
+                                    continue;
+                                if (bf[0] && !srcf[0])
+                                    continue; /* file-scoped bp, chunk has no file */
+                                stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (stop)
+                    {
+                        vm->debug_paused = true;
+                        vm->debug_hit_line = line;
+                        vm->debug_hit_offset = offset;
+                        vm->debug_step_over = false;
+                        if (fn)
+                            snprintf(vm->debug_hit_fn, sizeof(vm->debug_hit_fn), "%s", fn);
+                        else
+                            vm->debug_hit_fn[0] = '\0';
+                        if (frame->chunk->source_file[0])
+                            snprintf(vm->debug_hit_file, sizeof(vm->debug_hit_file),
+                                     "%s", frame->chunk->source_file);
+                        else
+                            vm->debug_hit_file[0] = '\0';
+                        if (vm->debug_on_break)
+                        {
+                            vm->debug_on_break(vm);
+                            if (vm->debug_paused)
+                            {
+                                vm->debug_paused = false;
+                                RUNTIME_ERROR("Debugger stopped at line %d", line);
+                            }
+                        }
+                        else
+                        {
+                            vm->debug_paused = false;
+                            vm->debug_ignore_line = line;
+                        }
+                        frame = &vm->frames[vm->frame_count - 1];
+                    }
+                }
+            }
+        debug_done: ;
+        }
 
         uint8_t instruction = READ_BYTE();
 
@@ -3248,6 +3447,8 @@ XenoResult xeno_vm_run_source(XenoVM *vm, const char *source)
 
     /* Compile — pass staging so compiler can resolve stdlib/dep classes
      * via compiler_ensure_class fallback without inlining their source. */
+    if (vm->compile_source_path)
+        compiler_set_source_path(&compiler, vm->compile_source_path);
     if (!compiler_compile_staged(&compiler, &program, &vm->source_module, &host_table, staging))
     {
         xeno_vm_error(vm, "Compile error at line %d: %s",

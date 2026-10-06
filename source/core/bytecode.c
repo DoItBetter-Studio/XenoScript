@@ -26,6 +26,7 @@ void chunk_init(Chunk *chunk)
     chunk->is_constructor = false;
     chunk->return_type_kind = 0;
     memset(chunk->param_type_kinds, 0, sizeof(chunk->param_type_kinds));
+    chunk->source_file[0] = '\0';
     chunk->constants.values = NULL;
 	chunk->constants.is_str = NULL;
     chunk->constants.count = 0;

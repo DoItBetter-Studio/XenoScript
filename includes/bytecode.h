@@ -607,6 +607,9 @@ typedef struct {
      * accurate types without re-parsing source. Uses TypeKind values. */
     int  return_type_kind;              /* TypeKind of the return value     */
     int  param_type_kinds[16];          /* TypeKind of each parameter       */
+
+    /* Debug: originating source file (basename preferred). Empty if unknown. */
+    char source_file[128];
 } Chunk;
 
 /* Initialize an empty chunk */

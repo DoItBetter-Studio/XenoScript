@@ -491,6 +491,7 @@ static int build_project(const char *project_dir, const char *output_path, const
 		}
 	}
 
+	compiler_set_source_path(&compiler, src_dir); /* project root-ish */
 	if (!compiler_compile(&compiler, &program, module, &host_table))
 	{
 		fprintf(stderr, "xenoc: compile errors:\n");

@@ -25,6 +25,14 @@
  *       string:         [4] length (uint32_t) + [N] chars (no null)
  *     [4]  code_len (uint32_t)
  *     [N]  code     (raw bytecode bytes)
+ *     line table (v23+, RLE):
+ *       [4]  run_count (uint32_t)
+ *       per run:
+ *         [4]  length (uint32_t) — consecutive bytes sharing this line
+ *         [4]  line   (uint32_t) — 1-based source line (0 = unknown)
+ *       sum of run lengths must equal code_len
+ *     source file (v24+):
+ *       [1]  path_len + [N] basename (empty string if unknown)
  *
  * All multi-byte integers are big-endian for portability.
  * Strings in the constant pool are stored with explicit length — no
@@ -40,7 +48,7 @@
 #include <stdio.h>
 
 #define XBC_MAGIC    "XBC\0"
-#define XBC_VERSION  21
+#define XBC_VERSION  24
 
 typedef enum {
     XBC_OK,

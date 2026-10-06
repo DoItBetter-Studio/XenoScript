@@ -334,6 +334,7 @@ static bool chunk_deep_copy(Chunk *dst, const Chunk *src)
 	dst->return_type_kind = src->return_type_kind;
 	for (int i = 0; i < src->param_count && i < 16; i++)
 		dst->param_type_kinds[i] = src->param_type_kinds[i];
+	memcpy(dst->source_file, src->source_file, sizeof(dst->source_file));
 
 	if (src->count > 0)
 	{
@@ -4366,14 +4367,33 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
 	return compiler_compile_staged(c, program, module, host_table, NULL);
 }
 
+static void chunk_stamp_source(Compiler *c, Chunk *chunk)
+{
+	if (!c->source_path || !c->source_path[0]) {
+		chunk->source_file[0] = '\0';
+		return;
+	}
+	const char *base = c->source_path;
+	const char *sl = strrchr(base, '/');
+#ifdef _WIN32
+	const char *bs = strrchr(base, '\\');
+	if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+	if (sl) base = sl + 1;
+	snprintf(chunk->source_file, sizeof(chunk->source_file), "%s", base);
+}
+
 bool compiler_compile_staged(Compiler *c, const Program *program, Module *module,
 							 const CompilerHostTable *host_table,
 							 const Module *staging)
 {
+	/* Preserve path if caller set it before compile */
+	const char *saved_path = c->source_path;
 	/* Initialize compiler state */
 	memset(c, 0, sizeof(Compiler));
 	c->module = module;
 	c->host_table = host_table;
+	c->source_path = saved_path;
 	c->program = program;
 	c->staging = staging; /* NULL if not provided */
 	c->current_fn = -1;
@@ -5108,7 +5128,18 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 		}
 	}
 
-	return !c->had_error;
+		/* Stamp source file on every chunk for file-scoped debug */
+	if (c->source_path) {
+		for (int i = 0; i < c->module->count; i++)
+			chunk_stamp_source(c, &c->module->chunks[i]);
+	}
+
+return !c->had_error;
+}
+
+void compiler_set_source_path(Compiler *c, const char *path)
+{
+	c->source_path = path;
 }
 
 void compiler_print_errors(const Compiler *c)

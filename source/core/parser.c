@@ -869,7 +869,13 @@ static Expr *parse_prefix(Parser *p) {
  */
 static int left_binding_power(TokenType type) {
     switch (type) {
-        case TOK_ASSIGN: return BP_ASSIGN;
+        case TOK_ASSIGN:
+        case TOK_PLUS_ASSIGN:
+        case TOK_MINUS_ASSIGN:
+        case TOK_STAR_ASSIGN:
+        case TOK_SLASH_ASSIGN:
+        case TOK_PERCENT_ASSIGN:
+            return BP_ASSIGN;
         case TOK_OR:     return BP_OR;
         case TOK_AND:    return BP_AND;
         case TOK_QUESTION: return BP_TERNARY; /* cond ? then : else */
@@ -891,6 +897,20 @@ static int left_binding_power(TokenType type) {
         case TOK_QUESTION_DOT: return BP_CALL + 1; /* ?. same as .  */
         case TOK_LBRACKET:    return BP_CALL + 1; /* index access same as member   */
         default:          return BP_NONE;  /* Not an infix operator */
+    }
+}
+
+/* Map an operator token to the mangled method name used for overloads.
+ * Returns NULL if the operator is not overloadable. */
+static TokenType compound_to_binary_op(TokenType op)
+{
+    switch (op) {
+    case TOK_PLUS_ASSIGN:    return TOK_PLUS;
+    case TOK_MINUS_ASSIGN:   return TOK_MINUS;
+    case TOK_STAR_ASSIGN:    return TOK_STAR;
+    case TOK_SLASH_ASSIGN:   return TOK_SLASH;
+    case TOK_PERCENT_ASSIGN: return TOK_PERCENT;
+    default:                 return TOK_EOF;
     }
 }
 
@@ -933,10 +953,19 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
         Expr *index = parse_expr(p, BP_NONE);
         consume(p, TOK_RBRACKET, "Expected ']' after index expression");
 
-        /* Check for assignment: arr[i] = value */
-        if (check(p, TOK_ASSIGN)) {
-            advance(p); /* consume '=' */
-            Expr *value = parse_expr(p, BP_NONE);
+        /* Assignment / compound: arr[i] = v  /  arr[i] += v */
+        if (check(p, TOK_ASSIGN) ||
+            check(p, TOK_PLUS_ASSIGN) || check(p, TOK_MINUS_ASSIGN) ||
+            check(p, TOK_STAR_ASSIGN) || check(p, TOK_SLASH_ASSIGN) ||
+            check(p, TOK_PERCENT_ASSIGN)) {
+            Token aop = p->current;
+            advance(p);
+            Expr *value = parse_expr(p, BP_ASSIGN);
+            TokenType bin_op = compound_to_binary_op(aop.type);
+            if (bin_op != TOK_EOF) {
+                Expr *lhs_read = expr_index(&p->arena, left, index, op.line, op.col);
+                value = expr_binary(&p->arena, bin_op, lhs_read, value, aop.line, aop.col);
+            }
             return expr_index_assign(&p->arena, left, index, value, op.line, op.col);
         }
         return expr_index(&p->arena, left, index, op.line, op.col);
@@ -1041,10 +1070,21 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
                                     args, arg_count, member.line, member.col);
         }
 
-        if (check(p, TOK_ASSIGN)) {
-            /* Field assignment: obj.field = value */
-            advance(p); /* consume '=' */
+        if (check(p, TOK_ASSIGN) ||
+            check(p, TOK_PLUS_ASSIGN) || check(p, TOK_MINUS_ASSIGN) ||
+            check(p, TOK_STAR_ASSIGN) || check(p, TOK_SLASH_ASSIGN) ||
+            check(p, TOK_PERCENT_ASSIGN)) {
+            /* Field assignment: obj.field = value
+             * Compound: obj.field += value  →  obj.field = obj.field + value */
+            Token aop = p->current;
+            advance(p);
             Expr *value = parse_expr(p, BP_ASSIGN);
+            TokenType bin_op = compound_to_binary_op(aop.type);
+            if (bin_op != TOK_EOF) {
+                Expr *lhs_read = expr_field_get(&p->arena, left,
+                    member.start, member.length, member.line, member.col);
+                value = expr_binary(&p->arena, bin_op, lhs_read, value, aop.line, aop.col);
+            }
             return expr_field_set(&p->arena, left,
                                   member.start, member.length,
                                   value, member.line, member.col);
@@ -1055,26 +1095,39 @@ static Expr *parse_infix(Parser *p, Expr *left, Token op) {
                               member.start, member.length, member.line, member.col);
     }
 
-    if (op.type == TOK_ASSIGN) {
-        /* Assignment: right-associative.
-         * The left side must be an identifier (lvalue).
-         * We pass lbp (not lbp+1) so that  a = b = 5  parses as  a = (b = 5). */
-        if (left->kind != EXPR_IDENT) {
-            if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
-                ParseError *e = &p->errors[p->error_count++];
-                snprintf(e->message, sizeof(e->message),
-                         "Left side of '=' must be a variable name");
-                e->line = op.line;
-                e->col = op.col > 0 ? op.col : 1;
-                e->end_col = e->col + (op.length > 0 ? op.length : 1);
-                p->had_error  = true;
-                p->panic_mode = true;
+    if (op.type == TOK_ASSIGN ||
+        op.type == TOK_PLUS_ASSIGN || op.type == TOK_MINUS_ASSIGN ||
+        op.type == TOK_STAR_ASSIGN || op.type == TOK_SLASH_ASSIGN ||
+        op.type == TOK_PERCENT_ASSIGN) {
+        /* Assignment / compound assignment — right-associative.
+         * Compound forms desugar: a += b  →  a = a + b
+         * (works for locals; field form is handled on the '.' path). */
+        TokenType bin_op = compound_to_binary_op(op.type);
+        Expr *right = parse_expr(p, lbp); /* right-associative */
+
+        if (left->kind == EXPR_IDENT) {
+            if (bin_op != TOK_EOF) {
+                Expr *lhs_read = expr_ident(&p->arena,
+                    left->ident.name, left->ident.length, op.line, op.col);
+                right = expr_binary(&p->arena, bin_op, lhs_read, right, op.line, op.col);
             }
+            return expr_assign(&p->arena,
+                               left->ident.name, left->ident.length,
+                               right, op.line, op.col);
         }
-        Expr *right = parse_expr(p, lbp); /* right-associative: same bp */
-        return expr_assign(&p->arena,
-                           left->ident.name, left->ident.length,
-                           right, op.line, op.col);
+
+        if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
+            ParseError *e = &p->errors[p->error_count++];
+            snprintf(e->message, sizeof(e->message),
+                     "Left side of '%s' must be a variable or field",
+                     token_type_name(op.type));
+            e->line = op.line;
+            e->col = op.col > 0 ? op.col : 1;
+            e->end_col = e->col + (op.length > 0 ? op.length : 1);
+            p->had_error  = true;
+            p->panic_mode = true;
+        }
+        return left;
     }
 
     /* is / as — right side is a type name, not an expression */
@@ -1261,8 +1314,6 @@ static TypeArgNode *parse_type_arg_list(Parser *p, int *out_count) {
  * Precondition: 'fn' has already been consumed.
  */
 
-/* Map an operator token to the mangled method name used for overloads.
- * Returns NULL if the operator is not overloadable. */
 static const char *operator_method_name(TokenType op)
 {
     switch (op) {
@@ -1654,8 +1705,6 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     operator_op = op;
                     advance(p); /* consume the operator token */
 
-                    /* Reuse parameter / return / body parsing from parse_fn_decl
-                     * by synthesizing an IDENT token for the mangled name. */
                     consume(p, TOK_LPAREN, "Expected '(' after operator");
                     ParamNode *params = NULL, *params_tail = NULL;
                     int param_count = 0;
@@ -1675,23 +1724,28 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     consume(p, TOK_COLON, "Expected ':' after operator parameters");
                     Type ret_type = parse_type(p);
                     Stmt *body = parse_block(p);
-                    int mlen = (int)strlen(mname);
-                    char *name_copy = arena_alloc(&p->arena, mlen + 1);
-                    memcpy(name_copy, mname, (size_t)mlen + 1);
-                    fn = stmt_fn_decl(&p->arena, ret_type, name_copy, mlen,
-                                     params, param_count, body, member_line,
-                                     p->previous.col > 0 ? p->previous.col : 1);
-                    if (param_count != 1) {
+
+                    /* Unary '-': zero params → op_neg; binary: one param */
+                    if (op == TOK_MINUS && param_count == 0)
+                        mname = "op_neg";
+                    if (!(param_count == 1 || (op == TOK_MINUS && param_count == 0))) {
                         if (!p->panic_mode && p->error_count < PARSER_MAX_ERRORS) {
                             ParseError *e = &p->errors[p->error_count++];
                             snprintf(e->message, sizeof(e->message),
-                                     "Operator overload must take exactly one parameter");
+                                     "Binary operator overload needs 1 parameter; "
+                                     "unary '-' needs 0");
                             e->line = member_line;
                             e->col = 1;
                             e->end_col = 2;
                             p->had_error = true;
                         }
                     }
+                    int mlen = (int)strlen(mname);
+                    char *name_copy = arena_alloc(&p->arena, mlen + 1);
+                    memcpy(name_copy, mname, (size_t)mlen + 1);
+                    fn = stmt_fn_decl(&p->arena, ret_type, name_copy, mlen,
+                                     params, param_count, body, member_line,
+                                     p->previous.col > 0 ? p->previous.col : 1);
                 }
             }
 
@@ -2769,8 +2823,11 @@ static Stmt *parse_stmt(Parser *p) {
         const char *event_name = NULL; int event_len = 0;
         const char *handler_name = NULL; int handler_len = 0;
 
-        /* Simple: IDENT += IDENT_or_THIS_DOT_IDENT ; */
-        if (p->next.type == TOK_PLUS_ASSIGN || p->next.type == TOK_MINUS_ASSIGN) {
+        /* Simple: IDENT += handler  — only if RHS looks like a handler form.
+         * Otherwise fall through so `neg += left` / `count += 1` parse as
+         * compound assignment expressions. */
+        if ((p->next.type == TOK_PLUS_ASSIGN || p->next.type == TOK_MINUS_ASSIGN) &&
+            (p->peek.type == TOK_IDENT || p->peek.type == TOK_THIS)) {
             is_sub = true;
             event_name = p->current.start; event_len = p->current.length;
             advance(p); /* consume event name */

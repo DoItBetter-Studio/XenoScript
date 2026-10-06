@@ -372,6 +372,51 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
         /* Bytecode */
         if (!wb_u32(wb, (uint32_t)chunk->count)) return false;
         if (!wb_write(wb, chunk->code, chunk->count)) return false;
+
+        /* Source line table — RLE (run-length encoded).
+         * Consecutive identical lines collapse to (length, line) pairs.
+         * Typical scripts compress ~10-50x vs one uint32 per byte. */
+        {
+            int n = chunk->count;
+            /* Count runs */
+            uint32_t runs = 0;
+            if (n > 0) {
+                runs = 1;
+                int prev = (chunk->lines) ? chunk->lines[0] : 0;
+                if (prev < 0) prev = 0;
+                for (int li = 1; li < n; li++) {
+                    int line = (chunk->lines) ? chunk->lines[li] : 0;
+                    if (line < 0) line = 0;
+                    if (line != prev) {
+                        runs++;
+                        prev = line;
+                    }
+                }
+            }
+            if (!wb_u32(wb, runs)) return false;
+            if (n > 0) {
+                int run_start = 0;
+                int prev = (chunk->lines) ? chunk->lines[0] : 0;
+                if (prev < 0) prev = 0;
+                for (int li = 1; li <= n; li++) {
+                    int line = (li < n && chunk->lines) ? chunk->lines[li] : -1;
+                    if (li < n && line < 0) line = 0;
+                    if (li == n || line != prev) {
+                        uint32_t len = (uint32_t)(li - run_start);
+                        if (!wb_u32(wb, len)) return false;
+                        if (!wb_u32(wb, (uint32_t)prev)) return false;
+                        if (li < n) {
+                            run_start = li;
+                            prev = line;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Source file basename (v24+) */
+        if (!wb_str(wb, chunk->source_file[0] ? chunk->source_file : ""))
+            return false;
     }
 
     return true;
@@ -483,8 +528,10 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
 
     uint8_t version = rb_u8(rb);
     if (rb->error) return XBC_ERR_IO;
-    if (version > XBC_VERSION)
+    /* Exact version only — no silent partial support for older layouts. */
+    if (version != XBC_VERSION)
         return XBC_ERR_BAD_VERSION;
+    (void)version;
 
     uint16_t fn_count    = rb_u16(rb);
     uint16_t class_count = rb_u16(rb);
@@ -785,7 +832,38 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
         for (uint32_t i = 0; i < code_len; i++) {
             uint8_t byte = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
-            chunk_write(chunk, byte, 0);
+            chunk_write(chunk, byte, 0); /* line filled from table below */
+        }
+
+        /* Source line table — RLE expand into chunk->lines[] */
+        {
+            uint32_t runs = rb_u32(rb);
+            if (rb->error) return XBC_ERR_IO;
+            uint32_t filled = 0;
+            for (uint32_t r = 0; r < runs; r++) {
+                uint32_t len  = rb_u32(rb);
+                uint32_t line = rb_u32(rb);
+                if (rb->error) return XBC_ERR_IO;
+                if (filled + len > code_len) return XBC_ERR_CORRUPT;
+                if (chunk->lines) {
+                    for (uint32_t k = 0; k < len; k++)
+                        chunk->lines[filled + k] = (int)line;
+                }
+                filled += len;
+            }
+            if (filled != code_len) return XBC_ERR_CORRUPT;
+        }
+
+        /* Source file basename (v24+) */
+        {
+            char *sf = rb_str(rb);
+            if (rb->error) return XBC_ERR_IO;
+            if (sf) {
+                snprintf(chunk->source_file, sizeof(chunk->source_file), "%s", sf);
+                free(sf);
+            } else {
+                chunk->source_file[0] = '\0';
+            }
         }
     }
 

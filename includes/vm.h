@@ -34,6 +34,7 @@
 #define XENO_FRAME_MAX       64    /* Maximum call depth (recursion limit)   */
 #define XENO_LOCALS_MAX      64    /* Maximum locals per frame               */
 #define XENO_HOST_FN_MAX     256   /* Maximum registered host functions      */
+#define XENO_BREAKPOINT_MAX  64    /* Maximum simultaneous breakpoints       */
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +193,29 @@ struct XenoVM {
 	XenoObject **objects;
 	size_t object_count;
 	size_t object_cap;
+
+    /* ── Debugger (optional; zero cost when debug_enabled is false) ─────
+     * Line info comes from Chunk.lines[] (XBC v22+). Breakpoints are
+     * matched by source line number within the executing chunk.
+     * debug_on_break is invoked when a breakpoint or step stops; the
+     * host may block there (e.g. wait for continue). If NULL, the VM
+     * does not hang — it records the hit and continues. */
+    bool        debug_enabled;
+    bool        debug_include_sinit; /* stop inside __sinit__* (default false) */
+    bool        debug_paused;
+    bool        debug_step_over;     /* stop on next line change at/under step frame */
+    int         debug_step_frame;    /* frame_count snapshot when step requested */
+    int         debug_ignore_line;   /* after continue, skip stops until line changes */
+    int         debug_hit_line;      /* line where we last stopped */
+    int         debug_hit_offset;    /* bytecode offset at last stop */
+    char        debug_hit_fn[64];    /* chunk/function name at last stop */
+    char        debug_hit_file[128]; /* source basename at last stop */
+    /* Optional path stamped onto chunks compiled via run_source */
+    const char *compile_source_path;
+    int         breakpoints[XENO_BREAKPOINT_MAX];
+    char        breakpoint_files[XENO_BREAKPOINT_MAX][128]; /* empty = any file */
+    int         breakpoint_count;
+    void      (*debug_on_break)(struct XenoVM *vm);
 };
 
 
@@ -291,6 +315,9 @@ void xeno_vm_set_mod_path(XenoVM *vm, const char *path);
  */
 XenoResult xeno_vm_run_source(XenoVM *vm, const char *source);
 
+/* Optional: stamp Chunk.source_file when compiling via run_source. */
+void xeno_vm_set_compile_source_path(XenoVM *vm, const char *path);
+
 /*
  * Set a runtime error message. Call this from host functions before
  * returning XENO_RUNTIME_ERROR.
@@ -312,3 +339,34 @@ static inline Value xeno_bool (bool    v) { return val_bool(v);  }
 static inline Value xeno_str  (char   *v) { return val_str(v);   }
 
 #endif /* VM_H */
+/* ── Debugger ────────────────────────────────────────────────────────────── */
+
+/* Enable or disable breakpoint / step checks in the execute loop. */
+void xeno_vm_debug_enable(XenoVM *vm, bool enabled);
+/* When false (default), debugger ignores __sinit__* static initializers. */
+void xeno_vm_debug_include_sinit(XenoVM *vm, bool include);
+
+/* Register a source-line breakpoint (1-based). file may be NULL or basename.
+ * When file is set, only stops in chunks stamped with that source file. */
+bool xeno_vm_debug_add_breakpoint(XenoVM *vm, int line);
+bool xeno_vm_debug_add_breakpoint_file(XenoVM *vm, int line, const char *file);
+
+/* Remove all breakpoints. */
+void xeno_vm_debug_clear_breakpoints(XenoVM *vm);
+
+/* Resume after a pause (clears debug_paused). */
+void xeno_vm_debug_continue(XenoVM *vm);
+
+/* Step to the next source line at or above the current frame depth. */
+void xeno_vm_debug_step_over(XenoVM *vm);
+
+/* True while stopped on a breakpoint/step (only meaningful inside on_break). */
+bool xeno_vm_debug_is_paused(const XenoVM *vm);
+
+/* Line / offset of the current stop (0 if none). */
+int  xeno_vm_debug_hit_line(const XenoVM *vm);
+int  xeno_vm_debug_hit_offset(const XenoVM *vm);
+
+/* Optional callback invoked when execution stops. May block until continue. */
+void xeno_vm_debug_set_callback(XenoVM *vm, void (*on_break)(XenoVM *vm));
+

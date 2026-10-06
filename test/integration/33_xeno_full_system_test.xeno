@@ -201,9 +201,7 @@ class TestScript
             stringList.add("Item 1");
             stringList.add("Item 2");
 
-            print(
-                $"List contents: {stringList[0]}, {stringList[1]}"
-            );
+            print( $"List contents: {stringList[0]}, {stringList[1]}" );
 
             Dictionary<int, string> intStringDict =
                 new Dictionary<int, string>();
@@ -211,10 +209,7 @@ class TestScript
             intStringDict.add(1, "Value 1");
             intStringDict.add(2, "Value 2");
 
-            print(
-                $"Dictionary contents: Key 1 -> {intStringDict[1]}, " +
-                $"Key 2 -> {intStringDict[2]}"
-            );
+            print( $"Dictionary contents: Key 1 -> {intStringDict[1]}, " + $"Key 2 -> {intStringDict[2]}" );
 
             foreach (string item in stringList)
             {
