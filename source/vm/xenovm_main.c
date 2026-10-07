@@ -449,12 +449,17 @@ static int run_project(XenoVM *vm, const char *project_dir) {
         merged_all[merged_len]   = '\0';
         free(file_merged);
     }
+    char primary_source[512] = "";
+    if (source_count == 1 && source_paths[0])
+        snprintf(primary_source, sizeof(primary_source), "%s", source_paths[0]);
     for (int i = 0; i < source_count; i++) free(source_paths[i]);
     module_free(staging); free(staging);
 
     if (any_err) { free(merged_all); return 1; }
 
     ts_start_ns = xeno_time_ns();
+    if (primary_source[0])
+        xeno_vm_set_compile_source_path(vm, primary_source);
     XenoResult r = xeno_vm_run_source(vm, merged_all);
     ts_end_ns = xeno_time_ns();
     free(merged_all);

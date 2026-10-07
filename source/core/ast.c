@@ -530,6 +530,7 @@ Stmt *stmt_var_decl(Arena *a, Type type, const char *name, int len,
     Stmt *s             = arena_alloc(a, sizeof(Stmt));
     s->kind             = STMT_VAR_DECL;
     s->line             = line;
+    s->source_file     = NULL;
     s->col              = col;             /* column of the variable NAME */
     s->var_decl.type    = type;
     s->var_decl.name    = name;
@@ -543,6 +544,7 @@ Stmt *stmt_expr(Arena *a, Expr *expr, int line, int col) {
     Stmt *s     = arena_alloc(a, sizeof(Stmt));
     s->kind     = STMT_EXPR;
     s->line     = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->expr.expr = expr;
     return s;
@@ -552,6 +554,7 @@ Stmt *stmt_if(Arena *a, Expr *cond, Stmt *then_b, Stmt *else_b, int line, int co
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_IF;
     s->line              = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->if_stmt.condition   = cond;
     s->if_stmt.then_branch = then_b;
@@ -563,6 +566,7 @@ Stmt *stmt_while(Arena *a, Expr *cond, Stmt *body, int line, int col) {
     Stmt *s                = arena_alloc(a, sizeof(Stmt));
     s->kind                = STMT_WHILE;
     s->line                = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->while_stmt.condition = cond;
     s->while_stmt.body      = body;
@@ -574,6 +578,7 @@ Stmt *stmt_for(Arena *a, Stmt *init, Expr *cond, Expr *step,
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_FOR;
     s->line              = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->for_stmt.init      = init;
     s->for_stmt.condition = cond;
@@ -587,6 +592,7 @@ Stmt *stmt_foreach(Arena *a, Type elem_type, const char *var_name, int var_len,
     Stmt *s = arena_alloc(a, sizeof(Stmt));
     s->kind = STMT_FOREACH; s->line = line; s->col = col;
     s->col          = col;
+    s->source_file = NULL;
     s->col  = col;
     s->foreach_stmt.elem_type = elem_type; s->foreach_stmt.var_name = var_name;
     s->foreach_stmt.var_len = var_len; s->foreach_stmt.array = array;
@@ -598,6 +604,7 @@ Stmt *stmt_match(Arena *a, Expr *subject, int line, int col) {
     Stmt *s                    = arena_alloc(a, sizeof(Stmt));
     s->kind                    = STMT_MATCH;
     s->line                    = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->match_stmt.subject      = subject;
     s->match_stmt.arms         = NULL;
@@ -610,6 +617,7 @@ Stmt *stmt_return(Arena *a, Expr *value, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_RETURN;
     s->line              = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->return_stmt.value = value;
     return s;
@@ -620,6 +628,7 @@ Stmt *stmt_break(Arena *a, int line, int col) {
     s->kind = STMT_BREAK;
     s->line = line; s->col = col;
     s->col          = col;
+    s->source_file = NULL;
     s->col  = col;
     return s;
 }
@@ -629,6 +638,7 @@ Stmt *stmt_continue(Arena *a, int line, int col) {
     s->kind = STMT_CONTINUE;
     s->line = line; s->col = col;
     s->col          = col;
+    s->source_file = NULL;
     s->col  = col;
     return s;
 }
@@ -637,6 +647,7 @@ Stmt *stmt_block(Arena *a, StmtNode *stmts, int line, int col) {
     Stmt *s           = arena_alloc(a, sizeof(Stmt));
     s->kind           = STMT_BLOCK;
     s->line           = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->block.stmts    = stmts;
     return s;
@@ -647,6 +658,7 @@ Stmt *stmt_fn_decl(Arena *a, Type ret, const char *name, int len,
     Stmt *s                  = arena_alloc(a, sizeof(Stmt));
     s->kind                  = STMT_FN_DECL;
     s->line                  = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->fn_decl.return_type   = ret;
     s->fn_decl.name          = name;
@@ -662,6 +674,7 @@ Stmt *stmt_class_decl(Arena *a, const char *name, int len,
     Stmt *s                        = arena_alloc(a, sizeof(Stmt));
     s->kind                        = STMT_CLASS_DECL;
     s->line                        = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->class_decl.name             = name;
     s->class_decl.length           = len;
@@ -678,6 +691,7 @@ Stmt *stmt_enum_decl(Arena *a, const char *name, int len, int line, int col) {
     Stmt *s              = arena_alloc(a, sizeof(Stmt));
     s->kind              = STMT_ENUM_DECL;
     s->line              = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->enum_decl.name    = name;
     s->enum_decl.length  = len;
@@ -690,6 +704,7 @@ Stmt *stmt_interface_decl(Arena *a, const char *name, int len, int line, int col
     Stmt *s                          = arena_alloc(a, sizeof(Stmt));
     s->kind                          = STMT_INTERFACE_DECL;
     s->line                          = line;
+    s->source_file     = NULL;
     s->col          = col;
     s->interface_decl.name           = name;
     s->interface_decl.length         = len;

@@ -496,6 +496,11 @@ static char *pipeline_resolve_imports(PipelineState *s,
                 snprintf(skey, sizeof(skey), "<src:%s>", name);
                 if (!pipeline_local_seen(s, skey)) {
                     pipeline_local_mark(s, skey);
+                    /* Tag inlined stdlib so debugger does not attribute it to the user file */
+                    char tag[160];
+                    snprintf(tag, sizeof(tag), "// @xeno:file %s.xeno\n// @xeno:line 1\n", name);
+                    out = pipeline_buf_append(out, len, cap, tag, strlen(tag));
+                    if (!out) { *err = true; return out; }
                     out = pipeline_resolve_imports(s, XENOSCRIPT_STDLIB[si].source,
                                                    "", name, out, len, cap, staging, err);
                     if (*err || !out) return out;
@@ -523,6 +528,19 @@ static char *pipeline_resolve_imports(PipelineState *s,
                 }
                 char sub[1024] = "";
                 pipeline_dir_of(fpath, sub, sizeof(sub));
+                {
+                    const char *base = fpath;
+                    const char *sl = strrchr(fpath, '/');
+#ifdef _WIN32
+                    const char *bs = strrchr(fpath, '\\');
+                    if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+                    if (sl) base = sl + 1;
+                    char tag[320];
+                    snprintf(tag, sizeof(tag), "// @xeno:file %s\n// @xeno:line 1\n", base);
+                    out = pipeline_buf_append(out, len, cap, tag, strlen(tag));
+                    if (!out) { free(src); *err = true; return out; }
+                }
                 out = pipeline_resolve_imports(s, src, sub, fpath,
                                                out, len, cap, staging, err);
                 free(src);
@@ -567,8 +585,13 @@ static void pipeline_declare_staging(Checker *checker, const Module *staging) {
             params[j] = pipeline_kind_to_type(ch->param_type_kinds[j]);
         checker_declare_host(checker, nm, ret, pc > 0 ? params : NULL, pc);
     }
-    for (int i = 0; i < staging->class_count; i++)
-        checker_declare_class_from_def(checker, &staging->classes[i]);
+    for (int i = 0; i < staging->class_count; i++) {
+        const ClassDef *def = &staging->classes[i];
+        const char *parent = NULL;
+        if (def->parent_index >= 0 && def->parent_index < staging->class_count)
+            parent = staging->classes[def->parent_index].name;
+        checker_declare_class_from_def(checker, def, parent);
+    }
 }
 
 /* Like pipeline_declare_staging but only declares classes at indices >= skip_first.
@@ -591,8 +614,13 @@ static void pipeline_declare_staging_deps_only(Checker *checker,
         checker_declare_host(checker, nm, ret, pc > 0 ? params : NULL, pc);
     }
     /* Classes: only declare those from deps (after the stdlib classes) */
-    for (int i = skip_first; i < staging->class_count; i++)
-        checker_declare_class_from_def(checker, &staging->classes[i]);
+    for (int i = skip_first; i < staging->class_count; i++) {
+        const ClassDef *def = &staging->classes[i];
+        const char *parent = NULL;
+        if (def->parent_index >= 0 && def->parent_index < staging->class_count)
+            parent = staging->classes[def->parent_index].name;
+        checker_declare_class_from_def(checker, def, parent);
+    }
 }
 
 /* ── Top-level entry point ────────────────────────────────────────────── */
@@ -623,11 +651,6 @@ static char *pipeline_prepare_with_state(const char *source, const char *source_
     char *merged = malloc(cap);
     if (!merged) { *err = true; return NULL; }
     merged[0] = '\0';
-
-    merged = pipeline_buf_append(merged, &len, &cap,
-                                 xenostd_enumerable_source,
-                                 strlen(xenostd_enumerable_source));
-    if (!merged) { *err = true; return NULL; }
 
     merged = pipeline_buf_append(merged, &len, &cap, "// @xeno:line 1\n", 16);
     if (!merged) { *err = true; return NULL; }
@@ -677,16 +700,6 @@ static char *pipeline_prepare_with_deps(const char *source, const char *source_p
     if (!merged) { *err = true; return NULL; }
     merged[0] = '\0';
 
-    /* IEnumerable/IEnumerator interfaces are declared by injecting the source
-     * text so the checker knows about them without an explicit import.
-     * RangeEnumerator and Range are compiled into core.xar and loaded above
-     * via pipeline_load_sys_module — no source re-declaration needed for them. */
-    merged = pipeline_buf_append(merged, &len, &cap,
-                                 xenostd_enumerable_source,
-                                 strlen(xenostd_enumerable_source));
-    if (!merged) { *err = true; return NULL; }
-
-    /* Reset line counter so user source errors report correct line numbers */
     merged = pipeline_buf_append(merged, &len, &cap, "// @xeno:line 1\n", 16);
     if (!merged) { *err = true; return NULL; }
 
@@ -757,25 +770,22 @@ static char *pipeline_prepare_project_seeded(const char *source,
     if (!merged) { *err = true; return NULL; }
     merged[0] = '\0';
 
-    /* Prepend exception source if not already inlined (seed state might have it) */
-    if (!pipeline_local_seen(&ps, "__exception_inlined__")) {
-        pipeline_local_mark(&ps, "__exception_inlined__");
-        merged = pipeline_buf_append(merged, &len, &cap,
-                                     xenostd_exception_source,
-                                     strlen(xenostd_exception_source));
-        if (!merged) { *err = true; return NULL; }
+            /* Reset file + line so user source errors/debug map correctly */
+    {
+        const char *base = "source.xeno";
+        if (source_path && *source_path) {
+            base = source_path;
+            const char *sl = strrchr(source_path, '/');
+#ifdef _WIN32
+            const char *bs = strrchr(source_path, '\\');
+            if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+            if (sl) base = sl + 1;
+        }
+        char tag[320];
+        snprintf(tag, sizeof(tag), "// @xeno:file %s\n// @xeno:line 1\n", base);
+        merged = pipeline_buf_append(merged, &len, &cap, tag, strlen(tag));
     }
-    /* Prepend IEnumerable/IEnumerator interfaces */
-    if (!pipeline_local_seen(&ps, "__enumerable_inlined__")) {
-        pipeline_local_mark(&ps, "__enumerable_inlined__");
-        merged = pipeline_buf_append(merged, &len, &cap,
-                                     xenostd_enumerable_source,
-                                     strlen(xenostd_enumerable_source));
-        if (!merged) { *err = true; return NULL; }
-    }
-    /* Reset line counter so user source errors report correct line numbers */
-    merged = pipeline_buf_append(merged, &len, &cap,
-                                 "// @xeno:line 1\n", 16);
     if (!merged) { *err = true; return NULL; }
 
     *err = false;

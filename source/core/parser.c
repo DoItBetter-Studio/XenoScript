@@ -24,6 +24,20 @@
  * The consumed token becomes `previous`, the new one becomes `current`.
  * We maintain current, next, and peek (3-token lookahead). */
 /* Record a parse error at a token (1-based line/col). */
+
+/* Stamp //@xeno:file basename onto a statement (arena copy). */
+static void stmt_set_file(Parser *p, Stmt *s)
+{
+    if (!s || !p || !p->lexer) return;
+    if (!p->lexer->current_file[0]) return;
+    size_t n = strlen(p->lexer->current_file);
+    char *copy = arena_alloc(&p->arena, n + 1);
+    if (!copy) return;
+    memcpy(copy, p->lexer->current_file, n + 1);
+    s->source_file = copy;
+}
+
+
 static void record_error_at(Parser *p, Token t, bool set_panic, const char *fmt, ...)
 {
     if (p->error_count >= PARSER_MAX_ERRORS)
@@ -900,8 +914,6 @@ static int left_binding_power(TokenType type) {
     }
 }
 
-/* Map an operator token to the mangled method name used for overloads.
- * Returns NULL if the operator is not overloadable. */
 static TokenType compound_to_binary_op(TokenType op)
 {
     switch (op) {
@@ -1314,6 +1326,8 @@ static TypeArgNode *parse_type_arg_list(Parser *p, int *out_count) {
  * Precondition: 'fn' has already been consumed.
  */
 
+/* Map an operator token to the mangled method name used for overloads.
+ * Returns NULL if the operator is not overloadable. */
 static const char *operator_method_name(TokenType op)
 {
     switch (op) {
@@ -1403,6 +1417,7 @@ static Stmt *parse_fn_decl(Parser *p, int line) {
                         name.start, name.length,
                         params, param_count,
                         body, line, name.col > 0 ? name.col : 1);
+    stmt_set_file(p, fn);
     fn->fn_decl.type_params      = type_params;
     fn->fn_decl.type_param_count = type_param_count;
     return fn;
@@ -1483,6 +1498,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                                 class_name.start, class_name.length,
                                 parent_name, parent_len,
                                 line, class_name.col > 0 ? class_name.col : 1);
+    stmt_set_file(p, cls);
     /* Stash the raw name list; checker_check() will classify each as
      * parent class or interface and validate accordingly. */
     cls->class_decl.interfaces      = ifaces;
@@ -1641,6 +1657,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                                       class_name.start, class_name.length,
                                       params, param_count, body, member_line,
                                       class_name.col > 0 ? class_name.col : 1);
+    stmt_set_file(p, fn);
 
             typedef struct ClassMethodNode CMNode;
             CMNode *mn         = arena_alloc(&p->arena, sizeof(CMNode));
@@ -1746,6 +1763,7 @@ static Stmt *parse_class_decl(Parser *p, int line) {
                     fn = stmt_fn_decl(&p->arena, ret_type, name_copy, mlen,
                                      params, param_count, body, member_line,
                                      p->previous.col > 0 ? p->previous.col : 1);
+                    stmt_set_file(p, fn);
                 }
             }
 

@@ -80,6 +80,9 @@ typedef struct {
      * Set by checker_declare_class_from_def; NULL for source-compiled classes. */
     void           *class_def;  /* actually ClassDef* — cast at use sites */
 
+    /* For SYM_CLASS from ClassDef — null-terminated parent class name, or empty. */
+    char            parent_name_buf[64];
+
     /* For SYM_CLASS only — null-terminated copy of the class name, safe
      * to pass to strlen/strcmp. Source tokens are NOT null-terminated. */
     char class_name_buf[64];
@@ -252,7 +255,9 @@ void checker_declare_host(Checker *checker,
  * Registers the class name in the global scope so the type checker knows it
  * exists. Full method resolution happens at runtime via module_merge.
  */
-void checker_declare_class_from_def(Checker *checker, const ClassDef *def);
+/* parent_name: null-terminated parent class name from Module, or NULL. */
+void checker_declare_class_from_def(Checker *checker, const ClassDef *def,
+                                    const char *parent_name);
 
 /*
  * Type-check an entire program.

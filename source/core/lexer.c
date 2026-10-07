@@ -136,6 +136,17 @@ static void skip_whitespace_and_comments(Lexer *lexer)
                         lexer->line = new_line - 1;
                         lexer->col = 1;
                     }
+                } else if (strncmp(p, "@xeno:file ", 11) == 0) {
+                    const char *fp = p + 11;
+                    while (*fp == ' ' || *fp == '\t') fp++;
+                    size_t n = 0;
+                    while (fp[n] && fp[n] != ' ' && fp[n] != '\t' &&
+                           fp[n] != '\r' && fp[n] != '\n')
+                        n++;
+                    if (n >= sizeof(lexer->current_file))
+                        n = sizeof(lexer->current_file) - 1;
+                    memcpy(lexer->current_file, fp, n);
+                    lexer->current_file[n] = '\0';
                 }
                 /* Consume everything until newline or EOF.
                  * We DON'T consume the newline itself — the outer loop

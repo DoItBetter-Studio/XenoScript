@@ -434,6 +434,10 @@ static int build_project(const char *project_dir, const char *output_path, const
 		merged_all[merged_len] = '\0';
 		free(file_merged);
 	}
+	/* Remember primary source for debug stamping (single-file projects). */
+	char primary_source[512] = "";
+	if (source_count == 1 && source_paths[0])
+		snprintf(primary_source, sizeof(primary_source), "%s", source_paths[0]);
 	for (int i = 0; i < source_count; i++)
 		free(source_paths[i]);
 
@@ -491,7 +495,8 @@ static int build_project(const char *project_dir, const char *output_path, const
 		}
 	}
 
-	compiler_set_source_path(&compiler, src_dir); /* project root-ish */
+	if (primary_source[0])
+		compiler_set_source_path(&compiler, primary_source);
 	if (!compiler_compile(&compiler, &program, module, &host_table))
 	{
 		fprintf(stderr, "xenoc: compile errors:\n");

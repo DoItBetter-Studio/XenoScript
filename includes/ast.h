@@ -692,6 +692,8 @@ struct Stmt {
     StmtKind kind;
     int      line;
     int      col;             /* Source column for LSP (1-based) */
+    /* Basename of the source file this stmt came from (//@xeno:file), or NULL */
+    const char *source_file;
 
     union {
         /* STMT_VAR_DECL

@@ -160,14 +160,6 @@ $(BUILD)/%.xdoc.win64.o: $(BUILD)/%.xdoc
 	@$(LD_WIN64) -r -b binary $< -o $@
 
 # ==========================================================
-# stdlib_sources.h (optional source-merge stubs)
-# ==========================================================
-
-$(STDLIB_SOURCES_H): $(wildcard stdlib/*/*.xeno)
-	@printf "🐍 Regenerating stdlib_sources.h...\n"
-	@python3 source/stdlib/gen_stdlib.py
-
-# ==========================================================
 # Guard: binaries need embeds. If missing, point at `make stdlib`.
 # ==========================================================
 

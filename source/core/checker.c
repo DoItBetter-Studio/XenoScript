@@ -1213,25 +1213,37 @@ static bool is_subtype(Checker *c, const char *child_name, const char *parent_na
 	/* Walk the ancestor chain starting from child */
 	const char *current = child_name;
 	int safety = 64; /* guard against inheritance cycles */
+	static char parent_buf[64];
 	while (current && safety-- > 0)
 	{
 		if (strcmp(current, parent_name) == 0)
 			return true;
 		Symbol *sym = lookup_symbol(c, current, (int)strlen(current));
-		if (!sym || sym->kind != SYM_CLASS || !sym->class_decl)
+		if (!sym || sym->kind != SYM_CLASS)
 			return false;
-		/* Move up: get the parent name from the AST node */
-		Stmt *cls_ast = sym->class_decl;
-		if (!cls_ast->class_decl.parent_name || cls_ast->class_decl.parent_length == 0)
-			return false;
-		/* Parent name is not null-terminated — need a temp buffer */
-		static char parent_buf[64];
-		int plen = cls_ast->class_decl.parent_length < 63
-					   ? cls_ast->class_decl.parent_length
-					   : 63;
-		memcpy(parent_buf, cls_ast->class_decl.parent_name, plen);
-		parent_buf[plen] = '\0';
-		current = parent_buf;
+
+		/* AST parent */
+		if (sym->class_decl &&
+			sym->class_decl->class_decl.parent_name &&
+			sym->class_decl->class_decl.parent_length > 0)
+		{
+			int plen = sym->class_decl->class_decl.parent_length < 63
+						   ? sym->class_decl->class_decl.parent_length
+						   : 63;
+			memcpy(parent_buf, sym->class_decl->class_decl.parent_name, plen);
+			parent_buf[plen] = '\0';
+			current = parent_buf;
+			continue;
+		}
+
+		/* ClassDef / staged stdlib parent */
+		if (sym->parent_name_buf[0])
+		{
+			current = sym->parent_name_buf;
+			continue;
+		}
+
+		return false;
 	}
 	return false;
 }
@@ -1261,31 +1273,63 @@ static bool class_implements_interface(Checker *c,
 	while (cur && safety-- > 0)
 	{
 		Symbol *csym = lookup_symbol(c, cur, (int)strlen(cur));
-		if (!csym || csym->kind != SYM_CLASS || !csym->class_decl)
+		if (!csym || csym->kind != SYM_CLASS)
 			return false;
-		Stmt *cls = csym->class_decl;
-		/* Check every listed interface (and their parents) */
-		typedef struct IfaceNameNode IFNode;
-		for (IFNode *in = cls->class_decl.interfaces; in; in = in->next)
+
+		/* AST path */
+		if (csym->class_decl)
 		{
-			Symbol *isym = lookup_symbol(c, in->name, in->length);
-			if (!isym || isym->kind != SYM_INTERFACE)
+			Stmt *cls = csym->class_decl;
+			typedef struct IfaceNameNode IFNode;
+			for (IFNode *in = cls->class_decl.interfaces; in; in = in->next)
+			{
+				Symbol *isym = lookup_symbol(c, in->name, in->length);
+				if (!isym || isym->kind != SYM_INTERFACE)
+					continue;
+				if (strcmp(isym->iface_name_buf, iface_name) == 0)
+					return true;
+				if (iface_extends(c, isym->iface_name_buf, iface_name))
+					return true;
+			}
+			if (cls->class_decl.parent_name && cls->class_decl.parent_length > 0)
+			{
+				int plen = cls->class_decl.parent_length < 63
+							   ? cls->class_decl.parent_length
+							   : 63;
+				memcpy(buf, cls->class_decl.parent_name, plen);
+				buf[plen] = '\0';
+				cur = buf;
 				continue;
-			/* Direct match or the interface extends the target */
-			if (strcmp(isym->iface_name_buf, iface_name) == 0)
-				return true;
-			if (iface_extends(c, isym->iface_name_buf, iface_name))
-				return true;
+			}
 		}
-		/* Walk up to parent class */
-		if (!cls->class_decl.parent_name || cls->class_decl.parent_length == 0)
-			return false;
-		int plen = cls->class_decl.parent_length < 63
-					   ? cls->class_decl.parent_length
-					   : 63;
-		memcpy(buf, cls->class_decl.parent_name, plen);
-		buf[plen] = '\0';
-		cur = buf;
+
+		/* ClassDef path (stdlib from core.xar) */
+		if (csym->class_def)
+		{
+			const ClassDef *def = (const ClassDef *)csym->class_def;
+			for (int ii = 0; ii < def->interface_count; ii++)
+			{
+				const char *iname = def->interface_names[ii];
+				/* Bare name or "IEnumerable<int>" — compare base */
+				char base[64];
+				const char *lt = strchr(iname, '<');
+				int blen = lt ? (int)(lt - iname) : (int)strlen(iname);
+				if (blen >= 63) blen = 63;
+				memcpy(base, iname, blen);
+				base[blen] = '\0';
+				if (strcmp(base, iface_name) == 0)
+					return true;
+				if (iface_extends(c, base, iface_name))
+					return true;
+			}
+			if (csym->parent_name_buf[0])
+			{
+				cur = csym->parent_name_buf;
+				continue;
+			}
+		}
+
+		return false;
 	}
 	return false;
 }
@@ -1306,19 +1350,33 @@ static bool iface_extends(Checker *c, const char *child_iface, const char *paren
 	while (cur && safety-- > 0)
 	{
 		Symbol *isym = lookup_symbol(c, cur, (int)strlen(cur));
-		if (!isym || isym->kind != SYM_INTERFACE || !isym->interface_decl)
+		if (!isym || isym->kind != SYM_INTERFACE)
 			return false;
-		Stmt *iface = isym->interface_decl;
-		if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+		if (isym->interface_decl)
+		{
+			Stmt *iface = isym->interface_decl;
+			if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+				return false;
+			int plen = iface->interface_decl.parent_length < 63
+						   ? iface->interface_decl.parent_length
+						   : 63;
+			memcpy(buf, iface->interface_decl.parent_name, plen);
+			buf[plen] = '\0';
+			if (strcmp(buf, parent_iface) == 0)
+				return true;
+			cur = buf;
+			continue;
+		}
+		/* ClassDef interface: parent encoded in interface_names[0] only when
+		 * interface inheritance was serialized — otherwise no parent. */
+		if (isym->class_def)
+		{
+			const ClassDef *def = (const ClassDef *)isym->class_def;
+			/* No dedicated parent field for interfaces in ClassDef; stop. */
+			(void)def;
 			return false;
-		int plen = iface->interface_decl.parent_length < 63
-					   ? iface->interface_decl.parent_length
-					   : 63;
-		memcpy(buf, iface->interface_decl.parent_name, plen);
-		buf[plen] = '\0';
-		if (strcmp(buf, parent_iface) == 0)
-			return true;
-		cur = buf;
+		}
+		return false;
 	}
 	return false;
 }
@@ -5965,7 +6023,8 @@ void checker_declare_host(Checker *c,
 	(void)ok;
 }
 
-void checker_declare_class_from_def(Checker *c, const ClassDef *def)
+void checker_declare_class_from_def(Checker *c, const ClassDef *def,
+									const char *parent_name)
 {
 	/* Skip if already declared (e.g. core loaded twice) */
 	int nlen = (int)strlen(def->name);
@@ -5973,25 +6032,48 @@ void checker_declare_class_from_def(Checker *c, const ClassDef *def)
 		return;
 
 	Symbol sym = {0};
-	sym.kind = SYM_CLASS;
+	sym.kind = def->is_interface ? SYM_INTERFACE : SYM_CLASS;
 	sym.length = nlen;
 	/* Copy name into the stable buf FIRST so sym.name doesn't dangle
 	 * if the staging module is freed before the checker uses the symbol. */
 	int blen = nlen < 63 ? nlen : 63;
-	memcpy(sym.class_name_buf, def->name, blen);
-	sym.class_name_buf[blen] = '\0';
-	sym.name = sym.class_name_buf; /* point at stable copy, not staging data */
-	sym.type = type_object(sym.class_name_buf);
+	if (def->is_interface) {
+		memcpy(sym.iface_name_buf, def->name, blen);
+		sym.iface_name_buf[blen] = '\0';
+		sym.name = sym.iface_name_buf;
+		sym.type = type_object(sym.iface_name_buf);
+	} else {
+		memcpy(sym.class_name_buf, def->name, blen);
+		sym.class_name_buf[blen] = '\0';
+		sym.name = sym.class_name_buf;
+		sym.type = type_object(sym.class_name_buf);
+	}
+
+	/* Parent name resolved by caller from Module (avoids Module in checker.h) */
+	sym.parent_name_buf[0] = '\0';
+	if (!def->is_interface && parent_name && parent_name[0])
+	{
+		strncpy(sym.parent_name_buf, parent_name, sizeof(sym.parent_name_buf) - 1);
+		sym.parent_name_buf[sizeof(sym.parent_name_buf) - 1] = '\0';
+	}
 
 	sym_set_loc(&sym, NULL, 0, 0); /* XAR-loaded — no source location */
 	if (define_symbol(c, sym))
 	{
-		Symbol *stored = lookup_symbol(c, sym.class_name_buf, nlen);
+		Symbol *stored = lookup_symbol(c, def->name, nlen);
 		if (stored)
 		{
-			stored->name = stored->class_name_buf; /* fix dangling pointer after copy */
-			stored->type.class_name = stored->class_name_buf;
+			if (def->is_interface) {
+				stored->name = stored->iface_name_buf;
+				stored->type.class_name = stored->iface_name_buf;
+			} else {
+				stored->name = stored->class_name_buf;
+				stored->type.class_name = stored->class_name_buf;
+			}
 			stored->class_def = (void *)def;
+			strncpy(stored->parent_name_buf, sym.parent_name_buf,
+					sizeof(stored->parent_name_buf) - 1);
+			stored->parent_name_buf[sizeof(stored->parent_name_buf) - 1] = '\0';
 		}
 	}
 }
@@ -6203,8 +6285,28 @@ bool checker_check(Checker *c, Program *program)
 
 			if (!define_symbol(c, sym))
 			{
-				type_error(c, s->line, s->col, s->interface_decl.length, "Interface '%.*s' already declared",
-						   s->interface_decl.length, s->interface_decl.name);
+				/* Pre-seeded from core.xar ClassDef (often as SYM_CLASS).
+				 * Attach the real interface AST so method-completeness checks work. */
+				Symbol *existing = lookup_symbol(c, s->interface_decl.name,
+												 s->interface_decl.length);
+				if (existing && !existing->interface_decl &&
+					(existing->kind == SYM_INTERFACE || existing->kind == SYM_CLASS))
+				{
+					existing->kind = SYM_INTERFACE;
+					existing->interface_decl = s;
+					int bl = s->interface_decl.length < 63 ? s->interface_decl.length : 63;
+					memcpy(existing->iface_name_buf, s->interface_decl.name, bl);
+					existing->iface_name_buf[bl] = '\0';
+					existing->name = existing->iface_name_buf;
+					existing->length = bl;
+					sym_set_loc(existing, c->source_file, s->line, s->col);
+				}
+				else
+				{
+					type_error(c, s->line, s->col, s->interface_decl.length,
+							   "Interface '%.*s' already declared",
+							   s->interface_decl.length, s->interface_decl.name);
+				}
 			}
 		}
 		else if (s->kind == STMT_EVENT_DECL)
@@ -6375,7 +6477,68 @@ bool checker_check(Checker *c, Program *program)
 			while (iface_walk[0] && iface_safety-- > 0)
 			{
 				Symbol *cur_isym = lookup_symbol(c, iface_walk, (int)strlen(iface_walk));
-				if (!cur_isym || cur_isym->kind != SYM_INTERFACE || !cur_isym->interface_decl)
+				if (!cur_isym || cur_isym->kind != SYM_INTERFACE)
+					break;
+
+				/* ── ClassDef-only interface (stdlib from core.xar) ── */
+				if (!cur_isym->interface_decl && cur_isym->class_def)
+				{
+					const ClassDef *idef = (const ClassDef *)cur_isym->class_def;
+					for (int rmi = 0; rmi < idef->method_count; rmi++)
+					{
+						const MethodDef *rm = &idef->methods[rmi];
+						if (rm->is_static)
+							continue;
+						bool found = false;
+						char search_buf[64];
+						int slen = s->class_decl.length < 63 ? s->class_decl.length : 63;
+						memcpy(search_buf, s->class_decl.name, slen);
+						search_buf[slen] = '\0';
+						while (!found)
+						{
+							Symbol *csym = lookup_symbol(c, search_buf, (int)strlen(search_buf));
+							if (!csym || csym->kind != SYM_CLASS)
+								break;
+							if (csym->class_decl)
+							{
+								for (CMNode *m = csym->class_decl->class_decl.methods; m; m = m->next)
+								{
+									if (m->is_static || m->is_constructor || !m->fn)
+										continue;
+									if ((int)strlen(rm->name) == m->fn->fn_decl.length &&
+										memcmp(m->fn->fn_decl.name, rm->name, m->fn->fn_decl.length) == 0)
+									{
+										found = true;
+										break;
+									}
+								}
+								if (!found && csym->class_decl->class_decl.parent_name)
+								{
+									int plen = csym->class_decl->class_decl.parent_length < 63
+												   ? csym->class_decl->class_decl.parent_length : 63;
+									memcpy(search_buf, csym->class_decl->class_decl.parent_name, plen);
+									search_buf[plen] = '\0';
+									continue;
+								}
+							}
+							else if (csym->parent_name_buf[0])
+							{
+								strncpy(search_buf, csym->parent_name_buf, sizeof(search_buf) - 1);
+								continue;
+							}
+							break;
+						}
+						if (!found)
+						{
+							type_error(c, s->line, s->col, s->class_decl.length,
+									   "Class '%.*s' does not implement interface method '%s'",
+									   s->class_decl.length, s->class_decl.name, rm->name);
+						}
+					}
+					break; /* ClassDef interfaces: no parent chain walk */
+				}
+
+				if (!cur_isym->interface_decl)
 					break;
 				Stmt *iface = cur_isym->interface_decl;
 

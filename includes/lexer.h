@@ -35,6 +35,8 @@ typedef struct {
     int         line;     /* Current line number (1-based)            */
     int         col;      /* Current column number (1-based)          */
     int         token_start_col; /* Column at start of current token  */
+    /* Set by //@xeno:file <basename> directives in merged sources */
+    char        current_file[128];
 
     /* ── Interpolated string state ──────────────────────────────────────
      * interp_depth > 0 means we are inside a $"..." string.

@@ -4383,6 +4383,7 @@ static void chunk_stamp_source(Compiler *c, Chunk *chunk)
 	snprintf(chunk->source_file, sizeof(chunk->source_file), "%s", base);
 }
 
+
 bool compiler_compile_staged(Compiler *c, const Program *program, Module *module,
 							 const CompilerHostTable *host_table,
 							 const Module *staging)
@@ -4925,6 +4926,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 		c->module->sinit_index = sinit_idx;
 
 		c->current_fn = sinit_idx;
+		chunk_stamp_source(c, CURRENT_CHUNK(c));
 		c->current_class_idx = -1;
 		c->current_class_ast = NULL;
 		c->local_count = 0;
@@ -4992,6 +4994,11 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 			}
 
 			c->current_fn = fn_idx;
+			if (s->source_file && s->source_file[0])
+				snprintf(CURRENT_CHUNK(c)->source_file,
+				         sizeof(CURRENT_CHUNK(c)->source_file), "%s", s->source_file);
+			else
+				chunk_stamp_source(c, CURRENT_CHUNK(c));
 			c->current_class_idx = -1;
 			c->current_class_ast = NULL;
 
@@ -5059,6 +5066,16 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				}
 
 				c->current_fn = mfn_idx;
+				if (m->fn && m->fn->source_file && m->fn->source_file[0])
+					snprintf(CURRENT_CHUNK(c)->source_file,
+					         sizeof(CURRENT_CHUNK(c)->source_file), "%s",
+					         m->fn->source_file);
+				else if (s->source_file && s->source_file[0])
+					snprintf(CURRENT_CHUNK(c)->source_file,
+					         sizeof(CURRENT_CHUNK(c)->source_file), "%s",
+					         s->source_file);
+				else
+					chunk_stamp_source(c, CURRENT_CHUNK(c));
 				c->local_count = 0;
 				c->scope_depth = 0;
 				c->next_slot = 0;
@@ -5128,13 +5145,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 		}
 	}
 
-		/* Stamp source file on every chunk for file-scoped debug */
-	if (c->source_path) {
-		for (int i = 0; i < c->module->count; i++)
-			chunk_stamp_source(c, &c->module->chunks[i]);
-	}
-
-return !c->had_error;
+	return !c->had_error;
 }
 
 void compiler_set_source_path(Compiler *c, const char *path)
