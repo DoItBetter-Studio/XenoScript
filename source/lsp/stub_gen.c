@@ -333,7 +333,7 @@ char *stub_gen_class(const ClassDef *def, const Module *module, const XdocArchiv
 				sbuf_append(&b, ", ");
 			char p_type[CLASS_NAME_MAX + 8];
 			fmt_type(p_type, sizeof(p_type), ctor->param_type_kinds[pi], NULL, false);
-			sbuf_appendf(&b, "arg%d: %s", pi, p_type);
+			sbuf_appendf(&b, "%s arg%d", p_type, pi);
 		}
 		sbuf_append(&b, ");\n\n");
 	}
@@ -416,9 +416,9 @@ char *stub_gen_class(const ClassDef *def, const Module *module, const XdocArchiv
 				if (mdoc && pi < mdoc->param_count && mdoc->params[pi].name[0])
 					pname = mdoc->params[pi].name;
 				if (pname)
-					sbuf_appendf(&b, "%s: %s", pname, p_type);
+					sbuf_appendf(&b, "%s %s", p_type, pname);
 				else
-					sbuf_appendf(&b, "arg%d: %s", pi, p_type);
+					sbuf_appendf(&b, "%s arg%d", p_type, pi);
 			}
 
 			sbuf_appendf(&b, "): %s;\n", ret_str);
@@ -443,7 +443,7 @@ char *stub_gen_class(const ClassDef *def, const Module *module, const XdocArchiv
 						 ev->param_type_kinds[pi],
 						 ev->param_class_names[pi],
 						 ev->param_is_nullable[pi]);
-				sbuf_appendf(&b, "arg%d: %s", pi, p_type);
+				sbuf_appendf(&b, "%s arg%d", p_type, pi);
 			}
 			sbuf_append(&b, ");\n");
 		}

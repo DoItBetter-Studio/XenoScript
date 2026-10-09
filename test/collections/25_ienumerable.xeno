@@ -48,9 +48,9 @@ class StringBag : IEnumerable<string> {
 }
 
 @Mod("ienumerable", "1.0.0", "Test")
-class IEnumerable {
+class EnumerableTest {
     public:
-        IEnumerable() {
+        EnumerableTest() {
             // Stdlib Range — lazy, never materializes an array
             foreach (int n in new Range(1, 6)) {
                 print(n);

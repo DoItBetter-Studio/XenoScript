@@ -483,7 +483,8 @@ typedef enum {
                            * flags: bit0 = is_nullable (static) */
     OP_TYPE_FIELD,        /* [uint8_t field_id]  ( Type -- val )
                            * 0=name 1=isArray 2=isPrimitive 3=isEnum 4=isClass
-                           * 5=kind 6=base(Type?) 7=elementType(Type?)        */
+                           * 5=kind 6=base(Type?) 7=elementType(Type?)
+                           * 8=isNullable                                           */
     OP_TYPE_HAS_ATTR,     /* ( Type string -- bool )  hasAttribute(name)      */
     OP_TYPE_GET_ATTR_ARG, /* ( Type string int -- string? ) getAttributeArg   */
     /* NOTE: new Type opcodes MUST be appended at the end of OpCode so
@@ -493,7 +494,7 @@ typedef enum {
     OP_PUSH_NULL,         /*                     ( -- null )  push null value */
     OP_IS_NULL,           /*                     ( val -- bool ) null check   */
     OP_NULL_ASSERT,       /* [uint16_t line]     ( val -- val ) assert != null, RuntimeError if null */
-    OP_NULL_COALESCE,     /*                     ( val val -- val ) pop right then left; push left if non-null else right */
+    OP_NULL_COALESCE,     /* [uint16_t jump_offset] ( val -- val ) skip right operand if non-null */
 
     /* ── Exception handling ─────────────────────────────────────────────── */
     OP_TRY_BEGIN,         /* [uint16_t catch_offset]  push exception handler  */
@@ -610,6 +611,14 @@ typedef struct {
 
     /* Debug: originating source file (basename preferred). Empty if unknown. */
     char source_file[128];
+
+    /* Optional local names / types (from compiler or loaded .xdbg). NULL in
+	 * production loads; only allocated when compiling or when debug symbols
+	 * are applied. Types let the debugger print floats/bools/strings correctly
+	 * despite the untagged Value union. */
+	char (*local_names)[64]; /* local_names[slot] — empty string if unknown */
+	int   *local_type_kinds; /* TypeKind per slot; 0 / unset = unknown */
+	int    local_name_count; /* allocated rows (usually == local_count) */
 } Chunk;
 
 /* Initialize an empty chunk */

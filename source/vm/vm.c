@@ -20,7 +20,9 @@
 #include "vm.h"
 #include "xar.h"
 #include "xbc.h"
+#include "xdbg.h"
 #include "stdlib_xar.h"
+#include "stdlib_xdbg.h"
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
@@ -105,7 +107,7 @@ void xeno_vm_debug_enable(XenoVM *vm, bool enabled)
     if (!enabled)
     {
         vm->debug_paused = false;
-        vm->debug_step_over = false;
+        vm->debug_step_mode = 0;
         vm->debug_ignore_line = 0;
     }
 }
@@ -155,15 +157,32 @@ void xeno_vm_debug_clear_breakpoints(XenoVM *vm)
 void xeno_vm_debug_continue(XenoVM *vm)
 {
     vm->debug_paused = false;
+    vm->debug_step_mode = 0;
     /* Skip further stops on this line until the IP moves to another line */
     vm->debug_ignore_line = vm->debug_hit_line;
 }
 
 void xeno_vm_debug_step_over(XenoVM *vm)
 {
-    vm->debug_step_over = true;
+    vm->debug_step_mode = 1;
     /* Before the first frame exists, accept any depth so "stop at first line" works. */
     vm->debug_step_frame = vm->frame_count > 0 ? vm->frame_count : XENO_FRAME_MAX;
+    vm->debug_paused = false;
+    vm->debug_ignore_line = vm->debug_hit_line;
+}
+
+void xeno_vm_debug_step_in(XenoVM *vm)
+{
+    vm->debug_step_mode = 2;
+    vm->debug_step_frame = vm->frame_count > 0 ? vm->frame_count : XENO_FRAME_MAX;
+    vm->debug_paused = false;
+    vm->debug_ignore_line = vm->debug_hit_line;
+}
+
+void xeno_vm_debug_step_out(XenoVM *vm)
+{
+    vm->debug_step_mode = 3;
+    vm->debug_step_frame = vm->frame_count > 0 ? vm->frame_count : 1;
     vm->debug_paused = false;
     vm->debug_ignore_line = vm->debug_hit_line;
 }
@@ -188,6 +207,427 @@ void xeno_vm_debug_set_callback(XenoVM *vm, void (*on_break)(XenoVM *vm))
     vm->debug_on_break = on_break;
 }
 
+/* ── Resolve chunk name for a frame ─────────────────────────────────────── */
+static const char *debug_frame_fn_name(const XenoVM *vm, const CallFrame *frame)
+{
+    if (!vm->module || !frame || !frame->chunk)
+        return "";
+    for (int fi = 0; fi < vm->module->count; fi++)
+    {
+        if (&vm->module->chunks[fi] == frame->chunk)
+            return vm->module->names[fi];
+    }
+    return "";
+}
+
+static int debug_frame_line(const CallFrame *frame)
+{
+    if (!frame || !frame->chunk || !frame->chunk->lines || !frame->chunk->code)
+        return 0;
+    int offset = (int)(frame->ip - frame->chunk->code);
+    if (offset < 0)
+        offset = 0;
+    if (offset >= frame->chunk->count)
+        offset = frame->chunk->count > 0 ? frame->chunk->count - 1 : 0;
+    if (offset < frame->chunk->count)
+        return frame->chunk->lines[offset];
+    return 0;
+}
+
+/* True only for real XenoObject instances (never Type/Field/array allocs). */
+static bool debug_is_object(const XenoVM *vm, const void *p)
+{
+    if (!vm || !p)
+        return false;
+    for (size_t i = 0; i < vm->object_count; i++)
+        if ((const void *)vm->objects[i] == p)
+            return true;
+    return false;
+}
+
+/* True if `p` was heap-tracked via xeno_vm_track (strings, arrays, Type, …). */
+static bool debug_is_alloc(const XenoVM *vm, const void *p)
+{
+    if (!vm || !p)
+        return false;
+    for (size_t i = 0; i < vm->alloc_count; i++)
+        if (vm->allocs[i] == p)
+            return true;
+    return false;
+}
+
+/* True if `p` is a string constant in any loaded module chunk. */
+static bool debug_is_const_string(const XenoVM *vm, const char *p)
+{
+    if (!vm || !p)
+        return false;
+    for (int pass = 0; pass < 1 + vm->stdlib_module_count; pass++)
+    {
+        const Module *mod = (pass == 0) ? vm->module
+            : (pass - 1 < vm->stdlib_module_count ? vm->stdlib_modules[pass - 1] : NULL);
+        if (!mod)
+            continue;
+        for (int ci = 0; ci < mod->count; ci++)
+        {
+            const ConstPool *cp = &mod->chunks[ci].constants;
+            if (!cp->values)
+                continue;
+            for (int j = 0; j < cp->count; j++)
+            {
+                if (cp->is_str && cp->is_str[j] && cp->values[j].s == p)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool debug_cstr_ok(const char *s)
+{
+    if (!s)
+        return false;
+    /* Reject obviously non-string pointers without walking forever. */
+    for (int i = 0; i < 128; i++)
+    {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0)
+            return i > 0 || i == 0; /* empty ok */
+        if (c < 32 && c != '\t' && c != '\n' && c != '\r')
+            return false;
+    }
+    return true; /* long but printable prefix */
+}
+
+static void debug_format_string(const char *s, char *buf, size_t n)
+{
+    size_t len = 0;
+    while (len < 80 && s[len])
+    {
+        unsigned char c = (unsigned char)s[len];
+        if (c < 32 && c != '\t' && c != '\n' && c != '\r')
+            break;
+        len++;
+    }
+    if (s[len])
+        snprintf(buf, n, "\"%.*s…\"", (int)len, s);
+    else
+        snprintf(buf, n, "\"%.*s\"", (int)len, s);
+}
+
+/* Forward: array pretty-print needs by-kind for elements. */
+static void debug_format_by_kind(const XenoVM *vm, Value v, int type_kind,
+                                 bool is_nullable, char *buf, size_t n);
+
+/* Pretty-print a XenoArray when type_kind says TYPE_ARRAY and the pointer
+ * is a tracked alloc (not a class instance). Caps length / element count. */
+static void debug_format_array(const XenoVM *vm, const XenoArray *arr,
+                               char *buf, size_t n)
+{
+    if (!arr || !debug_is_alloc(vm, arr) || debug_is_object(vm, arr))
+    {
+        snprintf(buf, n, "null");
+        return;
+    }
+    int len = arr->length;
+    if (len < 0 || len > 100000)
+    {
+        snprintf(buf, n, "null");
+        return;
+    }
+    size_t used = 0;
+    int written = snprintf(buf + used, n - used, "[");
+    if (written < 0)
+        return;
+    used += (size_t)written;
+    const int max_show = 8;
+    for (int i = 0; i < len && i < max_show && used + 8 < n; i++)
+    {
+        if (i > 0)
+        {
+            written = snprintf(buf + used, n - used, ", ");
+            if (written < 0)
+                return;
+            used += (size_t)written;
+        }
+        char elem[96];
+        debug_format_by_kind(vm, arr->elements[i], (int)arr->elem_kind,
+                             false, elem, sizeof(elem));
+        written = snprintf(buf + used, n - used, "%s", elem);
+        if (written < 0)
+            return;
+        used += (size_t)written;
+    }
+    if (len > max_show && used + 4 < n)
+    {
+        written = snprintf(buf + used, n - used, ", …");
+        if (written > 0)
+            used += (size_t)written;
+    }
+    if (used + 1 < n)
+        snprintf(buf + used, n - used, "]");
+    else if (n > 0)
+        buf[n - 1] = '\0';
+}
+
+/* Format a field/local using the static TypeKind when the Value is still
+ * zero-initialized or otherwise ambiguous (untagged union). */
+static void debug_format_by_kind(const XenoVM *vm, Value v, int type_kind,
+                                 bool is_nullable, char *buf, size_t n)
+{
+    if (is_val_null(v) || (is_nullable && v.i == 0 && !v.s && !v.obj))
+    {
+        snprintf(buf, n, "null");
+        return;
+    }
+    switch (type_kind)
+    {
+    case TYPE_BOOL:
+        snprintf(buf, n, "%s", v.i ? "true" : "false");
+        return;
+    case TYPE_FLOAT:
+    case TYPE_DOUBLE:
+        snprintf(buf, n, "%g", (double)v.f);
+        return;
+    case TYPE_CHAR:
+        if ((unsigned)v.i >= 32 && (unsigned)v.i < 127)
+            snprintf(buf, n, "'%c'", (char)v.i);
+        else
+            snprintf(buf, n, "U+%04X", (unsigned)v.i & 0xFFFF);
+        return;
+    case TYPE_STRING:
+        /* type_kind is authoritative: safe to treat as C string when the
+         * pointer is a known const or a tracked alloc that looks like text. */
+        if (!v.s || is_val_null(v))
+            snprintf(buf, n, "null");
+        else if (debug_is_const_string(vm, v.s) ||
+                 (debug_is_alloc(vm, v.s) && debug_cstr_ok(v.s)))
+            debug_format_string(v.s, buf, n);
+        else if (debug_is_alloc(vm, v.s))
+            snprintf(buf, n, "\"…\""); /* tracked but non-text prefix */
+        else
+            snprintf(buf, n, "null");
+        return;
+    case TYPE_OBJECT:
+    case TYPE_CLASS_REF:
+        if (v.obj && debug_is_object(vm, v.obj) && v.obj->class_def &&
+            v.obj->class_def->name[0])
+            snprintf(buf, n, "%s", v.obj->class_def->name);
+        else if (!v.obj || v.i == 0)
+            snprintf(buf, n, "null");
+        else
+            snprintf(buf, n, "object");
+        return;
+    case TYPE_ARRAY:
+        if (v.arr && debug_is_alloc(vm, v.arr) && !debug_is_object(vm, v.arr))
+            debug_format_array(vm, v.arr, buf, n);
+        else if (!v.arr || v.i == 0)
+            snprintf(buf, n, "null");
+        else
+            snprintf(buf, n, "null");
+        return;
+    default:
+        /* int-family and unknown */
+        snprintf(buf, n, "%lld", (long long)v.i);
+        return;
+    }
+}
+
+void xeno_vm_debug_format_value(const XenoVM *vm, Value v, char *buf, size_t n)
+{
+    if (!buf || n == 0)
+        return;
+    buf[0] = '\0';
+    if (is_val_null(v))
+    {
+        snprintf(buf, n, "null");
+        return;
+    }
+
+    /* Untagged Value — ONLY use discriminators that cannot false-positive on
+	 * another heap shape. The alloc list is shared by strings, arrays, Type,
+	 * Field, Method, Param. Interpreting an array as Field* and reading
+	 * ->def was the List.toArray stress-test segfault. */
+
+	/* Real class instances (objects[] only — never allocs[] alone). */
+	if (vm && v.obj && debug_is_object(vm, v.obj) && v.obj->class_def &&
+	    v.obj->class_def->name[0])
+	{
+		snprintf(buf, n, "%s", v.obj->class_def->name);
+		return;
+	}
+
+	/* Constant-pool strings only (pointer identity against known pools). */
+	if (vm && v.s && debug_is_const_string(vm, v.s))
+	{
+		debug_format_string(v.s, buf, n);
+		return;
+	}
+
+	/* Tracked heap string that still looks like text. */
+	if (vm && v.s && debug_is_alloc(vm, v.s) && !debug_is_object(vm, v.s) &&
+	    debug_cstr_ok(v.s))
+	{
+		debug_format_string(v.s, buf, n);
+		return;
+	}
+
+	/* Other tracked heap pointers — opaque (could be array/Type/Field). */
+	if (vm && v.s && debug_is_alloc(vm, v.s))
+	{
+		snprintf(buf, n, "ref");
+		return;
+	}
+
+	/* Integer / float bit pattern */
+	{
+		long long iv = (long long)v.i;
+		snprintf(buf, n, "%lld", iv);
+	}
+}
+
+
+int xeno_vm_debug_frame_count(const XenoVM *vm)
+{
+    return vm ? vm->frame_count : 0;
+}
+
+bool xeno_vm_debug_frame_at(const XenoVM *vm, int depth_from_top, XenoDebugFrame *out)
+{
+    if (!vm || !out || depth_from_top < 0 || depth_from_top >= vm->frame_count)
+        return false;
+    const CallFrame *frame = &vm->frames[vm->frame_count - 1 - depth_from_top];
+    out->depth = depth_from_top;
+    out->fn_name = debug_frame_fn_name(vm, frame);
+    out->source_file = (frame->chunk && frame->chunk->source_file[0])
+                           ? frame->chunk->source_file
+                           : "";
+    out->line = debug_frame_line(frame);
+    return true;
+}
+
+int xeno_vm_debug_local_count(const XenoVM *vm, int depth_from_top)
+{
+    if (!vm || depth_from_top < 0 || depth_from_top >= vm->frame_count)
+        return 0;
+    const CallFrame *frame = &vm->frames[vm->frame_count - 1 - depth_from_top];
+    if (!frame->chunk)
+        return 0;
+    int n = frame->chunk->local_count;
+    if (n < 0)
+        return 0;
+    if (n > XENO_LOCALS_MAX)
+        return XENO_LOCALS_MAX;
+    return n;
+}
+
+bool xeno_vm_debug_local_at(const XenoVM *vm, int depth_from_top, int index,
+                            XenoDebugLocal *out)
+{
+    if (!vm || !out || depth_from_top < 0 || depth_from_top >= vm->frame_count)
+        return false;
+    const CallFrame *frame = &vm->frames[vm->frame_count - 1 - depth_from_top];
+    if (!frame->chunk || index < 0 || index >= frame->chunk->local_count)
+        return false;
+
+    out->slot = index;
+    out->name = NULL;
+
+    bool has_this = frame->chunk->is_constructor;
+    if (!has_this && frame->chunk->param_count >= 0 &&
+        frame->chunk->local_count > frame->chunk->param_count &&
+        !is_val_null(frame->slots[0]) &&
+        frame->slots[0].obj && debug_is_object(vm, frame->slots[0].obj) &&
+        frame->slots[0].obj->class_def)
+        has_this = true;
+
+    if (has_this && index == 0)
+        out->name = "this";
+    else if (frame->chunk->local_names &&
+             index < frame->chunk->local_name_count &&
+             frame->chunk->local_names[index][0])
+        out->name = frame->chunk->local_names[index];
+
+    int type_kind = 0;
+    if (frame->chunk->local_type_kinds &&
+        index < frame->chunk->local_name_count)
+        type_kind = frame->chunk->local_type_kinds[index];
+    else if (index > 0 && index <= frame->chunk->param_count)
+    {
+        /* param slots (after optional this) */
+        int pi = has_this ? index - 1 : index;
+        if (pi >= 0 && pi < 16)
+            type_kind = frame->chunk->param_type_kinds[pi];
+    }
+    if (type_kind != 0)
+        debug_format_by_kind(vm, frame->slots[index], type_kind, false,
+                             out->summary, sizeof(out->summary));
+    else
+        xeno_vm_debug_format_value(vm, frame->slots[index],
+                                   out->summary, sizeof(out->summary));
+    return true;
+}
+
+int xeno_vm_debug_field_count(const XenoVM *vm, int depth_from_top, int slot)
+{
+    if (!vm || depth_from_top < 0 || depth_from_top >= vm->frame_count)
+        return 0;
+    const CallFrame *frame = &vm->frames[vm->frame_count - 1 - depth_from_top];
+    if (!frame->chunk || slot < 0 || slot >= frame->chunk->local_count)
+        return 0;
+    Value v = frame->slots[slot];
+    if (is_val_null(v) || !v.obj || !debug_is_object(vm, v.obj) || !v.obj->class_def)
+        return 0;
+    int n = v.obj->class_def->field_count;
+    if (n < 0 || n > CLASS_MAX_FIELDS)
+        return 0;
+    return n;
+}
+
+bool xeno_vm_debug_field_at(const XenoVM *vm, int depth_from_top, int slot,
+                            int index, XenoDebugField *out)
+{
+    if (!vm || !out || depth_from_top < 0 || depth_from_top >= vm->frame_count)
+        return false;
+    memset(out, 0, sizeof(*out));
+    const CallFrame *frame = &vm->frames[vm->frame_count - 1 - depth_from_top];
+    if (!frame->chunk || slot < 0 || slot >= frame->chunk->local_count)
+        return false;
+    Value v = frame->slots[slot];
+    if (is_val_null(v) || !v.obj || !debug_is_object(vm, v.obj))
+        return false;
+    ClassDef *cls = v.obj->class_def;
+    if (!cls || index < 0 || index >= cls->field_count || index >= CLASS_MAX_FIELDS)
+        return false;
+
+    FieldDef *fd = &cls->fields[index];
+    out->name = fd->name[0] ? fd->name : "field";
+    out->is_static = fd->is_static;
+    out->is_final = fd->is_final;
+    snprintf(out->summary, sizeof(out->summary), "?");
+
+    Value fv = val_null();
+    if (fd->is_static)
+    {
+        fv = cls->static_values[index];
+    }
+    else
+    {
+        int islot = fd->instance_slot;
+        /* Objects are allocated with field_count Value slots (see OP_NEW). */
+        if (islot < 0 || islot >= cls->field_count || islot >= CLASS_MAX_FIELDS)
+        {
+            snprintf(out->summary, sizeof(out->summary), "<bad slot %d>", islot);
+            return true;
+        }
+        fv = v.obj->fields[islot];
+    }
+
+    /* Prefer kind-aware formatting so zero-init string?/object fields show null
+     * instead of a bogus integer or pointer decode. */
+    debug_format_by_kind(vm, fv, fd->type_kind, fd->is_nullable,
+                         out->summary, sizeof(out->summary));
+    return true;
+}
 
 static void vm_free_allocs(XenoVM *vm)
 {
@@ -230,6 +670,21 @@ static bool stdlib_already_loaded(XenoVM *vm, const char *name)
     return false;
 }
 
+static void apply_embedded_xdbg(Module *pool_mod, const char *name)
+{
+    /* Table is in generated stdlib_xdbg.h. Iterate at runtime (no #if) so the
+     * only way this is a no-op is COUNT==0 from a stale compile of this file. */
+    for (int i = 0; i < STDLIB_XDBG_COUNT; i++)
+    {
+        if (strcmp(STDLIB_XDBG_TABLE[i].name, name) != 0)
+            continue;
+        size_t sz = (size_t)(STDLIB_XDBG_TABLE[i].end - STDLIB_XDBG_TABLE[i].start);
+        if (sz > 0)
+            (void)xdbg_load_mem(pool_mod, STDLIB_XDBG_TABLE[i].start, sz);
+        return;
+    }
+}
+
 static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
                                const char *name)
 {
@@ -265,6 +720,10 @@ static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
         }
     }
     xar_archive_free(&ar);
+
+    /* Apply embedded .xdbg local names (stdlib sidecars). Harmless when
+     * debugging is off; required so step-into stdlib shows real names. */
+    apply_embedded_xdbg(pool_mod, name);
 
     /* Run every __sinit__* chunk now that class indices are pool-relative
      * and constant pools live on pool_mod (not a freed temp chunk). */
@@ -637,34 +1096,14 @@ static XenoType *xeno_make_type(uint8_t tag, const char *override_name,
     t->element_tag = 0;
     t->element_name = NULL;
 
-    /* Array names are emitted as "int[]", "string[]", … — peel the element. */
+    /* Array names are emitted as "int[]", "string[]", … — peel the element.
+     * element_name points into a tracked buffer allocated with the type name
+     * when needed; for leak-free behavior we leave element_name NULL and let
+     * OP_TYPE_FIELD / reflection derive the element from name on demand. */
     if (t->is_array && t->name)
-    {
-        size_t nlen = strlen(t->name);
-        if (nlen >= 2 && t->name[nlen - 2] == '[' && t->name[nlen - 1] == ']')
-        {
-            /* Borrowed substring is not null-terminated — copy into tracked buf
-             * only when callers need element_name; store pointer into name for now
-             * by allocating a short copy. */
-            size_t elen = nlen - 2;
-            char *en = malloc(elen + 1);
-            if (en)
-            {
-                memcpy(en, t->name, elen);
-                en[elen] = '\0';
-                t->element_name = en; /* freed with type via vm track of t only —
-                                       * leak on free of t unless we free en —
-                                       * attach by overwriting: track with t */
-                /* Note: xeno_vm_track tracks t; we free en in a custom path
-                 * or accept short-lived leak until type GC — free en when
-                 * module unloads is not available; free on type free later.
-                 * For now store en and free when? Leave malloc'd; VM process
-                 * lifetime is fine for typeof results in scripts. */
-            }
-        }
-    }
+        t->element_name = NULL;
 
-    /* For class/enum types, look up the ClassDef so attribute reflection works */
+/* For class/enum types, look up the ClassDef so attribute reflection works */
     if (t->is_class || t->is_enum)
     {
         if (module && t->name)
@@ -906,12 +1345,28 @@ static XenoResult xeno_execute(XenoVM *vm)
                         vm->debug_ignore_line = 0;
 
                     bool stop = false;
-                    if (vm->debug_ignore_line == 0 ||
-                        line != vm->debug_ignore_line)
+                    /* line 0 = synthetic / non-stoppable (e.g. implicit return) */
+                    if (line > 0 &&
+                        (vm->debug_ignore_line == 0 ||
+                         line != vm->debug_ignore_line))
                     {
-                        if (vm->debug_step_over)
+                        if (vm->debug_step_mode == 1)
                         {
+                            /* step-over: same or outer frame, different line */
                             if (vm->frame_count <= vm->debug_step_frame &&
+                                line != vm->debug_hit_line)
+                                stop = true;
+                        }
+                        else if (vm->debug_step_mode == 2)
+                        {
+                            /* step-in: any frame, different line */
+                            if (line != vm->debug_hit_line)
+                                stop = true;
+                        }
+                        else if (vm->debug_step_mode == 3)
+                        {
+                            /* step-out: must be strictly outer frame */
+                            if (vm->frame_count < vm->debug_step_frame &&
                                 line != vm->debug_hit_line)
                                 stop = true;
                         }
@@ -937,7 +1392,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                         vm->debug_paused = true;
                         vm->debug_hit_line = line;
                         vm->debug_hit_offset = offset;
-                        vm->debug_step_over = false;
+                        vm->debug_step_mode = 0;
                         if (fn)
                             snprintf(vm->debug_hit_fn, sizeof(vm->debug_hit_fn), "%s", fn);
                         else
@@ -1171,9 +1626,13 @@ static XenoResult xeno_execute(XenoVM *vm)
                 s = float_to_string(v.f);
                 break;
             case 2: /* bool */
+            {
+                const unsigned char *representation =
+                    (const unsigned char *)&v.b;
                 s = malloc(6);
-                strcpy(s, v.b ? "true" : "false");
+                strcpy(s, representation[0] ? "true" : "false");
                 break;
+            }
             case 5: /* unsigned int */
                 s = uint128_to_string(v.i);
                 break;
@@ -1824,22 +2283,56 @@ static XenoResult xeno_execute(XenoVM *vm)
                     PUSH(val_null());
                     break;
                 }
-                const char *en = t->element_name ? t->element_name : "object";
-                uint8_t etag = t->element_tag ? t->element_tag : XTAG_OBJECT;
-                /* Prefer named primitive */
-                if (t->element_name)
+                const char *en = t->element_name;
+                char *derived_name = NULL;
+                if (!en && t->name)
                 {
-                    if (strcmp(en, "int") == 0)
-                        etag = XTAG_INT;
-                    else if (strcmp(en, "float") == 0)
-                        etag = XTAG_FLOAT;
-                    else if (strcmp(en, "bool") == 0)
-                        etag = XTAG_BOOL;
-                    else if (strcmp(en, "string") == 0)
-                        etag = XTAG_STRING;
-                    else if (strcmp(en, "double") == 0)
-                        etag = XTAG_DOUBLE;
+                    size_t name_len = strlen(t->name);
+                    if (name_len >= 2 &&
+                        t->name[name_len - 2] == '[' &&
+                        t->name[name_len - 1] == ']')
+                    {
+                        derived_name = xeno_vm_track(vm, malloc(name_len - 1));
+                        if (!derived_name)
+                            RUNTIME_ERROR("Out of memory");
+                        memcpy(derived_name, t->name, name_len - 2);
+                        derived_name[name_len - 2] = '\0';
+                        en = derived_name;
+                    }
                 }
+                if (!en)
+                    en = "object";
+                uint8_t etag = t->element_tag ? t->element_tag : XTAG_OBJECT;
+                if (strcmp(en, "bool") == 0)
+                    etag = XTAG_BOOL;
+                else if (strcmp(en, "int") == 0)
+                    etag = XTAG_INT;
+                else if (strcmp(en, "float") == 0)
+                    etag = XTAG_FLOAT;
+                else if (strcmp(en, "string") == 0)
+                    etag = XTAG_STRING;
+                else if (strcmp(en, "sbyte") == 0)
+                    etag = XTAG_SBYTE;
+                else if (strcmp(en, "byte") == 0)
+                    etag = XTAG_BYTE;
+                else if (strcmp(en, "short") == 0)
+                    etag = XTAG_SHORT;
+                else if (strcmp(en, "ushort") == 0)
+                    etag = XTAG_USHORT;
+                else if (strcmp(en, "uint") == 0)
+                    etag = XTAG_UINT;
+                else if (strcmp(en, "long") == 0)
+                    etag = XTAG_LONG;
+                else if (strcmp(en, "ulong") == 0)
+                    etag = XTAG_ULONG;
+                else if (strcmp(en, "double") == 0)
+                    etag = XTAG_DOUBLE;
+                else if (strcmp(en, "char") == 0)
+                    etag = XTAG_CHAR;
+                else if (strstr(en, "[]") != NULL)
+                    etag = XTAG_ARRAY;
+                else
+                    etag = XTAG_OBJECT;
                 XenoType *et =
                     xeno_vm_track(vm, xeno_make_type(etag, en, vm->module));
                 if (!et)
@@ -2936,6 +3429,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
                 ctor_frame->chunk = ctor_chunk;
                 ctor_frame->ip = ctor_chunk->code;
+                memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
 
                 /* Slot 0 = this, slots 1..argc = args */
                 ctor_frame->slots[0] = val_obj(obj);
@@ -3101,6 +3595,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             CallFrame *method_frame = &vm->frames[vm->frame_count++];
             method_frame->chunk = method_chunk;
             method_frame->ip = method_chunk->code;
+            memset(method_frame->slots, 0, sizeof(method_frame->slots));
 
             method_frame->type_arg_count = 0;
             method_frame->slots[0] = obj_val;
@@ -3151,6 +3646,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             CallFrame *method_frame = &vm->frames[vm->frame_count++];
             method_frame->chunk = method_chunk;
             method_frame->ip = method_chunk->code;
+            memset(method_frame->slots, 0, sizeof(method_frame->slots));
             method_frame->type_arg_count = 0;
             method_frame->slots[0] = obj_val;
             for (int i = 0; i < argc; i++)
@@ -3188,6 +3684,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
             ctor_frame->chunk = ctor_chunk;
             ctor_frame->ip = ctor_chunk->code;
+            memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
             ctor_frame->type_arg_count = 0;
             ctor_frame->slots[0] = frame->slots[0];
             for (int i = 0; i < argc; i++)
@@ -3223,6 +3720,13 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
     Module *run_mod = module;
     for (int i = 0; i < vm->stdlib_module_count; i++)
         module_merge(module, vm->stdlib_modules[i]);
+
+    /* Re-apply embedded .xdbg onto the final module. module_merge skips
+     * chunks that already exist (e.g. compile-staged copies without names),
+     * so pool-side symbols would otherwise never reach the running chunks. */
+    for (int i = 0; i < vm->stdlib_module_count; i++)
+        apply_embedded_xdbg(run_mod, vm->stdlib_loaded_names[i]);
+
     vm->module = run_mod;
 
     /* ── Run static initializers ─────────────────────────────────────── */

@@ -595,6 +595,22 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
                 fd->is_nullable = rb_u8(rb) != 0;
 			fd->access_flags = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
+            /* instance_slot is not stored in XBC (opcodes embed the index).
+             * Recompute it after the field list is complete so the debugger
+             * (and any runtime reflection) can map FieldDef → obj->fields[]. */
+            fd->instance_slot = -1;
+        }
+
+        /* Rebuild dense instance_slot numbers (statics stay -1). */
+        {
+            int next_slot = 0;
+            for (int fi = 0; fi < cls->field_count; fi++)
+            {
+                if (cls->fields[fi].is_static)
+                    cls->fields[fi].instance_slot = -1;
+                else
+                    cls->fields[fi].instance_slot = next_slot++;
+            }
         }
 
         /* Enum reflection metadata (added in XBC v20) */

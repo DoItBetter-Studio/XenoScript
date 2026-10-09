@@ -27,7 +27,10 @@ void chunk_init(Chunk *chunk)
     chunk->return_type_kind = 0;
     memset(chunk->param_type_kinds, 0, sizeof(chunk->param_type_kinds));
     chunk->source_file[0] = '\0';
-    chunk->constants.values = NULL;
+    chunk->local_names = NULL;
+	chunk->local_type_kinds = NULL;
+	chunk->local_name_count = 0;
+	chunk->constants.values = NULL;
 	chunk->constants.is_str = NULL;
     chunk->constants.count = 0;
     chunk->constants.capacity = 0;
@@ -42,7 +45,9 @@ void chunk_free(Chunk *chunk)
 	free(chunk->constants.values);
     free(chunk->code);
     free(chunk->lines);
-    chunk_init(chunk); /* Reset to clean state */
+    free(chunk->local_names);
+	free(chunk->local_type_kinds);
+	chunk_init(chunk); /* Reset to clean state */
 }
 
 static int const_pool_push(ConstPool *pool, Value value, uint8_t is_str)
@@ -156,6 +161,18 @@ int chunk_copy_constant(Chunk *dst, const Chunk *src, int idx)
  * Returns the offset of the NEXT instruction (used to advance the loop).
  * ───────────────────────────────────────────────────────────────────────────*/
 
+static bool dis_has_range(const Chunk *chunk, int offset, int length)
+{
+    return chunk && offset >= 0 && length >= 0 &&
+           offset <= chunk->count && length <= chunk->count - offset;
+}
+
+static int dis_truncated(const Chunk *chunk, const char *name, int offset)
+{
+    printf("%-20s <truncated operands>\n", name);
+    return chunk->count > offset ? chunk->count : offset + 1;
+}
+
 /* Print a simple instruction with no operands */
 static int dis_simple(const char *name, int offset)
 {
@@ -166,6 +183,8 @@ static int dis_simple(const char *name, int offset)
 /* Print an instruction with one uint8_t operand */
 static int dis_byte(const char *name, const Chunk *chunk, int offset)
 {
+    if (!dis_has_range(chunk, offset + 1, 1))
+        return dis_truncated(chunk, name, offset);
     uint8_t operand = chunk->code[offset + 1];
     printf("%-20s %4d\n", name, operand);
     return offset + 2; /* 1 opcode + 1 operand byte */
@@ -177,10 +196,17 @@ static int dis_byte(const char *name, const Chunk *chunk, int offset)
 static int dis_const(const char *name, const Chunk *chunk,
                      int offset, bool is_str)
 {
+    if (!dis_has_range(chunk, offset + 1, 2))
+        return dis_truncated(chunk, name, offset);
     uint16_t idx = (chunk->code[offset + 1] << 8) | chunk->code[offset + 2];
-    Value v = chunk->constants.values[idx];
 
     printf("%-20s %4d  ", name, idx);
+    if (idx >= chunk->constants.count || !chunk->constants.values)
+    {
+        printf("<invalid constant>\n");
+        return offset + 3;
+    }
+    Value v = chunk->constants.values[idx];
 
     if (is_str)
     {
@@ -199,6 +225,8 @@ static int dis_const(const char *name, const Chunk *chunk,
 /* Print a JUMP instruction — shows the absolute target offset */
 static int dis_jump(const char *name, const Chunk *chunk, int offset)
 {
+    if (!dis_has_range(chunk, offset + 1, 2))
+        return dis_truncated(chunk, name, offset);
     /* Read the signed 16-bit relative offset */
     int16_t jump = (int16_t)((chunk->code[offset + 1] << 8) | chunk->code[offset + 2]);
     /* Target is relative to the instruction AFTER this one (offset + 3) */
@@ -207,9 +235,21 @@ static int dis_jump(const char *name, const Chunk *chunk, int offset)
     return offset + 3;
 }
 
+static int dis_u16(const char *name, const Chunk *chunk, int offset)
+{
+    if (!dis_has_range(chunk, offset + 1, 2))
+        return dis_truncated(chunk, name, offset);
+    uint16_t value = (uint16_t)((chunk->code[offset + 1] << 8) |
+                                chunk->code[offset + 2]);
+    printf("%-20s %4u\n", name, value);
+    return offset + 3;
+}
+
 /* Print a CALL instruction — shows fn index and arg count */
 static int dis_call(const char *name, const Chunk *chunk, int offset)
 {
+    if (!dis_has_range(chunk, offset + 1, 3))
+        return dis_truncated(chunk, name, offset);
     uint16_t fn_idx = (chunk->code[offset + 1] << 8) | chunk->code[offset + 2];
     uint8_t argc = chunk->code[offset + 3];
     printf("%-20s fn[%d]  argc=%d\n", name, fn_idx, argc);
@@ -222,17 +262,20 @@ static int dis_call(const char *name, const Chunk *chunk, int offset)
  */
 static int disassemble_instruction(const Chunk *chunk, int offset)
 {
+    if (!dis_has_range(chunk, offset, 1))
+        return chunk ? chunk->count : offset;
     /* Print byte offset and source line */
     printf("%04d  ", offset);
 
     /* Print line number, suppressing duplicates for readability */
-    if (offset > 0 && chunk->lines[offset] == chunk->lines[offset - 1])
+    if (chunk->lines && offset > 0 &&
+        chunk->lines[offset] == chunk->lines[offset - 1])
     {
         printf("       |   ");
     }
     else
     {
-        printf("line %4d  ", chunk->lines[offset]);
+        printf("line %4d  ", chunk->lines ? chunk->lines[offset] : 0);
     }
 
     OpCode op = (OpCode)chunk->code[offset];
@@ -288,9 +331,13 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_simple("CONCAT_STR", offset);
     case OP_TO_STR:
     {
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "TO_STR", offset);
         uint8_t kind = chunk->code[offset + 1];
         if (kind == 4)
         {
+            if (!dis_has_range(chunk, offset + 2, 1))
+                return dis_truncated(chunk, "TO_STR", offset);
             uint8_t class_idx = chunk->code[offset + 2];
             printf("%04d TO_STR kind=enum class[%d]\n", offset, class_idx);
             return offset + 3;
@@ -361,9 +408,13 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_simple("LOAD_EXCEPTION", offset);
     case OP_EXCEPTION_IS_TYPE: {
         /* [u8 name_len][name_bytes] */
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "EXCEPTION_IS_TYPE", offset);
         uint8_t nlen = chunk->code[offset + 1];
+        if (!dis_has_range(chunk, offset + 2, nlen))
+            return dis_truncated(chunk, "EXCEPTION_IS_TYPE", offset);
         printf("%-20s '", "EXCEPTION_IS_TYPE");
-        for (int _i = 0; _i < nlen && offset + 2 + _i < chunk->count; _i++)
+        for (int _i = 0; _i < nlen; _i++)
             putchar(chunk->code[offset + 2 + _i]);
         printf("'\n");
         return offset + 2 + nlen;
@@ -373,25 +424,37 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     case OP_EVENT_UNSUBSCRIBE:
     case OP_EVENT_SUBSCRIBE_BOUND:
     case OP_EVENT_UNSUBSCRIBE_BOUND:
-    case OP_EVENT_FIRE: {
+    case OP_EVENT_FIRE:
+    case OP_EVENT_SUBSCRIBE_MEMBER:
+    case OP_EVENT_UNSUBSCRIBE_MEMBER:
+    case OP_EVENT_FIRE_MEMBER: {
         const char *label = (op == OP_EVENT_SUBSCRIBE)         ? "EVENT_SUBSCRIBE"
                           : (op == OP_EVENT_UNSUBSCRIBE)       ? "EVENT_UNSUBSCRIBE"
                           : (op == OP_EVENT_SUBSCRIBE_BOUND)   ? "EVENT_SUBSCRIBE_BOUND"
                           : (op == OP_EVENT_UNSUBSCRIBE_BOUND) ? "EVENT_UNSUBSCRIBE_BOUND"
-                                                               : "EVENT_FIRE";
+                          : (op == OP_EVENT_FIRE)              ? "EVENT_FIRE"
+                          : (op == OP_EVENT_SUBSCRIBE_MEMBER)  ? "EVENT_SUBSCRIBE_MEMBER"
+                          : (op == OP_EVENT_UNSUBSCRIBE_MEMBER)? "EVENT_UNSUBSCRIBE_MEMBER"
+                                                               : "EVENT_FIRE_MEMBER";
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, label, offset);
         uint8_t nlen = chunk->code[offset + 1];
+        if (!dis_has_range(chunk, offset + 2, (int)nlen + 1))
+            return dis_truncated(chunk, label, offset);
         printf("%-24s '", label);
-        for (int _i = 0; _i < nlen && offset + 2 + _i < chunk->count; _i++)
+        for (int _i = 0; _i < nlen; _i++)
             putchar(chunk->code[offset + 2 + _i]);
-        if (op == OP_EVENT_FIRE) {
+        if (op == OP_EVENT_FIRE || op == OP_EVENT_FIRE_MEMBER) {
             uint8_t argc = chunk->code[offset + 2 + nlen];
             printf("' argc=%d\n", argc);
             return offset + 3 + nlen;
         } else {
             /* handler name follows event name */
             uint8_t hnlen = chunk->code[offset + 2 + nlen];
+            if (!dis_has_range(chunk, offset + 3 + nlen, hnlen))
+                return dis_truncated(chunk, label, offset);
             printf("' handler='");
-            for (int _i = 0; _i < hnlen && offset + 3 + nlen + _i < chunk->count; _i++)
+            for (int _i = 0; _i < hnlen; _i++)
                 putchar(chunk->code[offset + 3 + nlen + _i]);
             printf("'\n");
             return offset + 3 + nlen + hnlen;
@@ -439,6 +502,8 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_byte("NEW_ARRAY", chunk, offset);
     case OP_ARRAY_LIT:
     {
+        if (!dis_has_range(chunk, offset + 1, 2))
+            return dis_truncated(chunk, "ARRAY_LIT", offset);
 		uint8_t count = chunk->code[offset + 1];
 		uint8_t kind  = chunk->code[offset + 2];
 		printf("%-20s %4d	kind=%d\n", "ARRAY_LIT", count, kind);
@@ -456,25 +521,35 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     /* Object opcodes */
     case OP_NEW:
     {
-        uint16_t class_idx = (chunk->code[offset + 1] << 8) | chunk->code[offset + 2];
-        uint8_t argc = chunk->code[offset + 3];
-        printf("%-20s class[%d]  argc=%d\n", "NEW", class_idx, argc);
-        /* skip: opcode(1) + class_idx(2) + argc(1) + tac(1) + tac×kind(N) */
-        int base = offset + 4;
-        if (base < chunk->count) {
-            uint8_t tac = chunk->code[base];
-            return base + 1 + tac;
-        }
-        return base;
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "NEW", offset);
+        uint8_t name_len = chunk->code[offset + 1];
+        int name_offset = offset + 2;
+        if (!dis_has_range(chunk, name_offset, (int)name_len + 2))
+            return dis_truncated(chunk, "NEW", offset);
+        int argc_offset = name_offset + name_len;
+        uint8_t argc = chunk->code[argc_offset];
+        int type_arg_count_offset = argc_offset + 1;
+        uint8_t type_arg_count = chunk->code[type_arg_count_offset];
+        if (!dis_has_range(chunk, type_arg_count_offset + 1, type_arg_count))
+            return dis_truncated(chunk, "NEW", offset);
+        printf("%-20s class[%.*s]  argc=%d  type_args=%d\n",
+               "NEW", (int)name_len, (const char *)&chunk->code[name_offset],
+               argc, type_arg_count);
+        return type_arg_count_offset + 1 + type_arg_count;
     }
     case OP_GET_FIELD:
     {
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "GET_FIELD", offset);
         uint8_t field_idx = chunk->code[offset + 1];
         printf("%-20s field[%d]\n", "GET_FIELD", field_idx);
         return offset + 2;
     }
     case OP_SET_FIELD:
     {
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "SET_FIELD", offset);
         uint8_t field_idx = chunk->code[offset + 1];
         printf("%-20s field[%d]\n", "SET_FIELD", field_idx);
         return offset + 2;
@@ -487,8 +562,25 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_call("CALL_SUPER", chunk, offset);
     case OP_CALL_IFACE:
         return dis_call("CALL_IFACE", chunk, offset);
+    case OP_CALL_STATIC:
+    {
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "CALL_STATIC", offset);
+        uint8_t name_len = chunk->code[offset + 1];
+        int name_offset = offset + 2;
+        if (!dis_has_range(chunk, name_offset, (int)name_len + 2))
+            return dis_truncated(chunk, "CALL_STATIC", offset);
+        uint8_t method_slot = chunk->code[name_offset + name_len];
+        uint8_t argc = chunk->code[name_offset + name_len + 1];
+        printf("%-20s class[%.*s] method[%u] argc=%u\n",
+               "CALL_STATIC", (int)name_len,
+               (const char *)&chunk->code[name_offset], method_slot, argc);
+        return name_offset + name_len + 2;
+    }
     case OP_LOAD_STATIC:
     {
+        if (!dis_has_range(chunk, offset + 1, 2))
+            return dis_truncated(chunk, "LOAD_STATIC", offset);
         uint8_t class_idx = chunk->code[offset + 1];
         uint8_t field_idx = chunk->code[offset + 2];
         printf("%-20s class[%d].field[%d]\n", "LOAD_STATIC", class_idx, field_idx);
@@ -496,6 +588,8 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     }
     case OP_STORE_STATIC:
     {
+        if (!dis_has_range(chunk, offset + 1, 2))
+            return dis_truncated(chunk, "STORE_STATIC", offset);
         uint8_t class_idx = chunk->code[offset + 1];
         uint8_t field_idx = chunk->code[offset + 2];
         printf("%-20s class[%d].field[%d]\n", "STORE_STATIC", class_idx, field_idx);
@@ -503,21 +597,38 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
     }
     case OP_TYPEOF:
     {
+        if (!dis_has_range(chunk, offset + 1, 3))
+            return dis_truncated(chunk, "TYPEOF", offset);
         uint8_t tag = chunk->code[offset + 1];
-        uint8_t len = chunk->code[offset + 2];
-        printf("%04d TYPEOF tag=%d name_len=%d\n", offset, tag, len);
-        return offset + 3 + len;
+        uint8_t flags = chunk->code[offset + 2];
+        uint8_t name_len = chunk->code[offset + 3];
+        if (!dis_has_range(chunk, offset + 4, name_len))
+            return dis_truncated(chunk, "TYPEOF", offset);
+        printf("%04d TYPEOF tag=%d nullable=%d name='%.*s'\n",
+               offset, tag, flags & 1, (int)name_len,
+               (const char *)&chunk->code[offset + 4]);
+        return offset + 4 + name_len;
     }
-    case OP_AS_TYPE:
-        printf("%04d AS_TYPE %d\n", offset, chunk->code[offset + 1]);
-        return offset + 2;
 	case OP_I2F: return dis_simple("I2F", offset);
 	case OP_F2I: return dis_simple("F2I", offset);
     case OP_IS_TYPE:
-        printf("%04d IS_TYPE\n", offset);
-        return offset + 1;
+    case OP_AS_TYPE:
+    {
+        const char *label = op == OP_IS_TYPE ? "IS_TYPE" : "AS_TYPE";
+        if (!dis_has_range(chunk, offset + 1, 2))
+            return dis_truncated(chunk, label, offset);
+        uint8_t tag = chunk->code[offset + 1];
+        uint8_t name_len = chunk->code[offset + 2];
+        if (!dis_has_range(chunk, offset + 3, name_len))
+            return dis_truncated(chunk, label, offset);
+        printf("%04d %-20s tag=%d name='%.*s'\n", offset, label,
+               tag, (int)name_len, (const char *)&chunk->code[offset + 3]);
+        return offset + 3 + name_len;
+    }
     case OP_TYPE_FIELD:
     {
+        if (!dis_has_range(chunk, offset + 1, 1))
+            return dis_truncated(chunk, "TYPE_FIELD", offset);
         uint8_t field = chunk->code[offset + 1];
         const char *fname = NULL;
         switch (field)
@@ -537,6 +648,18 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         case 4:
             fname = "isClass";
             break;
+        case 5:
+            fname = "kind";
+            break;
+        case 6:
+            fname = "base";
+            break;
+        case 7:
+            fname = "elementType";
+            break;
+        case 8:
+            fname = "isNullable";
+            break;
         default:
             fname = "unknown";
             break;
@@ -548,14 +671,32 @@ static int disassemble_instruction(const Chunk *chunk, int offset)
         return dis_simple("TYPE_HAS_ATTR", offset);
     case OP_TYPE_GET_ATTR_ARG:
         return dis_simple("TYPE_GET_ATTR_ARG", offset);
+    case OP_TYPE_IS_ASSIGNABLE:
+        return dis_simple("TYPE_IS_ASSIGNABLE", offset);
+    case OP_TYPE_NAMES:
+        return dis_byte("TYPE_NAMES", chunk, offset);
+    case OP_TYPE_IS_INSTANCE:
+        return dis_simple("TYPE_IS_INSTANCE", offset);
+    case OP_TYPE_GET_FIELD:
+        return dis_simple("TYPE_GET_FIELD", offset);
+    case OP_TYPE_GET_METHOD:
+        return dis_simple("TYPE_GET_METHOD", offset);
+    case OP_METHOD_PARAM_AT:
+        return dis_simple("METHOD_PARAM_AT", offset);
+    case OP_FIELD_PROP:
+        return dis_byte("FIELD_PROP", chunk, offset);
+    case OP_METHOD_PROP:
+        return dis_byte("METHOD_PROP", chunk, offset);
+    case OP_PARAM_PROP:
+        return dis_byte("PARAM_PROP", chunk, offset);
     case OP_PUSH_NULL:
         return dis_simple("PUSH_NULL", offset);
     case OP_IS_NULL:
         return dis_simple("IS_NULL", offset);
     case OP_NULL_ASSERT:
-        return dis_jump("NULL_ASSERT", chunk, offset);
+        return dis_u16("NULL_ASSERT", chunk, offset);
     case OP_NULL_COALESCE:
-        return dis_jump("NULL_COALESCE", chunk, offset);
+        return dis_u16("NULL_COALESCE", chunk, offset);
     default:
         printf("UNKNOWN opcode %d\n", op);
         return offset + 1;

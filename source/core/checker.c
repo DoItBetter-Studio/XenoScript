@@ -1400,36 +1400,115 @@ static bool type_is_assignable_to_interface(Checker *c,
  * if not. `iface_name` must be null-terminated.
  */
 typedef struct IfaceMethodNode IMNodeT;
-static IMNodeT *iface_lookup_method(Checker *c,
+
+/* Resolved interface method signature — works for AST and ClassDef-only interfaces. */
+typedef struct {
+	bool found;
+	Type return_type;
+	int  param_count;
+	Type param_types[METHOD_MAX_PARAMS];
+	/* AST node when available (NULL for ClassDef-only) */
+	IMNodeT *ast;
+} IfaceMethodSig;
+
+static Type iface_type_from_kind(int kind, const char *class_name)
+{
+	Type t = {0};
+	t.kind = (TypeKind)kind;
+	if (class_name && class_name[0] &&
+		(kind == TYPE_OBJECT || kind == TYPE_PARAM || kind == (int)TYPE_OBJECT))
+		t.class_name = (char *)class_name; /* points into ClassDef — stable for staging lifetime */
+	return t;
+}
+
+static bool iface_fill_sig_from_method_def(const MethodDef *md, IfaceMethodSig *out)
+{
+	memset(out, 0, sizeof(*out));
+	out->found = true;
+	out->ast = NULL;
+	out->return_type = iface_type_from_kind(md->return_type_kind, md->return_class_name);
+	out->return_type.is_nullable = md->return_is_nullable;
+	out->param_count = md->param_count < METHOD_MAX_PARAMS ? md->param_count : METHOD_MAX_PARAMS;
+	for (int i = 0; i < out->param_count; i++)
+	{
+		out->param_types[i] = iface_type_from_kind(md->param_type_kinds[i],
+												   md->param_class_names[i]);
+		out->param_types[i].is_nullable = md->param_is_nullable[i];
+	}
+	return true;
+}
+
+static bool iface_lookup_method_sig(Checker *c,
 									const char *iface_name,
 									const char *method_name,
-									int method_len)
+									int method_len,
+									IfaceMethodSig *out)
 {
+	memset(out, 0, sizeof(*out));
 	char buf[64];
 	const char *cur = iface_name;
 	int safety = 32;
 	while (cur && safety-- > 0)
 	{
 		Symbol *isym = lookup_symbol(c, cur, (int)strlen(cur));
-		if (!isym || isym->kind != SYM_INTERFACE || !isym->interface_decl)
-			return NULL;
-		Stmt *iface = isym->interface_decl;
-		for (IMNodeT *m = iface->interface_decl.methods; m; m = m->next)
+		if (!isym || isym->kind != SYM_INTERFACE)
+			return false;
+
+		/* Prefer AST when present (source interfaces) */
+		if (isym->interface_decl)
 		{
-			if (m->length == method_len &&
-				memcmp(m->name, method_name, method_len) == 0)
-				return m;
+			Stmt *iface = isym->interface_decl;
+			for (IMNodeT *m = iface->interface_decl.methods; m; m = m->next)
+			{
+				if (m->length == method_len &&
+					memcmp(m->name, method_name, method_len) == 0)
+				{
+					out->found = true;
+					out->ast = m;
+					out->return_type = m->return_type;
+					out->param_count = 0;
+					for (ParamNode *p = m->params;
+						 p && out->param_count < METHOD_MAX_PARAMS;
+						 p = p->next)
+						out->param_types[out->param_count++] = p->type;
+					return true;
+				}
+			}
+			if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
+				return false;
+			int plen = iface->interface_decl.parent_length < 63
+						   ? iface->interface_decl.parent_length
+						   : 63;
+			memcpy(buf, iface->interface_decl.parent_name, plen);
+			buf[plen] = '\0';
+			cur = buf;
+			continue;
 		}
-		if (!iface->interface_decl.parent_name || iface->interface_decl.parent_length == 0)
-			return NULL;
-		int plen = iface->interface_decl.parent_length < 63
-					   ? iface->interface_decl.parent_length
-					   : 63;
-		memcpy(buf, iface->interface_decl.parent_name, plen);
-		buf[plen] = '\0';
-		cur = buf;
+
+		/* ClassDef-only (stdlib from core.xar) */
+		if (isym->class_def)
+		{
+			const ClassDef *def = (const ClassDef *)isym->class_def;
+			for (int mi = 0; mi < def->method_count; mi++)
+			{
+				const MethodDef *md = &def->methods[mi];
+				if ((int)strlen(md->name) == method_len &&
+					memcmp(md->name, method_name, method_len) == 0)
+					return iface_fill_sig_from_method_def(md, out);
+			}
+			/* Parent interface stored in interface_names[0] when we emit interfaces */
+			if (def->interface_count > 0 && def->interface_names[0][0])
+			{
+				strncpy(buf, def->interface_names[0], sizeof(buf) - 1);
+				buf[sizeof(buf) - 1] = '\0';
+				cur = buf;
+				continue;
+			}
+			return false;
+		}
+		return false;
 	}
-	return NULL;
+	return false;
 }
 
 /*
@@ -4283,9 +4362,8 @@ static Type check_expr(Checker *c, Expr *expr)
 			{
 				const char *mname = expr->method_call.method_name;
 				int mlen = expr->method_call.method_name_len;
-				IMNodeT *sig = iface_lookup_method(c,
-												   maybe_iface->iface_name_buf, mname, mlen);
-				if (!sig)
+				IfaceMethodSig isig;
+				if (!iface_lookup_method_sig(c, maybe_iface->iface_name_buf, mname, mlen, &isig))
 				{
 					return error_type(c, expr, expr->line, expr->col, mlen,
 									  "Interface '%s' has no method '%.*s'",
@@ -4293,35 +4371,30 @@ static Type check_expr(Checker *c, Expr *expr)
 				}
 				/* Type-check arguments against the interface signature */
 				ArgNode *arg = expr->method_call.args;
-				ParamNode *param = sig->params;
 				int idx = 0;
-				while (arg && param)
+				while (arg && idx < isig.param_count)
 				{
 					Type at = check_expr(c, arg->expr);
-					if (!is_unknown(at) && !types_assignable(param->type, at))
+					Type pt = isig.param_types[idx];
+					if (!is_unknown(at) && !types_assignable(pt, at))
 					{
 						type_error(c, expr->line, expr->col, mlen,
 								   "Method '%.*s' argument %d: expected %s, got %s",
 								   mlen, mname, idx + 1,
-								   type_kind_name(param->type.kind),
+								   type_kind_name(pt.kind),
 								   type_kind_name(at.kind));
 					}
 					arg = arg->next;
-					param = param->next;
 					idx++;
 				}
-				if (expr->method_call.arg_count < count_required_params(sig->params) ||
-					expr->method_call.arg_count > sig->param_count)
+				if (expr->method_call.arg_count != isig.param_count)
 				{
-					int req = count_required_params(sig->params);
 					type_error(c, expr->line, expr->col, mlen,
-							   req == sig->param_count
-								   ? "Method '%.*s' expects %d argument(s), got %d"
-								   : "Method '%.*s' expects %d-%d argument(s), got %d",
-							   mlen, mname, req, sig->param_count,
+							   "Method '%.*s' expects %d argument(s), got %d",
+							   mlen, mname, isig.param_count,
 							   expr->method_call.arg_count);
 				}
-				return resolve(expr, sig->return_type);
+				return resolve(expr, isig.return_type);
 			}
 		}
 
@@ -4384,10 +4457,10 @@ static Type check_expr(Checker *c, Expr *expr)
 				int cbl = constr_len < 63 ? constr_len : 63;
 				memcpy(cbuf, constraint, cbl);
 				cbuf[cbl] = '\0';
-				IMNodeT *sig = iface_lookup_method(c, cbuf,
-												   expr->method_call.method_name,
-												   expr->method_call.method_name_len);
-				if (!sig)
+				IfaceMethodSig isig;
+				if (!iface_lookup_method_sig(c, cbuf,
+											 expr->method_call.method_name,
+											 expr->method_call.method_name_len, &isig))
 				{
 					return error_type(c, expr, expr->line, expr->col, expr->method_call.method_name_len,
 									  "Constraint '%s' has no method '%.*s'",
@@ -4397,25 +4470,24 @@ static Type check_expr(Checker *c, Expr *expr)
 				}
 				/* Type-check args */
 				ArgNode *arg = expr->method_call.args;
-				ParamNode *param = sig->params;
 				int idx = 0;
-				while (arg && param)
+				while (arg && idx < isig.param_count)
 				{
 					Type at = check_expr(c, arg->expr);
-					if (!is_unknown(at) && !types_assignable(param->type, at))
+					Type pt = isig.param_types[idx];
+					if (!is_unknown(at) && !types_assignable(pt, at))
 					{
 						type_error(c, expr->line, expr->col, expr->method_call.method_name_len,
 								   "Method '%.*s' argument %d: expected %s, got %s",
 								   expr->method_call.method_name_len,
 								   expr->method_call.method_name, idx + 1,
-								   type_kind_name(param->type.kind),
+								   type_kind_name(pt.kind),
 								   type_kind_name(at.kind));
 					}
 					arg = arg->next;
-					param = param->next;
 					idx++;
 				}
-				return resolve(expr, sig->return_type);
+				return resolve(expr, isig.return_type);
 			}
 		}
 
@@ -4425,10 +4497,10 @@ static Type check_expr(Checker *c, Expr *expr)
 		{
 			/* Object is typed as an interface — resolve method through interface.
 			 * The concrete type args are in mc_concrete_args (from generic name). */
-			IMNodeT *sig = iface_lookup_method(c, mc_lookup_name,
-											   expr->method_call.method_name,
-											   expr->method_call.method_name_len);
-			if (!sig)
+			IfaceMethodSig isig;
+			if (!iface_lookup_method_sig(c, mc_lookup_name,
+										 expr->method_call.method_name,
+										 expr->method_call.method_name_len, &isig))
 			{
 				return error_type(c, expr, expr->line, expr->col, expr->method_call.method_name_len,
 								  "Interface '%s' has no method '%.*s'",
@@ -4436,28 +4508,37 @@ static Type check_expr(Checker *c, Expr *expr)
 								  expr->method_call.method_name_len,
 								  expr->method_call.method_name);
 			}
-			/* Substitute generic type params with concrete args */
-			TypeParamNode *iface_tps = cls_sym->interface_decl
-										   ? cls_sym->interface_decl->interface_decl.type_params
-										   : NULL;
-			int iface_tpc = cls_sym->interface_decl
-								? cls_sym->interface_decl->interface_decl.type_param_count
-								: 0;
-			Type ret = substitute_type(sig->return_type,
-									   iface_tps, mc_concrete_args, iface_tpc);
-			/* Also substitute using the parsed type args from the generic name */
-			if (mc_concrete_count > 0)
-				ret = substitute_type(sig->return_type,
-									  iface_tps, mc_concrete_args, mc_concrete_count);
+			/* Build type-param list for substitution (AST or ClassDef names). */
+			TypeParamNode iface_tp_nodes[8];
+			TypeParamNode *iface_tps = NULL;
+			int iface_tpc = 0;
+			if (cls_sym->interface_decl)
+			{
+				iface_tps = cls_sym->interface_decl->interface_decl.type_params;
+				iface_tpc = cls_sym->interface_decl->interface_decl.type_param_count;
+			}
+			else if (cls_sym->class_def)
+			{
+				const ClassDef *idef = (const ClassDef *)cls_sym->class_def;
+				iface_tpc = idef->type_param_count < 8 ? idef->type_param_count : 8;
+				for (int ti = 0; ti < iface_tpc; ti++)
+				{
+					memset(&iface_tp_nodes[ti], 0, sizeof(iface_tp_nodes[ti]));
+					iface_tp_nodes[ti].name = idef->type_param_names[ti];
+					iface_tp_nodes[ti].length = (int)strlen(idef->type_param_names[ti]);
+					iface_tp_nodes[ti].next = (ti + 1 < iface_tpc) ? &iface_tp_nodes[ti + 1] : NULL;
+				}
+				iface_tps = iface_tpc > 0 ? iface_tp_nodes : NULL;
+			}
+			int sub_n = mc_concrete_count > 0 ? mc_concrete_count : iface_tpc;
+			Type ret = substitute_type(isig.return_type, iface_tps, mc_concrete_args, sub_n);
 			/* Type-check args */
 			ArgNode *a = expr->method_call.args;
-			ParamNode *p = sig->params;
 			int idx = 0;
-			while (a && p)
+			while (a && idx < isig.param_count)
 			{
 				Type at = check_expr(c, a->expr);
-				Type pt = substitute_type(p->type, iface_tps, mc_concrete_args,
-										  mc_concrete_count > 0 ? mc_concrete_count : iface_tpc);
+				Type pt = substitute_type(isig.param_types[idx], iface_tps, mc_concrete_args, sub_n);
 				if (!is_unknown(at) && !types_assignable(pt, at))
 				{
 					type_error(c, expr->line, expr->col, expr->method_call.method_name_len,
@@ -4467,7 +4548,6 @@ static Type check_expr(Checker *c, Expr *expr)
 							   type_kind_name(pt.kind), type_kind_name(at.kind));
 				}
 				a = a->next;
-				p = p->next;
 				idx++;
 			}
 			return resolve(expr, ret);
@@ -6210,6 +6290,12 @@ bool checker_check(Checker *c, Program *program)
 							   "Class '%.*s' already declared",
 							   s->class_decl.length, s->class_decl.name);
 				}
+				else if (existing && existing->kind == SYM_INTERFACE)
+				{
+					type_error(c, s->line, s->col, s->class_decl.length,
+							   "Class '%.*s' conflicts with interface of the same name",
+							   s->class_decl.length, s->class_decl.name);
+				}
 			}
 			else
 			{
@@ -6523,7 +6609,12 @@ bool checker_check(Checker *c, Program *program)
 							}
 							else if (csym->parent_name_buf[0])
 							{
-								strncpy(search_buf, csym->parent_name_buf, sizeof(search_buf) - 1);
+								size_t parent_len = 0;
+								while (parent_len < sizeof(search_buf) - 1 &&
+									   csym->parent_name_buf[parent_len] != '\0')
+									parent_len++;
+								memcpy(search_buf, csym->parent_name_buf, parent_len);
+								search_buf[parent_len] = '\0';
 								continue;
 							}
 							break;

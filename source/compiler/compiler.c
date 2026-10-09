@@ -16,6 +16,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "compiler.h"
+#include "xdbg.h"
 #include "vm.h"
 #include "strutil.h"
 #include <stdio.h>
@@ -25,6 +26,7 @@
 static int host_table_find(const CompilerHostTable *t, const char *name, int len);
 static void compile_expr(Compiler *c, const Expr *expr);
 static void emit_trunc_for_type(Compiler *c, TypeKind kind, int line);
+static void chunk_stamp_source(Compiler *c, Chunk *chunk);
 
 /* After emitting `provided` explicit args, emit default expressions for the
  * remaining params and return the padded total arg count. */
@@ -335,6 +337,23 @@ static bool chunk_deep_copy(Chunk *dst, const Chunk *src)
 	for (int i = 0; i < src->param_count && i < 16; i++)
 		dst->param_type_kinds[i] = src->param_type_kinds[i];
 	memcpy(dst->source_file, src->source_file, sizeof(dst->source_file));
+	if (src->local_names && src->local_name_count > 0)
+	{
+		dst->local_names = calloc((size_t)src->local_name_count, sizeof(*dst->local_names));
+		if (dst->local_names)
+		{
+			memcpy(dst->local_names, src->local_names,
+				   (size_t)src->local_name_count * sizeof(*dst->local_names));
+			dst->local_name_count = src->local_name_count;
+		}
+		if (src->local_type_kinds)
+		{
+			dst->local_type_kinds = calloc((size_t)src->local_name_count, sizeof(int));
+			if (dst->local_type_kinds)
+				memcpy(dst->local_type_kinds, src->local_type_kinds,
+					   (size_t)src->local_name_count * sizeof(int));
+		}
+	}
 
 	if (src->count > 0)
 	{
@@ -1391,8 +1410,9 @@ static void scope_pop(Compiler *c, int line)
 }
 
 /* Declare a new local variable in the current scope.
- * Returns the slot index assigned to it. */
-static int declare_local(Compiler *c, const char *name, int length)
+ * Returns the slot index assigned to it.
+ * type_kind may be 0 when unknown (temps, etc.). */
+static int declare_local(Compiler *c, const char *name, int length, int type_kind)
 {
 	if (c->local_count >= MAX_LOCALS)
 	{
@@ -1404,6 +1424,13 @@ static int declare_local(Compiler *c, const char *name, int length)
 	local->length = length;
 	local->slot = c->next_slot++;
 	local->depth = c->scope_depth;
+	/* Capture name + type for .xdbg / debugger */
+	if (c->current_fn >= 0 && c->module &&
+		c->current_fn < c->module->count)
+	{
+		chunk_set_local_info(&c->module->chunks[c->current_fn],
+							 local->slot, name, length, type_kind);
+	}
 	return local->slot;
 }
 
@@ -1957,9 +1984,9 @@ static void compile_expr(Compiler *c, const Expr *expr)
 	case EXPR_NULL_SAFE_GET:
 	{
 		/* obj?.field — eval obj, if null push null, else get field.
-		 * Uses a temp local to preserve obj for the non-null path. */
+		 * Uses a named temp local to preserve obj for the non-null path. */
 		compile_expr(c, expr->null_safe_get.object);
-		int tmp_slot = c->next_slot++;
+		int tmp_slot = declare_local(c, "$ns", 3, TYPE_OBJECT);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)tmp_slot, line);
 		emit_op(c, OP_LOAD_LOCAL, line);
@@ -2014,20 +2041,20 @@ static void compile_expr(Compiler *c, const Expr *expr)
 	{
 		/* obj?.method(args)
 		 * Similar to null_safe_get but calls a method.
-		 * Use same temp-local approach. */
+		 * Use same named temp-local approach. */
 		compile_expr(c, expr->null_safe_call.object);
-		int tmp_slot = c->next_slot++;
+		int tmp_slot = declare_local(c, "$ns", 3, TYPE_OBJECT);
 		emit_op(c, OP_STORE_LOCAL, line);
-		emit_u16(c, (uint16_t)tmp_slot, line);
+		emit_byte(c, (uint8_t)tmp_slot, line);
 		emit_op(c, OP_LOAD_LOCAL, line);
-		emit_u16(c, (uint16_t)tmp_slot, line);
+		emit_byte(c, (uint8_t)tmp_slot, line);
 		emit_op(c, OP_IS_NULL, line);
 		int jmp_to_null = CURRENT_CHUNK(c)->count;
 		emit_op(c, OP_JUMP_IF_TRUE, line);
 		emit_u16(c, 0, line);
 		/* Non-null: load obj, push args, call method */
 		emit_op(c, OP_LOAD_LOCAL, line);
-		emit_u16(c, (uint16_t)tmp_slot, line);
+		emit_byte(c, (uint8_t)tmp_slot, line);
 		for (ArgNode *arg = expr->null_safe_call.args; arg; arg = arg->next)
 			compile_expr(c, arg->expr);
 		/* Look up method slot */
@@ -2069,7 +2096,6 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		int end_offset = end_target - (jmp_to_end + 3);
 		CURRENT_CHUNK(c)->code[jmp_to_end + 1] = (uint8_t)(end_offset >> 8);
 		CURRENT_CHUNK(c)->code[jmp_to_end + 2] = (uint8_t)(end_offset);
-		c->local_count--;
 		break;
 	}
 
@@ -2687,7 +2713,7 @@ static void compile_expr(Compiler *c, const Expr *expr)
 			emit_op(c, add_or_sub, line);
 			emit_trunc_for_type(c, expr->resolved_type.kind, line); /* NEW */
 
-			int tmp_slot = c->next_slot++;
+			int tmp_slot = declare_local(c, "$tmp", 4, (int)expr->resolved_type.kind);
 			emit_op(c, OP_STORE_LOCAL, line);
 			emit_byte(c, (uint8_t)tmp_slot, line);
 
@@ -3395,11 +3421,19 @@ static void compile_expr(Compiler *c, const Expr *expr)
 		const char *class_name = strip_generic(class_name_raw, class_name_buf, sizeof(class_name_buf));
 		int ci = module_find_class(c->module, class_name);
 
+		/* Interfaces live in the module as ClassDefs now — must still use
+		 * name-based virtual dispatch, not method slots (fn_index is -1). */
+		bool is_iface_recv = false;
+		if (ci >= 0 && c->module->classes[ci].is_interface)
+			is_iface_recv = true;
 		if (ci < 0)
 		{
-			/* class_name is an interface — emit a virtual dispatch.
-			 * Store the method name as a string constant; the VM
-			 * looks up the concrete fn_index on the actual object. */
+			is_iface_recv = true; /* historical path: missing class ⇒ interface */
+		}
+
+		if (is_iface_recv)
+		{
+			/* Virtual dispatch: method name string constant → runtime lookup */
 			char mname_buf[256];
 			int mlen = expr->method_call.method_name_len < 255
 						   ? expr->method_call.method_name_len
@@ -3533,7 +3567,8 @@ static void compile_stmt(Compiler *c, const Stmt *stmt)
 
 		/* Declare the local and store the value into its slot */
 		int slot = declare_local(c, stmt->var_decl.name,
-								 stmt->var_decl.length);
+								 stmt->var_decl.length,
+								 (int)stmt->var_decl.type.kind);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)slot, line);
 		break;
@@ -3713,11 +3748,11 @@ static void compile_stmt(Compiler *c, const Stmt *stmt)
 		c->continue_count[depth] = 0;
 		scope_push(c);
 		compile_expr(c, stmt->foreach_stmt.array);
-		int arr_slot = declare_local(c, "__arr", 5);
+		int arr_slot = declare_local(c, "__arr", 5, TYPE_ARRAY);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)arr_slot, line);
 		emit_const_int(c, 0, line);
-		int idx_slot = declare_local(c, "__i", 2);
+		int idx_slot = declare_local(c, "__i", 3, TYPE_INT);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)idx_slot, line);
 		int loop_start = CURRENT_CHUNK(c)->count;
@@ -3733,7 +3768,8 @@ static void compile_stmt(Compiler *c, const Stmt *stmt)
 		emit_op(c, OP_LOAD_LOCAL, line);
 		emit_byte(c, (uint8_t)idx_slot, line);
 		emit_op(c, OP_ARRAY_GET, line);
-		int var_slot = declare_local(c, stmt->foreach_stmt.var_name, stmt->foreach_stmt.var_len);
+		int var_slot = declare_local(c, stmt->foreach_stmt.var_name, stmt->foreach_stmt.var_len,
+									 (int)stmt->foreach_stmt.elem_type.kind);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)var_slot, line);
 		c->loop_depth++;
@@ -3830,7 +3866,7 @@ static void compile_stmt(Compiler *c, const Stmt *stmt)
 		/* Compile subject and stash it in a temp local inside its own scope */
 		scope_push(c);
 		compile_expr(c, stmt->match_stmt.subject);
-		int temp_slot = declare_local(c, "$match_subj", 11);
+		int temp_slot = declare_local(c, "$match_subj", 11, 0);
 		emit_op(c, OP_STORE_LOCAL, line);
 		emit_byte(c, (uint8_t)temp_slot, line);
 
@@ -4016,7 +4052,8 @@ static void compile_stmt(Compiler *c, const Stmt *stmt)
 			scope_push(c);
 			emit_op(c, OP_LOAD_EXCEPTION, line);
 			int slot = declare_local(c, stmt->try_stmt.catch_vars[ci],
-									 stmt->try_stmt.catch_var_lens[ci]);
+									 stmt->try_stmt.catch_var_lens[ci],
+									 TYPE_OBJECT);
 			emit_byte(c, OP_STORE_LOCAL, line);
 			emit_byte(c, (uint8_t)slot, line);
 
@@ -4367,23 +4404,6 @@ bool compiler_compile(Compiler *c, const Program *program, Module *module,
 	return compiler_compile_staged(c, program, module, host_table, NULL);
 }
 
-static void chunk_stamp_source(Compiler *c, Chunk *chunk)
-{
-	if (!c->source_path || !c->source_path[0]) {
-		chunk->source_file[0] = '\0';
-		return;
-	}
-	const char *base = c->source_path;
-	const char *sl = strrchr(base, '/');
-#ifdef _WIN32
-	const char *bs = strrchr(base, '\\');
-	if (bs && (!sl || bs > sl)) sl = bs;
-#endif
-	if (sl) base = sl + 1;
-	snprintf(chunk->source_file, sizeof(chunk->source_file), "%s", base);
-}
-
-
 bool compiler_compile_staged(Compiler *c, const Program *program, Module *module,
 							 const CompilerHostTable *host_table,
 							 const Module *staging)
@@ -4463,6 +4483,15 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 			cname[namelen] = '\0';
 
 			int ci = module_find_class(c->module, cname);
+			if (ci >= 0 && c->module->classes[ci].is_interface)
+			{
+				/* Do not overwrite an interface ClassDef with a concrete class
+				 * of the same name (e.g. test class named IEnumerable). */
+				compile_error(c, s->line,
+							  "Class '%s' conflicts with interface '%s'",
+							  cname, cname);
+				break;
+			}
 			if (ci < 0)
 			{
 				ci = c->module->class_count++;
@@ -4785,6 +4814,102 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				}
 			}
 		}
+		else if (s->kind == STMT_INTERFACE_DECL)
+		{
+			/* Emit interface as ClassDef metadata so XAR/checker see contracts
+			 * (IEnumerator, IEnumerable, user interfaces). No bytecode chunks. */
+			if (c->module->class_count >= MODULE_MAX_CLASSES)
+			{
+				compile_error(c, s->line, "Too many classes/interfaces");
+			}
+			else
+			{
+				int nlen = s->interface_decl.length < CLASS_NAME_MAX - 1
+							   ? s->interface_decl.length
+							   : CLASS_NAME_MAX - 1;
+				char iname[CLASS_NAME_MAX];
+				memcpy(iname, s->interface_decl.name, nlen);
+				iname[nlen] = '\0';
+
+				int ci = module_find_class(c->module, iname);
+				if (ci < 0)
+					ci = c->module->class_count++;
+				ClassDef *cls = &c->module->classes[ci];
+				memset(cls, 0, sizeof(ClassDef));
+				memcpy(cls->name, iname, nlen);
+				cls->name[nlen] = '\0';
+				cls->is_interface = true;
+				cls->constructor_index = -1;
+				cls->parent_index = -1;
+
+				/* Type parameters */
+				cls->type_param_count = 0;
+				{
+					TypeParamNode *tp = s->interface_decl.type_params;
+					for (; tp && cls->type_param_count < 8; tp = tp->next)
+					{
+						int tl = tp->length < 7 ? tp->length : 7;
+						memcpy(cls->type_param_names[cls->type_param_count], tp->name, tl);
+						cls->type_param_names[cls->type_param_count][tl] = '\0';
+						cls->type_param_count++;
+					}
+				}
+
+				/* Optional parent interface name */
+				if (s->interface_decl.parent_name && s->interface_decl.parent_length > 0)
+				{
+					int plen = s->interface_decl.parent_length < 63
+								   ? s->interface_decl.parent_length
+								   : 63;
+					memcpy(cls->interface_names[0], s->interface_decl.parent_name, plen);
+					cls->interface_names[0][plen] = '\0';
+					cls->interface_count = 1;
+				}
+
+				/* Method signatures only — fn_index stays -1 */
+				typedef struct IfaceMethodNode IMNode;
+				for (IMNode *m = s->interface_decl.methods; m; m = m->next)
+				{
+					if (cls->method_count >= CLASS_MAX_METHODS)
+						break;
+					MethodDef *md = &cls->methods[cls->method_count++];
+					memset(md, 0, sizeof(MethodDef));
+					int mlen = m->length < FIELD_NAME_MAX - 1 ? m->length : FIELD_NAME_MAX - 1;
+					memcpy(md->name, m->name, mlen);
+					md->name[mlen] = '\0';
+					md->fn_index = -1;
+					md->return_type_kind = (int)m->return_type.kind;
+					md->return_is_nullable = m->return_type.is_nullable;
+					if (m->return_type.kind == TYPE_OBJECT && m->return_type.class_name)
+					{
+						strncpy(md->return_class_name, m->return_type.class_name,
+								CLASS_NAME_MAX - 1);
+					}
+					else if (m->return_type.kind == TYPE_PARAM && m->return_type.class_name)
+					{
+						/* Generic param name as return class marker */
+						strncpy(md->return_class_name, m->return_type.class_name,
+								CLASS_NAME_MAX - 1);
+						md->return_type_kind = (int)TYPE_PARAM;
+					}
+					md->param_count = 0;
+					for (ParamNode *p2 = m->params;
+						 p2 && md->param_count < METHOD_MAX_PARAMS;
+						 p2 = p2->next)
+					{
+						int pi = md->param_count++;
+						md->param_type_kinds[pi] = (int)p2->type.kind;
+						md->param_is_nullable[pi] = p2->type.is_nullable;
+						if (p2->type.class_name)
+						{
+							strncpy(md->param_class_names[pi], p2->type.class_name,
+									METHOD_PARAM_CLASS_MAX - 1);
+							md->param_class_names[pi][METHOD_PARAM_CLASS_MAX - 1] = '\0';
+						}
+					}
+				}
+			}
+		}
 		else if (s->kind == STMT_ENUM_DECL)
 		{
 			/* Register enum as a ClassDef with member name table for toString */
@@ -4962,10 +5087,13 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 			{
 				if (!f->is_static || !f->initializer)
 					continue;
+				int sfline = f->initializer->line > 0
+								? f->initializer->line
+								: (f->type_line > 0 ? f->type_line : s->line);
 				compile_expr(c, f->initializer);
-				emit_op(c, OP_STORE_STATIC, s->line);
-				emit_byte(c, (uint8_t)ci, s->line);
-				emit_byte(c, (uint8_t)fields_idx, s->line);
+				emit_op(c, OP_STORE_STATIC, sfline);
+				emit_byte(c, (uint8_t)ci, sfline);
+				emit_byte(c, (uint8_t)fields_idx, sfline);
 			}
 		}
 
@@ -5010,7 +5138,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				c->break_count[d] = c->continue_count[d] = 0;
 
 			for (ParamNode *p = s->fn_decl.params; p; p = p->next)
-				declare_local(c, p->name, p->length);
+				declare_local(c, p->name, p->length, (int)p->type.kind);
 			CURRENT_CHUNK(c)->param_count = s->fn_decl.param_count;
 
 			/* Store type signature so declare_staging can give checker real types */
@@ -5087,12 +5215,12 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				 * Static methods have no 'this'. */
 				if (!m->is_static)
 				{
-					declare_local(c, "this", 4);
+					declare_local(c, "this", 4, TYPE_OBJECT);
 				}
 
 				/* Declare parameters (after 'this' for instance, from 0 for static) */
 				for (ParamNode *p = m->fn->fn_decl.params; p; p = p->next)
-					declare_local(c, p->name, p->length);
+					declare_local(c, p->name, p->length, (int)p->type.kind);
 
 				/* param_count = explicit params only (not 'this') */
 				CURRENT_CHUNK(c)->param_count = m->fn->fn_decl.param_count;
@@ -5122,22 +5250,32 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 						int islot = (cur_cls && fields_idx < cur_cls->field_count)
 										? cur_cls->fields[fields_idx].instance_slot
 										: fields_idx;
-						emit_op(c, OP_LOAD_THIS, s->line);
+						/* Attribute stops to the field's own line (not the class line). */
+						int fline = f->initializer->line > 0
+										? f->initializer->line
+										: (f->type_line > 0 ? f->type_line : s->line);
+						emit_op(c, OP_LOAD_THIS, fline);
 						compile_expr(c, f->initializer);
-						emit_op(c, OP_SET_FIELD, s->line);
-						emit_byte(c, (uint8_t)islot, s->line);
+						emit_op(c, OP_SET_FIELD, fline);
+						emit_byte(c, (uint8_t)islot, fline);
 					}
 				}
 
+				int last_body_line = 0;
 				for (StmtNode *b = m->fn->fn_decl.body->block.stmts; b; b = b->next)
+				{
 					compile_stmt(c, b->stmt);
+					if (b->stmt && b->stmt->line > 0)
+						last_body_line = b->stmt->line;
+				}
 
 				CURRENT_CHUNK(c)->local_count = c->next_slot;
 
-				/* All methods/constructors return void implicitly */
+				/* Implicit return: last body line (or 0) so the debugger does not
+				 * bounce back to the class/method declaration line. */
 				Chunk *ch = CURRENT_CHUNK(c);
 				if (ch->count == 0 || ch->code[ch->count - 1] != (uint8_t)OP_RETURN_VOID)
-					emit_op(c, OP_RETURN_VOID, s->line);
+					emit_op(c, OP_RETURN_VOID, last_body_line > 0 ? last_body_line : 0);
 			}
 
 			c->current_class_idx = -1;
@@ -5151,6 +5289,22 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 void compiler_set_source_path(Compiler *c, const char *path)
 {
 	c->source_path = path;
+}
+
+static void chunk_stamp_source(Compiler *c, Chunk *chunk)
+{
+	if (!c->source_path || !c->source_path[0]) {
+		chunk->source_file[0] = '\0';
+		return;
+	}
+	const char *base = c->source_path;
+	const char *sl = strrchr(base, '/');
+#ifdef _WIN32
+	const char *bs = strrchr(base, '\\');
+	if (bs && (!sl || bs > sl)) sl = bs;
+#endif
+	if (sl) base = sl + 1;
+	snprintf(chunk->source_file, sizeof(chunk->source_file), "%s", base);
 }
 
 void compiler_print_errors(const Compiler *c)

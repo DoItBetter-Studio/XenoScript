@@ -537,7 +537,7 @@ static char *pipeline_resolve_imports(PipelineState *s,
 #endif
                     if (sl) base = sl + 1;
                     char tag[320];
-                    snprintf(tag, sizeof(tag), "// @xeno:file %s\n// @xeno:line 1\n", base);
+                    snprintf(tag, sizeof(tag), "// @xeno:file %.288s\n// @xeno:line 1\n", base);
                     out = pipeline_buf_append(out, len, cap, tag, strlen(tag));
                     if (!out) { free(src); *err = true; return out; }
                 }

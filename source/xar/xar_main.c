@@ -30,6 +30,7 @@
 #include "xar.h"
 #include "xbc.h"
 #include "xdoc.h"
+#include "xdbg.h"
 #include "lexer.h"
 #include "parser.h"
 #include "checker.h"
@@ -229,9 +230,12 @@ typedef struct {
     bool     ok;
 } CompileResult;
 
+/* If dbg_acc is non-NULL, merge the compiled module (with local names) into
+ * it before freeing — used to emit a sibling .xdbg for the archive. */
 static CompileResult compile_xeno(const char *file_path,
                                    const char *chunk_name,
-                                   const Module *staging) {
+                                   const Module *staging,
+                                   Module *dbg_acc) {
     CompileResult res = {0};
     snprintf(res.chunk_name, sizeof(res.chunk_name), "%s", chunk_name);
 
@@ -307,6 +311,10 @@ static CompileResult compile_xeno(const char *file_path,
             goto cleanup;
         }
         res.ok = true;
+        /* Capture named locals for .xdbg before the module is freed.
+         * XBC itself does not carry local names. */
+        if (dbg_acc)
+            module_merge(dbg_acc, module);
     }
 
 cleanup:
@@ -456,6 +464,9 @@ static int cmd_pack(int argc, char **argv) {
     snprintf(manifest.author,      128,           "%s", author);
     snprintf(manifest.description, 256,           "%s", desc);
 
+    Module dbg_acc;
+    module_init(&dbg_acc);
+
     bool any_error = false;
     for (int i = 0; i < g_file_count; i++) {
         char chunk_name[512];
@@ -463,7 +474,7 @@ static int cmd_pack(int argc, char **argv) {
         strip_xeno_ext(chunk_name);
 
         printf("  compiling '%s' -> chunk '%s'\n", g_files[i].rel, chunk_name);
-        CompileResult r = compile_xeno(g_files[i].path, chunk_name, staging);
+        CompileResult r = compile_xeno(g_files[i].path, chunk_name, staging, &dbg_acc);
         if (!r.ok) { any_error = true; continue; }
 
         chunks[n_chunks].data = r.xbc_data;
@@ -490,6 +501,7 @@ static int cmd_pack(int argc, char **argv) {
         fprintf(stderr, "xar: errors during compilation, aborting\n");
         for (int i = 0; i < n_chunks; i++) free(chunks[i].data);
         module_free(staging); free(staging);
+        module_free(&dbg_acc);
         return 1;
     }
 
@@ -500,11 +512,24 @@ static int cmd_pack(int argc, char **argv) {
     if (xr != XAR_OK) {
         fprintf(stderr, "xar: failed to write '%s': %s\n",
                 out_path, xar_result_str(xr));
+        module_free(&dbg_acc);
         return 1;
     }
 
     printf("xar: wrote '%s' (%d chunk(s), %d export(s))\n",
            out_path, n_chunks, manifest.export_count);
+
+    /* Sibling .xdbg — named locals for the interactive debugger (not in .xar). */
+    {
+        char dbg_path[1024];
+        if (xdbg_path_from_artifact(out_path, dbg_path, sizeof(dbg_path))) {
+            if (dbg_acc.count > 0 && xdbg_write(&dbg_acc, dbg_path))
+                printf("xar: wrote debug symbols '%s'\n", dbg_path);
+            else if (dbg_acc.count > 0)
+                fprintf(stderr, "xar: warning: failed to write '%s'\n", dbg_path);
+        }
+    }
+    module_free(&dbg_acc);
 
     /* Emit side-car .xdoc documentation archive (IDE-only, not in the .xar). */
     {

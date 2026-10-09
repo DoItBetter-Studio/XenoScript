@@ -203,7 +203,8 @@ struct XenoVM {
     bool        debug_enabled;
     bool        debug_include_sinit; /* stop inside __sinit__* (default false) */
     bool        debug_paused;
-    bool        debug_step_over;     /* stop on next line change at/under step frame */
+    /* 0=none 1=step-over 2=step-in 3=step-out */
+    int         debug_step_mode;
     int         debug_step_frame;    /* frame_count snapshot when step requested */
     int         debug_ignore_line;   /* after continue, skip stops until line changes */
     int         debug_hit_line;      /* line where we last stopped */
@@ -338,7 +339,6 @@ static inline Value xeno_float(double  v) { return val_float(v); }
 static inline Value xeno_bool (bool    v) { return val_bool(v);  }
 static inline Value xeno_str  (char   *v) { return val_str(v);   }
 
-#endif /* VM_H */
 /* ── Debugger ────────────────────────────────────────────────────────────── */
 
 /* Enable or disable breakpoint / step checks in the execute loop. */
@@ -357,8 +357,10 @@ void xeno_vm_debug_clear_breakpoints(XenoVM *vm);
 /* Resume after a pause (clears debug_paused). */
 void xeno_vm_debug_continue(XenoVM *vm);
 
-/* Step to the next source line at or above the current frame depth. */
-void xeno_vm_debug_step_over(XenoVM *vm);
+/* Step modes (relative to the frame depth captured at the request). */
+void xeno_vm_debug_step_over(XenoVM *vm);  /* next line at or above current depth */
+void xeno_vm_debug_step_in(XenoVM *vm);    /* next line anywhere (enter calls) */
+void xeno_vm_debug_step_out(XenoVM *vm);   /* next line after leaving current frame */
 
 /* True while stopped on a breakpoint/step (only meaningful inside on_break). */
 bool xeno_vm_debug_is_paused(const XenoVM *vm);
@@ -370,3 +372,42 @@ int  xeno_vm_debug_hit_offset(const XenoVM *vm);
 /* Optional callback invoked when execution stops. May block until continue. */
 void xeno_vm_debug_set_callback(XenoVM *vm, void (*on_break)(XenoVM *vm));
 
+/* ── Inspection (safe while paused inside on_break) ─────────────────────── */
+
+typedef struct {
+    const char *fn_name;       /* chunk name; may be "" */
+    const char *source_file;   /* basename; may be "" */
+    int         line;          /* 1-based source line at frame IP; 0 if unknown */
+    int         depth;         /* 0 = top (current) frame */
+} XenoDebugFrame;
+
+typedef struct {
+    int         slot;
+    const char *name;          /* "this", "arg0", … or NULL */
+    char        summary[160];  /* human-readable value */
+} XenoDebugLocal;
+
+int  xeno_vm_debug_frame_count(const XenoVM *vm);
+bool xeno_vm_debug_frame_at(const XenoVM *vm, int depth_from_top, XenoDebugFrame *out);
+
+int  xeno_vm_debug_local_count(const XenoVM *vm, int depth_from_top);
+bool xeno_vm_debug_local_at(const XenoVM *vm, int depth_from_top, int index,
+                            XenoDebugLocal *out);
+
+/* Instance + static fields of an object (usually `this` in slot 0). */
+typedef struct {
+    const char *name;
+    bool        is_static;
+    bool        is_final;
+    char        summary[160];
+} XenoDebugField;
+
+/* Count fields on the object in local slot `slot` of frame depth_from_top.
+ * Returns 0 if that slot is not an object. */
+int  xeno_vm_debug_field_count(const XenoVM *vm, int depth_from_top, int slot);
+bool xeno_vm_debug_field_at(const XenoVM *vm, int depth_from_top, int slot,
+                            int index, XenoDebugField *out);
+
+void xeno_vm_debug_format_value(const XenoVM *vm, Value v, char *buf, size_t n);
+
+#endif /* VM_H */

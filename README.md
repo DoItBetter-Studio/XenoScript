@@ -55,7 +55,8 @@ This makes XenoScript ideal for secure modding environments.
 - **Erased generics** (`List<T>`, `Dictionary<K, V>`, user-defined generic classes) — distributed as compiled `.xar` binaries, no source shipping required  
 - Access modifiers (`public`, `private`, `protected`)  
 - Virtual dispatch (`virtual` / `override`)  
-- Single constructor and method name per class (no overloading)
+- Single constructor and method name per class (**no function/constructor overloading**)
+- **Operator overloading** (`function operator +(Other): T`, unary `-`, and compound forms `+=`, `-=`, `*=`, `/=`) for user-defined types  
 - Enum `match` expressions
 - Nullable types (`string?`, `int?`, `??`, `!`, `?.`)  
 - Exception handling (`try` / `catch` / `finally` / `throw`)  
@@ -69,11 +70,13 @@ This makes XenoScript ideal for secure modding environments.
 - Runtime reflection for types, objects, fields, methods, parameters, enums, annotations, and nullable metadata
 - Structured control flow (`if`, `for`, `foreach`, `while`)  
 - String interpolation  
+- Host-backed **`print`** and **`assert`** (documented via stdlib `io.xeno` / XDocs)  
 - Module imports and `.xar` package archives  
 - Project model (`xeno.project`) with dependency resolution and SemVer matching  
-- Bytecode compilation (XBC v21) with linker stage
-- Lean mod packages: `xenoc build` removes stdlib/dependency bytecode chunks but retains lightweight `ClassDef` stubs at compile-time indices; the VM fills them from loaded stdlib/dependencies
-- API documentation via **XDocs** (`.xdoc` sidecars) for hover, stubs, and parameter names
+- Bytecode compilation (**XBC v24**) with linker stage and optional line tables for debugging  
+- Lean mod packages: `xenoc build` strips stdlib/dependency *chunks* but keeps lightweight `ClassDef` metadata at compile-time indices; the VM fills code from embedded stdlib and declared dependency `.xar` files  
+- API documentation via **XDocs** (`.xdoc` sidecars) for hover, stubs, and parameter names  
+- Interactive **line debugger** in `xenovm` (`--debug`, breakpoints, step in/out/over, stack / locals / fields)
 
 ---
 
@@ -87,8 +90,7 @@ XenoScript deliberately does **not** include:
 | **Default parameter values** | Keeps call sites and bytecode signatures simple and explicit. |
 | **`Field.get` / `Method.invoke` / dynamic `new`** | Reflection is **descriptive only**. Runtime capability stays under host control. |
 | **Reified generics** | Generics use erasure (`List<T>` → runtime `List`). Sufficient for mod collections; avoids VM complexity. |
-| **General-purpose I/O in the language** | `print` is a **host** function (index 0). File/network/OS access exists only if the host registers it. |
-| **`assert` keyword** | Use normal `if` + `throw`, or host-provided diagnostics, until a real product need appears. |
+| **General-purpose file/network I/O** | `print` and `assert` are host-backed (documented in stdlib `io.xeno` / XDocs). Arbitrary FS/HTTP/OS access exists only if the host registers it. |
 | **Multiple inheritance of classes** | Single class parent + multiple interfaces only. |
 
 If a feature is not on the supported list and not in the test suite, assume it is out of scope until explicitly added.
@@ -202,7 +204,7 @@ XDocs for the embedded standard library (`core`, `math`, `collections`) are prod
 
 | Package | Contents |
 |--------|----------|
-| `<core>` | `Exception`, `Attribute`, `IEnumerable<T>`, `IEnumerator<T>`, `string`, `int`, `float`, `bool` helpers |
+| `<core>` | `Exception`, `Attribute`, `IEnumerable<T>`, `IEnumerator<T>`, primitive helpers, **`print` / `assert`** (`io.xeno`) |
 | `<math>` | `Math` static class |
 | `<collections>` | `List<T>`, `Dictionary<K,V>`, `Stack<T>`, `Queue<T>` |
 
@@ -233,7 +235,7 @@ Compile a single file:
 ./bin/xenoc source.xeno -o output.xbc
 ```
 
-Dump bytecode disassembly:
+Dump bytecode disassembly (includes methods, constructors, events, and static init):
 ```
 ./bin/xenoc source.xeno --dump
 ```
@@ -262,6 +264,35 @@ Run a project directory (source + `xeno.project`):
 ```
 ./bin/xenovm path/to/project/
 ```
+
+#### Interactive debugger
+
+```
+./bin/xenovm --debug path/to/script.xeno
+./bin/xenovm --debug --break 42 path/to/project/
+./bin/xenovm --debug --break MyMod.xeno:24 path/to/mod.xar
+```
+
+| Flag / command | Meaning |
+|----------------|---------|
+| `--debug` | Stop at the first user source line (skips `__sinit__` by default) |
+| `--break <line>` | Break on that line in any file |
+| `--break <file>:<line>` | Break only in the named source file |
+| `--debug-sinit` | Also stop inside static initializers |
+| `c` / `continue` | Resume until the next breakpoint |
+| `s` / `step` | Step over (next line at this call depth) |
+| `i` / `in` | Step into calls |
+| `o` / `out` | Step out of the current frame |
+| `bt` | Print the call stack |
+| `locals` | Print local slots for the top frame |
+| `fields` | Print fields of `this` (slot 0) when available |
+| `q` / `quit` | Abort the run |
+
+Line tables live in **XBC v24**. Production builds can omit or ignore them; debug runs use them for source mapping.
+
+**Named locals** are not stored in the `.xbc` / `.xar`. When you compile with `xenoc`, a sibling **`.xdbg`** file is written next to the artifact. `xenovm --debug` loads it automatically when present so `locals` shows real names (`items`, `ModId`) instead of only `local_1`. Shipping a mod without the `.xdbg` keeps packages lean; debugging simply falls back to slot numbers.
+
+When embedding the VM in a game, the host can install the same break callback used by the CLI (for example, a dedicated console window).
 
 ### `xar` — Package Tool
 
@@ -304,7 +335,10 @@ Rebuilds stdlib `.xar` / `.xdoc` packages and re-embeds them into the toolchain 
 
 ```
 make xeno_tests
+make xeno_tests_asan   # optional: ASan + UBSan on Linux
 ```
+
+The suite currently covers **51** tests across language, collections, stdlib, errors, integration, reflection, performance, and runtime/VM capabilities.
 
 ---
 
@@ -614,10 +648,18 @@ The language, VM, and standard library are evolving together.
 - ✅ VS Code extension: highlighting, diagnostics, hover, navigation, completion  
 - ✅ VS Code extension: automatic toolchain detection (`tools/` / `bin/` / workspace ancestors)  
 - ✅ VS Code extension: **Build Project** (`xenoc build` from the status bar / command palette)  
-- ✅ Language test suite  
+- ✅ Language test suite (**51** tests, including full-system VM capabilities)  
+- ✅ Operator overloading and compound assignment (`+`, `==`, unary `-`, `+=`, …)  
+- ✅ Interactive line debugger (`xenovm --debug`, breakpoints, step in/out/over, stack / locals / fields)  
+- ✅ XBC v24 line tables for source mapping  
+- ✅ Interface ClassDefs in the module (name-based `CALL_IFACE` dispatch)  
+- ✅ `print` / `assert` host entry points with XDocs  
+- ✅ Bytecode `--dump` covers methods, events, and static init  
 
 **Known limitations / planned:**
-- 🔲 Context-aware local variable completion inside function bodies (top-level + member completion is implemented)
+- 🔲 Context-aware local variable completion inside function bodies (top-level + member completion is implemented)  
+- ✅ Optional debug-symbol sidecars (`.xdbg`) for named locals — written by `xenoc`, loaded by `xenovm --debug`  
+- 🔲 Host/game console integration for the debugger break callback (CLI stdin is supported today)
 
 ---
 

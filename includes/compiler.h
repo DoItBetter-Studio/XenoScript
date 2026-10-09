@@ -255,6 +255,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 
 void compiler_print_errors(const Compiler *c);
 
+/* Stamp Chunk.source_file from this path (basename) on subsequent compiles. */
 void compiler_set_source_path(Compiler *c, const char *path);
 
 #endif /* COMPILER_H */

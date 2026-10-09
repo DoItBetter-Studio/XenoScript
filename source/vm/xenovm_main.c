@@ -19,6 +19,7 @@
 #define _DEFAULT_SOURCE
 #include "vm.h"
 #include "xbc.h"
+#include "xdbg.h"
 #include "xar.h"
 #include "toml.h"
 #include "stdlib_xar.h"
@@ -67,7 +68,12 @@ static void print_usage(void) {
     printf("  --debug-sinit    Also stop inside __sinit__ static initializers\n");
     printf("\nWhen stopped, type a command and press Enter:\n");
     printf("  c / continue     Resume until the next breakpoint\n");
-    printf("  s / step         Step to the next source line\n");
+    printf("  s / step         Step over (next line at this depth)\n");
+    printf("  i / stepin       Step in (enter calls)\n");
+    printf("  o / stepout      Step out (leave current frame)\n");
+    printf("  bt / stack       Print call stack\n");
+    printf("  locals           Print locals in the current frame\n");
+    printf("  fields           Print fields of `this` (slot 0)\n");
     printf("  q / quit         Abort execution\n");
     printf("\nNote: there is no 'build' subcommand. To run a built mod:\n");
     printf("  xenovm path/to/mod.xar\n");
@@ -78,6 +84,60 @@ static void print_usage(void) {
 /* ── Interactive stdin debugger ───────────────────────────────────────── */
 
 static int g_debug_abort = 0;
+
+static void xenovm_debug_print_stack(XenoVM *vm)
+{
+    int n = xeno_vm_debug_frame_count(vm);
+    fprintf(stderr, "[xeno debug] call stack (%d frame%s):\n", n, n == 1 ? "" : "s");
+    for (int d = 0; d < n; d++) {
+        XenoDebugFrame fr;
+        if (!xeno_vm_debug_frame_at(vm, d, &fr))
+            continue;
+        const char *fn = fr.fn_name && fr.fn_name[0] ? fr.fn_name : "?";
+        if (fr.source_file && fr.source_file[0])
+            fprintf(stderr, "  #%d  %s (%s:%d)\n", d, fn, fr.source_file, fr.line);
+        else
+            fprintf(stderr, "  #%d  %s — line %d\n", d, fn, fr.line);
+    }
+}
+
+static void xenovm_debug_print_locals(XenoVM *vm)
+{
+    int n = xeno_vm_debug_local_count(vm, 0);
+    fprintf(stderr, "[xeno debug] locals (%d slot%s):\n", n, n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        XenoDebugLocal loc;
+        if (!xeno_vm_debug_local_at(vm, 0, i, &loc))
+            continue;
+        if (loc.name)
+            fprintf(stderr, "  [%d] %s = %s\n", loc.slot, loc.name, loc.summary);
+        else
+            fprintf(stderr, "  [%d] local_%d = %s\n", loc.slot, loc.slot, loc.summary);
+    }
+}
+
+static void xenovm_debug_print_fields(XenoVM *vm)
+{
+    int n = xeno_vm_debug_field_count(vm, 0, 0);
+    if (n == 0) {
+        fprintf(stderr, "[xeno debug] fields: (no object in slot 0 / this)\n");
+        return;
+    }
+    fprintf(stderr, "[xeno debug] fields of this (%d):\n", n);
+    for (int i = 0; i < n; i++) {
+        XenoDebugField f;
+        if (!xeno_vm_debug_field_at(vm, 0, 0, i, &f))
+            continue;
+        const char *flags = "";
+        if (f.is_static && f.is_final)
+            flags = " (static final)";
+        else if (f.is_static)
+            flags = " (static)";
+        else if (f.is_final)
+            flags = " (final)";
+        fprintf(stderr, "  %s%s = %s\n", f.name ? f.name : "?", flags, f.summary);
+    }
+}
 
 static void xenovm_debug_on_break(XenoVM *vm)
 {
@@ -90,7 +150,7 @@ static void xenovm_debug_on_break(XenoVM *vm)
     else
         fprintf(stderr, "\n[xeno debug] %s — line %d\n", fn, line);
     (void)off;
-    fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+    fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
     fflush(stderr);
 
     char buf[128];
@@ -104,7 +164,7 @@ static void xenovm_debug_on_break(XenoVM *vm)
         char *p = buf;
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '\n' || *p == '\0') {
-            fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+            fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
             fflush(stderr);
             continue;
         }
@@ -116,13 +176,39 @@ static void xenovm_debug_on_break(XenoVM *vm)
             xeno_vm_debug_step_over(vm);
             return;
         }
+        if (p[0] == 'i' || strncmp(p, "stepin", 6) == 0) {
+            xeno_vm_debug_step_in(vm);
+            return;
+        }
+        if (p[0] == 'o' || strncmp(p, "stepout", 7) == 0) {
+            xeno_vm_debug_step_out(vm);
+            return;
+        }
+        if (strncmp(p, "bt", 2) == 0 || strncmp(p, "stack", 5) == 0) {
+            xenovm_debug_print_stack(vm);
+            fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
+            fflush(stderr);
+            continue;
+        }
+        if (strncmp(p, "locals", 6) == 0) {
+            xenovm_debug_print_locals(vm);
+            fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
+            fflush(stderr);
+            continue;
+        }
+        if (strncmp(p, "fields", 6) == 0 || p[0] == 'f') {
+            xenovm_debug_print_fields(vm);
+            fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
+            fflush(stderr);
+            continue;
+        }
         if (p[0] == 'q' || strncmp(p, "quit", 4) == 0) {
             g_debug_abort = 1;
             /* Leave paused so the VM aborts with a stop error */
             return;
         }
-        fprintf(stderr, "[xeno debug] unknown command — use c, s, or q\n");
-        fprintf(stderr, "[xeno debug] (c)ontinue  (s)tep  (q)uit > ");
+        fprintf(stderr, "[xeno debug] unknown command — use c, s, i, o, bt, locals, fields, or q\n");
+        fprintf(stderr, "[xeno debug] (c)ontinue (s)tep (i)n (o)ut (bt) (locals) (fields) (q)uit > ");
         fflush(stderr);
     }
 }
@@ -139,6 +225,17 @@ static bool path_is_dir(const char *path) {
 
 /* ── Run modes ────────────────────────────────────────────────────────── */
 
+static void try_load_xdbg(XenoVM *vm, Module *module, const char *artifact)
+{
+    if (!vm || !module || !artifact || !vm->debug_enabled)
+        return;
+    char dbg_path[1024];
+    if (!xdbg_path_from_artifact(artifact, dbg_path, sizeof(dbg_path)))
+        return;
+    if (xdbg_load(module, dbg_path))
+        fprintf(stderr, "xenovm: loaded debug symbols '%s'\n", dbg_path);
+}
+
 static int run_xbc(XenoVM *vm, const char *path) {
     Module *user = (Module*)calloc(1, sizeof(Module)); module_init(user);
     XbcResult xr = xbc_read(user, path);
@@ -147,6 +244,7 @@ static int run_xbc(XenoVM *vm, const char *path) {
         module_free(user); free(user);
         return 2;
     }
+    try_load_xdbg(vm, user, path);
 
     Module *module = malloc(sizeof(Module));
     if (!module) { module_free(user); free(user); return 1; }
@@ -322,6 +420,7 @@ static int run_xar(XenoVM *vm, const char *path) {
     for (int i = 0; i < ar.chunk_count; i++) {
         Module *cm = (Module*)calloc(1, sizeof(Module)); module_init(cm);
         if (xbc_read_mem(cm, ar.chunks[i].data, ar.chunks[i].size) == XBC_OK) {
+            try_load_xdbg(vm, cm, path);
             module_merge(module, cm);
             module_free(cm); free(cm);
         }

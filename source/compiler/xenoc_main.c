@@ -21,6 +21,7 @@
 
 #include "xar.h"
 #include "toml.h"
+#include "xdbg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,6 +176,14 @@ static int compile_single(const char *input_path,
 					output_path, xbc_result_str(r));
 			exit_code = 2;
 			goto cleanup_single;
+		}
+		{
+			char dbg_path[1024];
+			if (xdbg_path_from_artifact(output_path, dbg_path, sizeof(dbg_path)))
+			{
+				if (xdbg_write(module, dbg_path))
+					printf("xenoc: wrote debug symbols '%s'\n", dbg_path);
+			}
 		}
 		printf("xenoc: compiled '%s' -> '%s'\n", input_path, output_path);
 	}
@@ -594,6 +603,14 @@ static int build_project(const char *project_dir, const char *output_path, const
 			goto cleanup_build;
 		}
 		printf("xenoc: built '%s' -> '%s'\n", manifest.name, output_path);
+		{
+			char dbg_path[1024];
+			if (xdbg_path_from_artifact(output_path, dbg_path, sizeof(dbg_path)))
+			{
+				if (xdbg_write(module, dbg_path))
+					printf("xenoc: wrote debug symbols '%s'\n", dbg_path);
+			}
+		}
 	}
 
 cleanup_build:

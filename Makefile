@@ -46,13 +46,15 @@ COMPILER_SRCS := \
     source/compiler/compiler.c \
     source/compiler/xbc.c      \
     source/compiler/module_strip_stdlib.c \
-    source/compiler/xdoc.c
+    source/compiler/xdoc.c \
+    source/compiler/xdbg.c
 
 # Bootstrap packer: no module_strip_stdlib (no embedded stdlib yet)
 COMPILER_SRCS_BOOTSTRAP := \
     source/compiler/compiler.c \
     source/compiler/xbc.c      \
-    source/compiler/xdoc.c
+    source/compiler/xdoc.c \
+    source/compiler/xdbg.c
 
 VM_SRCS  := source/vm/vm.c source/vm/platform_time.c
 XAR_SRCS := source/xar/xar.c source/xar/toml.c
@@ -93,6 +95,8 @@ STDLIB_OBJS_LINUX      ?=
 STDLIB_OBJS_WIN64      ?=
 STDLIB_XDOC_OBJS_LINUX ?=
 STDLIB_XDOC_OBJS_WIN64 ?=
+STDLIB_XDBG_OBJS_LINUX ?=
+STDLIB_XDBG_OBJS_WIN64 ?=
 
 # ==========================================================
 # Default
@@ -113,7 +117,7 @@ $(BIN)/xar-bootstrap: $(XAR_BOOTSTRAP_SRCS) | $(BIN)
 	@$(CC_LINUX) $(CFLAGS) -DXAR_BOOTSTRAP $(XAR_BOOTSTRAP_SRCS) -o $@ $(LDFLAGS)
 
 # ==========================================================
-# Pack stdlib/<name>/ → build/xar/<name>.xar (+ sibling .xdoc)
+# Pack stdlib/<name>/ → build/xar/<name>.xar (+ sibling .xdoc + .xdbg)
 # Bootstrap is order-only: updating the packer does not force re-pack.
 # ==========================================================
 
@@ -132,7 +136,8 @@ $(BUILD)/stdlib_embed.mk: $(STDLIB_XARS) | $(BUILD)
 .PHONY: stdlib
 stdlib: $(BUILD)/stdlib_embed.mk
 	@$(MAKE) --no-print-directory $(STDLIB_OBJS_LINUX) $(STDLIB_OBJS_WIN64) \
-	         $(STDLIB_XDOC_OBJS_LINUX) $(STDLIB_XDOC_OBJS_WIN64)
+	         $(STDLIB_XDOC_OBJS_LINUX) $(STDLIB_XDOC_OBJS_WIN64) \
+	         $(STDLIB_XDBG_OBJS_LINUX) $(STDLIB_XDBG_OBJS_WIN64)
 	@printf "✅ Stdlib rebuilt.\n"
 
 # ==========================================================
@@ -159,6 +164,16 @@ $(BUILD)/%.xdoc.win64.o: $(BUILD)/%.xdoc
 	@printf "📄 Embedding $< (win64)\n"
 	@$(LD_WIN64) -r -b binary $< -o $@
 
+$(BUILD)/%.xdbg.linux.o: $(BUILD)/%.xdbg
+	@printf "🐛 Embedding $< (linux)\n"
+	@ld -r -b binary $< -o $@.tmp
+	@objcopy --add-section .note.GNU-stack=/dev/null $@.tmp $@
+	@rm -f $@.tmp
+
+$(BUILD)/%.xdbg.win64.o: $(BUILD)/%.xdbg
+	@printf "🐛 Embedding $< (win64)\n"
+	@$(LD_WIN64) -r -b binary $< -o $@
+
 # ==========================================================
 # Guard: binaries need embeds. If missing, point at `make stdlib`.
 # ==========================================================
@@ -179,10 +194,10 @@ $(BIN)/xenoc: $(XENOC_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_SOURCES_H) | $(BIN)
 	@printf "🐧 Linking xenoc (linux)...\n"
 	@$(CC_LINUX) $(CFLAGS) $(XENOC_SRCS) $(STDLIB_OBJS_LINUX) -o $@ $(LDFLAGS)
 
-$(BIN)/xenovm: $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) | $(BIN)
+$(BIN)/xenovm: $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_XDBG_OBJS_LINUX) | $(BIN)
 	$(NEED_STDLIB)
 	@printf "🐧 Linking xenovm (linux)...\n"
-	@$(CC_LINUX) $(CFLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) -o $@ $(LDFLAGS)
+	@$(CC_LINUX) $(CFLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_XDBG_OBJS_LINUX) -o $@ $(LDFLAGS)
 
 $(BIN)/xar: $(XAR_TOOL_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_SOURCES_H) | $(BIN)
 	$(NEED_STDLIB)
@@ -215,10 +230,10 @@ $(BIN)/xenolsp.exe: $(LSP_SRCS) $(STDLIB_OBJS_WIN64) $(STDLIB_XDOC_OBJS_WIN64) \
 	@printf "🪟 Linking xenolsp.exe (win64)...\n"
 	@$(CC_WIN64) $(CFLAGS) $(LSP_SRCS) $(STDLIB_OBJS_WIN64) $(STDLIB_XDOC_OBJS_WIN64) -o $@ $(LDFLAGS)
 
-$(BIN)/xenovm.exe: $(XENOVM_SRCS) $(STDLIB_OBJS_WIN64) | $(BIN)
+$(BIN)/xenovm.exe: $(XENOVM_SRCS) $(STDLIB_OBJS_WIN64) $(STDLIB_XDBG_OBJS_WIN64) | $(BIN)
 	$(NEED_STDLIB)
 	@printf "🪟 Linking xenovm.exe (win64)...\n"
-	@$(CC_WIN64) $(CFLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_WIN64) -o $@ $(LDFLAGS)
+	@$(CC_WIN64) $(CFLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_WIN64) $(STDLIB_XDBG_OBJS_WIN64) -o $@ $(LDFLAGS)
 
 # ==========================================================
 # Sanitizer build (Linux) — ASan + UBSan
@@ -232,10 +247,10 @@ $(BIN)/xenoc-asan: $(XENOC_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_SOURCES_H) | $(BI
 	@printf "🧪 Linking xenoc-asan...\n"
 	@$(CC_LINUX) $(SAN_FLAGS) $(XENOC_SRCS) $(STDLIB_OBJS_LINUX) -o $@ $(LDFLAGS)
 
-$(BIN)/xenovm-asan: $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) | $(BIN)
+$(BIN)/xenovm-asan: $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_XDBG_OBJS_LINUX) | $(BIN)
 	$(NEED_STDLIB)
 	@printf "🧪 Linking xenovm-asan...\n"
-	@$(CC_LINUX) $(SAN_FLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) -o $@ $(LDFLAGS)
+	@$(CC_LINUX) $(SAN_FLAGS) $(XENOVM_SRCS) $(STDLIB_OBJS_LINUX) $(STDLIB_XDBG_OBJS_LINUX) -o $@ $(LDFLAGS)
 
 .PHONY: xeno_tests_asan
 xeno_tests_asan: $(BIN)/xenoc-asan $(BIN)/xenovm-asan
