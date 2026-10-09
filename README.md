@@ -658,9 +658,6 @@ The language, VM, and standard library are evolving together.
 - ✅ `print` / `assert` host entry points with XDocs  
 - ✅ Bytecode `--dump` covers methods, events, and static init  
 
-**Known limitations / planned:**
-- 🔲 Host/game console integration for the debugger break callback (CLI stdin is supported today)
-
 ---
 
 ## 📜 License
