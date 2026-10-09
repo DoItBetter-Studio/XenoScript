@@ -642,6 +642,7 @@ The language, VM, and standard library are evolving together.
 - ✅ Runtime `is` / `as` / `typeof` for object class hierarchy and interfaces  
 - ✅ Read-only runtime reflection for `Type`, object `.class`, fields, methods, parameters, enums, and nullable metadata
 - ✅ LSP server (`xenolsp`): diagnostics, hover, definition, references, completion  
+- ✅ Context-aware completion: keywords, members after `.`, globals, and **in-scope locals** (scoped snapshot with def/end line)  
 - ✅ Diagnostic ranges with accurate line and column spans  
 - ✅ XDocs: `#Docs` extraction, `.xdoc` sidecars, hover markdown, named params in stubs  
 - ✅ XDocs for project dependencies and embedded standard-library XDocs in `xenolsp`  
@@ -652,13 +653,12 @@ The language, VM, and standard library are evolving together.
 - ✅ Operator overloading and compound assignment (`+`, `==`, unary `-`, `+=`, …)  
 - ✅ Interactive line debugger (`xenovm --debug`, breakpoints, step in/out/over, stack / locals / fields)  
 - ✅ XBC v24 line tables for source mapping  
+- ✅ Optional debug-symbol sidecars (`.xdbg`) for named locals — written by `xenoc`, loaded by `xenovm --debug`  
 - ✅ Interface ClassDefs in the module (name-based `CALL_IFACE` dispatch)  
 - ✅ `print` / `assert` host entry points with XDocs  
 - ✅ Bytecode `--dump` covers methods, events, and static init  
 
 **Known limitations / planned:**
-- 🔲 Context-aware local variable completion inside function bodies (top-level + member completion is implemented)  
-- ✅ Optional debug-symbol sidecars (`.xdbg`) for named locals — written by `xenoc`, loaded by `xenovm --debug`  
 - 🔲 Host/game console integration for the debugger break callback (CLI stdin is supported today)
 
 ---
