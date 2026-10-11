@@ -87,6 +87,7 @@ typedef struct {
 typedef struct {
     Chunk   *chunk;              /* The chunk being executed                */
     uint8_t *ip;                 /* Instruction pointer into chunk->code    */
+    Value   *base_sp;            /* Value-stack pointer at frame entry      */
     Value    slots[XENO_LOCALS_MAX]; /* Local variable slots for this call  */
     /* Concrete type arguments for generic instantiation (e.g. T=string, K=int).
      * Populated by OP_NEW when constructing a generic class.
@@ -194,6 +195,16 @@ struct XenoVM {
 	size_t object_count;
 	size_t object_cap;
 
+	/* Phase 3 resource limits (0 = unlimited). Checked during execution;
+	 * exceeding either aborts with a runtime error. */
+	uint64_t    instr_budget;   /* max opcodes executed per xeno_vm_run */
+	uint64_t    instr_count;    /* opcodes executed so far this run      */
+	size_t      max_objects;    /* max live registered XenoObjects       */
+
+	/* Load policy — applied when loading .xbc / .xar into the VM. */
+	size_t      max_load_bytes;   /* reject blobs larger than this (0=16MB) */
+	bool        require_sealed;   /* refuse to run a module that is not sealed */
+
     /* ── Debugger (optional; zero cost when debug_enabled is false) ─────
      * Line info comes from Chunk.lines[] (XBC v22+). Breakpoints are
      * matched by source line number within the executing chunk.
@@ -231,6 +242,22 @@ void xeno_vm_init(XenoVM *vm);
 
 /* Tear down the VM and free any internally owned resources. */
 void xeno_vm_free(XenoVM *vm);
+
+/*
+ * Phase 3 resource limits. 0 means unlimited (the default after init).
+ *   max_instructions — abort after this many opcodes in one xeno_vm_run
+ *   max_objects      — abort when registered object count would exceed this
+ * Call after xeno_vm_init; safe to change between runs.
+ */
+void xeno_vm_set_limits(XenoVM *vm, uint64_t max_instructions, size_t max_objects);
+
+/*
+ * Load policy.
+ *   max_load_bytes — reject .xbc/.xar larger than this (0 = default 16 MiB)
+ *   require_sealed — if true, xeno_vm_run refuses modules that are not sealed
+ *                    after post-merge verification (defense in depth)
+ */
+void xeno_vm_set_load_policy(XenoVM *vm, size_t max_load_bytes, bool require_sealed);
 
 /*
  * Register a host function with full type information.

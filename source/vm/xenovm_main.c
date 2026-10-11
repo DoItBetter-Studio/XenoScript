@@ -41,8 +41,9 @@ uint64_t ts_start_ns, ts_end_ns;
 static XenoResult std_print(XenoVM *vm, int argc, Value *argv, Value *out) {
     (void)vm; (void)argc; (void)out;
     if (argv[0].is_null) { printf("null\n"); return XENO_OK; }
-    if (!argv[0].s) { printf("(null)\n"); return XENO_OK; }
-    printf("%s\n", argv[0].s);
+    const char *s = val_as_str(argv[0]);
+    if (!s) { printf("(null)\n"); return XENO_OK; }
+    printf("%s\n", s);
     return XENO_OK;
 }
 
@@ -329,6 +330,23 @@ static int run_xar(XenoVM *vm, const char *path) {
      * Search order: 1) vm->mod_path  2) same directory as this .xar */
     for (int i = 0; i < ar.manifest.dep_count; i++) {
         const char *dep_name = ar.manifest.dependencies[i];
+
+        /* Whitelist: alnum, underscore, hyphen only — no path separators. */
+        {
+            bool ok = dep_name[0] != '\0';
+            for (const char *c = dep_name; *c && ok; c++)
+            {
+                if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                      (*c >= '0' && *c <= '9') || *c == '_' || *c == '-'))
+                    ok = false;
+            }
+            if (!ok)
+            {
+                fprintf(stderr, "xenovm: invalid dependency name '%s'\n", dep_name);
+                xar_archive_free(&ar);
+                return 2;
+            }
+        }
 
         /* Skip if already in the pool */
         bool already_loaded = false;

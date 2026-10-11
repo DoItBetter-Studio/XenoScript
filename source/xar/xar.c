@@ -243,14 +243,13 @@ bool xar_manifest_from_json(XarManifest *m, const char *json, size_t len)
     memset(m, 0, sizeof(*m));
     const char *p = json;
     const char *end = json + len;
-    (void)end;
 
     p = json_skip_ws(p);
-    if (*p != '{')
+    if (p >= end || *p != '{')
         return false;
     p++;
 
-    while (*p)
+    while (p < end && *p)
     {
         p = json_skip_ws(p);
         if (*p == '}')
@@ -516,6 +515,10 @@ static bool rb_u32(RBuf *r, uint32_t *out)
 XarResult xar_read_mem(XarArchive *ar, const uint8_t *buf, size_t size)
 {
     memset(ar, 0, sizeof(*ar));
+    /* Hard size cap — hostile archives must not allocate unbounded memory. */
+    if (size > (size_t)64 * 1024 * 1024)
+        return XAR_ERR_CORRUPT;
+
     RBuf r = {buf, buf + size};
 
     /* Magic */
@@ -525,14 +528,23 @@ XarResult xar_read_mem(XarArchive *ar, const uint8_t *buf, size_t size)
     if (memcmp(magic, XAR_MAGIC, 4) != 0)
         return XAR_ERR_BAD_MAGIC;
 
-    /* Manifest JSON */
+    /* Manifest JSON — copy + NUL so the parser never walks past jlen. */
     uint32_t jlen;
     if (!rb_u32(&r, &jlen))
         return XAR_ERR_CORRUPT;
-    if ((size_t)(r.end - r.p) < jlen)
+    if (jlen > 1024 * 1024 || (size_t)(r.end - r.p) < jlen)
         return XAR_ERR_CORRUPT;
-    if (!xar_manifest_from_json(&ar->manifest, (const char *)r.p, jlen))
-        return XAR_ERR_CORRUPT;
+    {
+        char *jbuf = malloc((size_t)jlen + 1);
+        if (!jbuf)
+            return XAR_ERR_OOM;
+        memcpy(jbuf, r.p, jlen);
+        jbuf[jlen] = '\0';
+        bool ok = xar_manifest_from_json(&ar->manifest, jbuf, jlen);
+        free(jbuf);
+        if (!ok)
+            return XAR_ERR_CORRUPT;
+    }
     r.p += jlen;
 
     /* Chunks */
@@ -547,19 +559,29 @@ XarResult xar_read_mem(XarArchive *ar, const uint8_t *buf, size_t size)
         XarChunk *c = &ar->chunks[i];
 
         uint32_t name_len;
-        if (!rb_u32(&r, &name_len))
+        if (!rb_u32(&r, &name_len) || name_len >= XAR_MAX_NAME ||
+            !rb_bytes(&r, c->name, name_len))
+        {
+            ar->chunk_count = (int)i;
+            xar_archive_free(ar);
             return XAR_ERR_CORRUPT;
-        if (name_len >= XAR_MAX_NAME)
-            return XAR_ERR_CORRUPT;
-        if (!rb_bytes(&r, c->name, name_len))
-            return XAR_ERR_CORRUPT;
+        }
         c->name[name_len] = '\0';
 
         uint32_t data_len;
-        if (!rb_u32(&r, &data_len))
+        if (!rb_u32(&r, &data_len) || (size_t)(r.end - r.p) < data_len)
+        {
+            ar->chunk_count = (int)i;
+            xar_archive_free(ar);
             return XAR_ERR_CORRUPT;
-        if ((size_t)(r.end - r.p) < data_len)
+        }
+        /* Per-chunk and cumulative soft bounds */
+        if (data_len > 16u * 1024u * 1024u)
+        {
+            ar->chunk_count = (int)i;
+            xar_archive_free(ar);
             return XAR_ERR_CORRUPT;
+        }
 
         c->data = malloc(data_len);
         if (!c->data)
@@ -586,8 +608,13 @@ XarResult xar_read(XarArchive *ar, const char *path)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (sz < 0 || (size_t)sz > (size_t)64 * 1024 * 1024)
+    {
+        fclose(f);
+        return XAR_ERR_CORRUPT;
+    }
 
-    uint8_t *buf = malloc(sz);
+    uint8_t *buf = malloc((size_t)sz);
     if (!buf)
     {
         fclose(f);

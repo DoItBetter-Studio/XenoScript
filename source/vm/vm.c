@@ -97,6 +97,19 @@ void xeno_vm_init(XenoVM *vm)
     vm->frame_count = 0;
     vm->had_error = false;
     vm->has_source_module = false;
+    /* instr_budget / max_objects remain 0 = unlimited */
+}
+
+void xeno_vm_set_limits(XenoVM *vm, uint64_t max_instructions, size_t max_objects)
+{
+    vm->instr_budget = max_instructions;
+    vm->max_objects  = max_objects;
+}
+
+void xeno_vm_set_load_policy(XenoVM *vm, size_t max_load_bytes, bool require_sealed)
+{
+    vm->max_load_bytes = max_load_bytes;
+    vm->require_sealed = require_sealed;
 }
 
 /* ── Debugger API ────────────────────────────────────────────────────────── */
@@ -691,6 +704,14 @@ static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
     if (vm->stdlib_module_count >= 64)
         return false;
 
+    size_t limit = vm->max_load_bytes ? vm->max_load_bytes : (size_t)16 * 1024 * 1024;
+    if (size > limit)
+    {
+        fprintf(stderr, "vm: '%s' exceeds max_load_bytes (%zu > %zu)\n",
+                name, size, limit);
+        return false;
+    }
+
     XarArchive ar;
     if (xar_read_mem(&ar, data, size) != XAR_OK)
     {
@@ -710,16 +731,54 @@ static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
         XbcResult xr = xbc_read_mem(chunk_mod,
                                     ar.chunks[i].data,
                                     ar.chunks[i].size);
-        if (xr == XBC_OK)
+        if (xr != XBC_OK)
         {
-            /* __sinit__ is renamed to __sinit__N and class-remapped inside
-             * module_merge. Run them after all chunks are merged. */
-            module_merge(pool_mod, chunk_mod);
+            /* Fail closed: a single bad chunk aborts the whole archive load.
+             * Silently dropping it previously allowed partial/hostile mods. */
+            fprintf(stderr, "vm: chunk %d in '%s' failed verification: %s\n",
+                    i, name, xbc_result_str(xr));
             module_free(chunk_mod);
             free(chunk_mod);
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            xar_archive_free(&ar);
+            return false;
         }
+        /* __sinit__ is renamed to __sinit__N and class-remapped inside
+         * module_merge. Run them after all chunks are merged. */
+        if (!module_merge(pool_mod, chunk_mod))
+        {
+            fprintf(stderr, "vm: module_merge failed for chunk %d in '%s'\n",
+                    i, name);
+            module_free(chunk_mod);
+            free(chunk_mod);
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            xar_archive_free(&ar);
+            return false;
+        }
+        module_free(chunk_mod);
+        free(chunk_mod);
     }
     xar_archive_free(&ar);
+    pool_mod->from_load = true;
+
+    /* Phase 2: strict post-merge verify, then seal the image. */
+    {
+        XbcResult vr = xbc_verify_module(pool_mod, XBC_VERIFY_POST_MERGE);
+        if (vr != XBC_OK)
+        {
+            fprintf(stderr, "vm: post-merge verify failed for '%s': %s\n",
+                    name, xbc_result_str(vr));
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            return false;
+        }
+        module_seal(pool_mod);
+    }
 
     /* Apply embedded .xdbg local names (stdlib sidecars). Harmless when
      * debugging is off; required so step-into stdlib shows real names. */
@@ -745,6 +804,7 @@ static bool load_xar_into_pool(XenoVM *vm, const uint8_t *data, size_t size,
         frame->ip = sc->code;
         memset(frame->slots, 0, sizeof(frame->slots));
         frame->type_arg_count = 0;
+        frame->base_sp = vm->sp;
         xeno_execute(vm);
     }
 
@@ -818,12 +878,46 @@ bool xeno_vm_load_xar(XenoVM *vm, const XarArchive *ar)
         XbcResult xr = xbc_read_mem(chunk_mod,
                                     ar->chunks[i].data,
                                     ar->chunks[i].size);
-        if (xr == XBC_OK)
+        if (xr != XBC_OK)
         {
-            module_merge(pool_mod, chunk_mod);
+            fprintf(stderr, "vm: chunk %d in '%s' failed verification: %s\n",
+                    i, mod_name, xbc_result_str(xr));
             module_free(chunk_mod);
             free(chunk_mod);
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            return false;
         }
+        if (!module_merge(pool_mod, chunk_mod))
+        {
+            fprintf(stderr, "vm: module_merge failed for chunk %d in '%s'\n",
+                    i, mod_name);
+            module_free(chunk_mod);
+            free(chunk_mod);
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            return false;
+        }
+        module_free(chunk_mod);
+        free(chunk_mod);
+    }
+    pool_mod->from_load = true;
+
+    /* Phase 2: strict post-merge verify, then seal the image. */
+    {
+        XbcResult vr = xbc_verify_module(pool_mod, XBC_VERIFY_POST_MERGE);
+        if (vr != XBC_OK)
+        {
+            fprintf(stderr, "vm: post-merge verify failed for '%s': %s\n",
+                    mod_name, xbc_result_str(vr));
+            module_free(pool_mod);
+            free(pool_mod);
+            vm->stdlib_modules[vm->stdlib_module_count] = NULL;
+            return false;
+        }
+        module_seal(pool_mod);
     }
 
     /* Run every __sinit__* chunk with pool-relative class indices. */
@@ -845,6 +939,7 @@ bool xeno_vm_load_xar(XenoVM *vm, const XarArchive *ar)
         frame->ip = sc->code;
         memset(frame->slots, 0, sizeof(frame->slots));
         frame->type_arg_count = 0;
+        frame->base_sp = vm->sp;
         xeno_execute(vm);
     }
 
@@ -945,6 +1040,8 @@ void *xeno_vm_track(XenoVM *vm, void *p)
 
 static bool xeno_vm_register_object(XenoVM *vm, XenoObject *object)
 {
+	if (vm->max_objects > 0 && vm->object_count >= vm->max_objects)
+		return false; /* caller surfaces as OOM / runtime error */
 	if (vm->object_count == vm->object_cap)
 	{
 		size_t nc = vm->object_cap ? vm->object_cap * 2 : 64;
@@ -976,6 +1073,24 @@ static bool stack_overflow(XenoVM *vm)
 {
     return vm->sp >= vm->stack + XENO_STACK_MAX;
 }
+
+/* Push a call frame for `chunk`. Checks frame depth and value-stack room
+ * using the verifier-computed max_stack. Returns NULL on overflow. */
+static CallFrame *push_call_frame(XenoVM *vm, Chunk *chunk)
+{
+    if (!chunk || vm->frame_count >= XENO_FRAME_MAX)
+        return NULL;
+    if (vm->sp + chunk->max_stack > vm->stack + XENO_STACK_MAX)
+        return NULL;
+    CallFrame *f = &vm->frames[vm->frame_count++];
+    f->chunk = chunk;
+    f->ip = chunk->code;
+    f->base_sp = vm->sp;
+    memset(f->slots, 0, sizeof(f->slots));
+    f->type_arg_count = 0;
+    return f;
+}
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * THE MAIN EXECUTION LOOP
@@ -1195,11 +1310,12 @@ static bool class_matches_name(const Module *mod, const ClassDef *cls,
  * If `name` is empty, any non-null object matches (legacy tag-only check). */
 static bool xeno_object_is_named(Value v, const Module *mod, const char *name)
 {
-    if (v.is_null || !v.obj || !v.obj->class_def)
+    XenoObject *obj = val_as_obj(v);
+    if (!obj || !obj->class_def)
         return false;
     if (!name || !name[0])
         return true;
-    return class_matches_name(mod, v.obj->class_def, name);
+    return class_matches_name(mod, obj->class_def, name);
 }
 
 static char *int128_to_string(__int128_t v) {
@@ -1425,6 +1541,14 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         uint8_t instruction = READ_BYTE();
 
+        /* Phase 3: instruction budget (0 = unlimited). */
+        if (vm->instr_budget > 0)
+        {
+            if (++vm->instr_count > vm->instr_budget)
+                RUNTIME_ERROR("Instruction budget exceeded (%llu)",
+                              (unsigned long long)vm->instr_budget);
+        }
+
         /* ── DECODE + EXECUTE ─────────────────────────────────────────── */
         switch ((OpCode)instruction)
         {
@@ -1552,17 +1676,19 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             Value b = POP();
             Value a = POP();
-            /* Allocate a new string for the result.
-             * In the full VM this would go through a string intern table.
-             * For now: simple malloc. This leaks in long-running scripts
-             * — marked as a known TODO for the string GC pass. */
-            size_t la = a.s ? strlen(a.s) : 0;
-            size_t lb = b.s ? strlen(b.s) : 0;
+            char *as = val_as_str(a);
+            char *bs = val_as_str(b);
+            if (!as || !bs)
+                RUNTIME_ERROR("CONCAT_STR expects two strings");
+            size_t la = strlen(as);
+            size_t lb = strlen(bs);
+            if (la + lb > 16u * 1024u * 1024u)
+                RUNTIME_ERROR("String concatenation result too large");
             char *result = xeno_vm_track(vm, malloc(la + lb + 1));
-            if (a.s)
-                memcpy(result, a.s, la);
-            if (b.s)
-                memcpy(result + la, b.s, lb);
+            if (!result)
+                RUNTIME_ERROR("Out of memory in string concatenation");
+            memcpy(result, as, la);
+            memcpy(result + la, bs, lb);
             result[la + lb] = '\0';
             PUSH(val_str(result));
             break;
@@ -1627,10 +1753,8 @@ static XenoResult xeno_execute(XenoVM *vm)
                 break;
             case 2: /* bool */
             {
-                const unsigned char *representation =
-                    (const unsigned char *)&v.b;
                 s = malloc(6);
-                strcpy(s, representation[0] ? "true" : "false");
+                strcpy(s, val_truth(v) ? "true" : "false");
                 break;
             }
             case 5: /* unsigned int */
@@ -1684,15 +1808,23 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_NOT_BOOL:
         {
             Value a = POP();
-            PUSH(val_bool(!a.b));
+            PUSH(val_bool(!val_truth(a)));
             break;
         }
         case OP_AND_BOOL:
-            BINARY_OP(b, &&, val_bool);
+        {
+            Value b = POP();
+            Value a = POP();
+            PUSH(val_bool(val_truth(a) && val_truth(b)));
             break;
+        }
         case OP_OR_BOOL:
-            BINARY_OP(b, ||, val_bool);
+        {
+            Value b = POP();
+            Value a = POP();
+            PUSH(val_bool(val_truth(a) || val_truth(b)));
             break;
+        }
 
         /* ── Integer comparisons ────────────────────────────────── */
         case OP_CMP_EQ_INT:
@@ -1736,17 +1868,29 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         /* ── Bool/string equality ───────────────────────────────── */
         case OP_CMP_EQ_BOOL:
-            BINARY_OP(b, ==, val_bool);
+        {
+            Value b = POP();
+            Value a = POP();
+            PUSH(val_bool(val_truth(a) == val_truth(b)));
             break;
+        }
         case OP_CMP_NEQ_BOOL:
-            BINARY_OP(b, !=, val_bool);
+        {
+            Value b = POP();
+            Value a = POP();
+            PUSH(val_bool(val_truth(a) != val_truth(b)));
             break;
+        }
         case OP_CMP_EQ_STR:
         {
             Value b = POP();
             Value a = POP();
-            bool eq = (a.s && b.s) ? strcmp(a.s, b.s) == 0
-                                   : a.s == b.s;
+            if ((!is_val_null(a) && !val_is_kind(a, VAL_STR)) ||
+                (!is_val_null(b) && !val_is_kind(b, VAL_STR)))
+                RUNTIME_ERROR("CMP_EQ_STR expects strings");
+            char *as = val_as_str(a);
+            char *bs = val_as_str(b);
+            bool eq = (as && bs) ? strcmp(as, bs) == 0 : as == bs;
             PUSH(val_bool(eq));
             break;
         }
@@ -1754,8 +1898,12 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             Value b = POP();
             Value a = POP();
-            bool eq = (a.s && b.s) ? strcmp(a.s, b.s) == 0
-                                   : a.s == b.s;
+            if ((!is_val_null(a) && !val_is_kind(a, VAL_STR)) ||
+                (!is_val_null(b) && !val_is_kind(b, VAL_STR)))
+                RUNTIME_ERROR("CMP_NEQ_STR expects strings");
+            char *as = val_as_str(a);
+            char *bs = val_as_str(b);
+            bool eq = (as && bs) ? strcmp(as, bs) == 0 : as == bs;
             PUSH(val_bool(!eq));
             break;
         }
@@ -1768,7 +1916,12 @@ static XenoResult xeno_execute(XenoVM *vm)
             bool eq;
             if (vm->elem_kind_reg == TYPE_STRING)
             {
-                eq = (a.s && b.s) ? strcmp(a.s, b.s) == 0 : a.s == b.s;
+                if ((!is_val_null(a) && !val_is_kind(a, VAL_STR)) ||
+                    (!is_val_null(b) && !val_is_kind(b, VAL_STR)))
+                    RUNTIME_ERROR("CMP_EQ_VAL: expected strings");
+                char *as = val_as_str(a);
+                char *bs = val_as_str(b);
+                eq = (as && bs) ? strcmp(as, bs) == 0 : as == bs;
             }
             else if (vm->elem_kind_reg == TYPE_FLOAT ||
                      vm->elem_kind_reg == TYPE_DOUBLE)
@@ -1777,7 +1930,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
             else if (vm->elem_kind_reg == TYPE_BOOL)
             {
-                eq = (a.b == b.b);
+                eq = (val_truth(a) == val_truth(b));
             }
             else
             {
@@ -1793,7 +1946,12 @@ static XenoResult xeno_execute(XenoVM *vm)
             bool eq;
             if (vm->elem_kind_reg == TYPE_STRING)
             {
-                eq = (a.s && b.s) ? strcmp(a.s, b.s) == 0 : a.s == b.s;
+                if ((!is_val_null(a) && !val_is_kind(a, VAL_STR)) ||
+                    (!is_val_null(b) && !val_is_kind(b, VAL_STR)))
+                    RUNTIME_ERROR("CMP_EQ_VAL: expected strings");
+                char *as = val_as_str(a);
+                char *bs = val_as_str(b);
+                eq = (as && bs) ? strcmp(as, bs) == 0 : as == bs;
             }
             else if (vm->elem_kind_reg == TYPE_FLOAT ||
                      vm->elem_kind_reg == TYPE_DOUBLE)
@@ -1802,7 +1960,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
             else if (vm->elem_kind_reg == TYPE_BOOL)
             {
-                eq = (a.b == b.b);
+                eq = (val_truth(a) == val_truth(b));
             }
             else
             {
@@ -1829,7 +1987,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             int16_t offset = READ_I16();
             Value cond = POP();
-            if (!cond.b)
+            if (!val_truth(cond))
                 frame->ip += offset;
             break;
         }
@@ -1838,7 +1996,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             int16_t offset = READ_I16();
             Value cond = POP();
-            if (cond.b)
+            if (val_truth(cond))
                 frame->ip += offset;
             break;
         }
@@ -1861,22 +2019,19 @@ static XenoResult xeno_execute(XenoVM *vm)
                 RUNTIME_ERROR("Function expects %d argument(s), got %d",
                               callee->param_count, argc);
 
-            /* Set up a new call frame */
-            CallFrame *new_frame = &vm->frames[vm->frame_count++];
-            new_frame->chunk = callee;
-            new_frame->ip = callee->code;
-            memset(new_frame->slots, 0, sizeof(new_frame->slots));
-            new_frame->type_arg_count = 0;
-
-            /* Copy arguments from the value stack into the new frame's
-             * parameter slots. Arguments were pushed left-to-right,
-             * so argv[0] is deepest, argv[argc-1] is on top. */
+            /* Pop args first so base_sp is the post-call stack depth. */
+            Value argv_buf[32];
+            if (argc > 32)
+                RUNTIME_ERROR("Too many arguments");
             for (int i = argc - 1; i >= 0; i--)
-            {
-                new_frame->slots[i] = POP();
-            }
+                argv_buf[i] = POP();
 
-            /* Switch execution to the new frame */
+            CallFrame *new_frame = push_call_frame(vm, callee);
+            if (!new_frame)
+                RUNTIME_ERROR("Stack overflow: call would exceed value stack");
+            for (int i = 0; i < argc; i++)
+                new_frame->slots[i] = argv_buf[i];
+
             frame = new_frame;
             break;
         }
@@ -1912,22 +2067,22 @@ static XenoResult xeno_execute(XenoVM *vm)
                 RUNTIME_ERROR("CALL_STATIC: method '%s.%s' has no bound chunk",
                               cls->name, cls->methods[method_slot].name);
 
-            if (vm->frame_count >= XENO_FRAME_MAX)
-                RUNTIME_ERROR("Stack overflow: too many nested calls");
-
             Chunk *callee = &vm->module->chunks[fn_idx];
             if (argc != (uint8_t)callee->param_count)
                 RUNTIME_ERROR("Function expects %d argument(s), got %d",
                               callee->param_count, argc);
 
-            CallFrame *new_frame = &vm->frames[vm->frame_count++];
-            new_frame->chunk = callee;
-            new_frame->ip = callee->code;
-            memset(new_frame->slots, 0, sizeof(new_frame->slots));
-            new_frame->type_arg_count = 0;
-
+            Value argv_buf[32];
+            if (argc > 32)
+                RUNTIME_ERROR("Too many arguments");
             for (int i = argc - 1; i >= 0; i--)
-                new_frame->slots[i] = POP();
+                argv_buf[i] = POP();
+
+            CallFrame *new_frame = push_call_frame(vm, callee);
+            if (!new_frame)
+                RUNTIME_ERROR("Stack overflow: static call would exceed value stack");
+            for (int i = 0; i < argc; i++)
+                new_frame->slots[i] = argv_buf[i];
 
             frame = new_frame;
             break;
@@ -1936,16 +2091,24 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_RETURN:
         {
             Value result = POP(); /* The return value */
+            Value *entry_sp = frame->base_sp;
             vm->frame_count--;
+
+            /* Drop exception handlers that belonged to the returning frame. */
+            while (vm->handler_count > 0 &&
+                   vm->handlers[vm->handler_count - 1].frame_count > vm->frame_count)
+                vm->handler_count--;
+
+            /* Only restore sp if base_sp lies on the value stack. */
+            if (entry_sp && entry_sp >= vm->stack && entry_sp <= vm->stack + XENO_STACK_MAX)
+                vm->sp = entry_sp;
 
             if (vm->frame_count == 0)
             {
-                /* Returned from the top-level entry point — done */
                 PUSH(result);
                 return XENO_OK;
             }
 
-            /* Restore the caller's frame and push the return value */
             frame = &vm->frames[vm->frame_count - 1];
             PUSH(result);
             break;
@@ -1954,11 +2117,19 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_RETURN_VOID:
         {
             bool was_constructor = frame->chunk->is_constructor;
+            Value *entry_sp = frame->base_sp;
             vm->frame_count--;
+
+            /* Drop exception handlers that belonged to the returning frame. */
+            while (vm->handler_count > 0 &&
+                   vm->handlers[vm->handler_count - 1].frame_count > vm->frame_count)
+                vm->handler_count--;
+
+            if (entry_sp && entry_sp >= vm->stack && entry_sp <= vm->stack + XENO_STACK_MAX)
+                vm->sp = entry_sp;
 
             if (vm->frame_count == 0)
             {
-                /* Top-level void function returned — done */
                 return XENO_OK;
             }
 
@@ -1975,14 +2146,11 @@ static XenoResult xeno_execute(XenoVM *vm)
                     /* Push next handler's frame */
                     int fn_idx = vm->pending_fire_resolved[vm->pending_handler];
                     Value recv = vm->pending_fire_receivers[vm->pending_handler];
-                    if (vm->frame_count < XENO_FRAME_MAX)
                     {
                         Chunk *hchunk = &vm->module->chunks[fn_idx];
-                        CallFrame *hframe = &vm->frames[vm->frame_count++];
-                        hframe->chunk = hchunk;
-                        hframe->ip = hchunk->code;
-                        memset(hframe->slots, 0, sizeof(hframe->slots));
-                        hframe->type_arg_count = 0;
+                        CallFrame *hframe = push_call_frame(vm, hchunk);
+                        if (!hframe)
+                            RUNTIME_ERROR("Call stack overflow in event fire");
                         if (!is_val_null(recv))
                         {
                             hframe->slots[0] = recv;
@@ -2073,9 +2241,10 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_ARRAY_GET:
         {
             int64_t idx = POP().i;
-            XenoArray *arr = POP().arr;
+            Value av = POP();
+            XenoArray *arr = val_as_arr(av);
             if (!arr)
-                RUNTIME_ERROR("Null array dereference");
+                RUNTIME_ERROR("ARRAY_GET: not an array");
             if (idx < 0 || idx >= arr->length)
                 RUNTIME_ERROR("Array index %lld out of bounds (length %d)",
                               (long long)idx, arr->length);
@@ -2083,13 +2252,14 @@ static XenoResult xeno_execute(XenoVM *vm)
             PUSH(arr->elements[(int)idx]);
             break;
         }
-        case OP_ARRAY_SET:
+                case OP_ARRAY_SET:
         {
             Value val = POP();
             int64_t idx = POP().i;
-            XenoArray *arr = POP().arr;
+            Value av = POP();
+            XenoArray *arr = val_as_arr(av);
             if (!arr)
-                RUNTIME_ERROR("Null array dereference");
+                RUNTIME_ERROR("ARRAY_SET: not an array");
             if (idx < 0 || idx >= arr->length)
                 RUNTIME_ERROR("Array index %lld out of bounds (length %d)",
                               (long long)idx, arr->length);
@@ -2197,11 +2367,11 @@ static XenoResult xeno_execute(XenoVM *vm)
              * reference type. Interpreting an int/float bit-pattern as a
              * pointer is undefined behaviour and crashes typeof(42). */
             if ((tag == XTAG_OBJECT || tag == XTAG_CLASS_REF) &&
-                !v.is_null && v.obj && v.obj->class_def &&
-                v.obj->class_def->name[0])
+                val_as_obj(v) && val_as_obj(v)->class_def &&
+                val_as_obj(v)->class_def->name[0])
             {
                 tag = XTAG_OBJECT;
-                const char *rn = v.obj->class_def->name;
+                const char *rn = val_as_obj(v)->class_def->name;
                 tname = xeno_vm_track(vm, malloc(strlen(rn) + 1));
                 if (!tname)
                     RUNTIME_ERROR("Out of memory");
@@ -2221,7 +2391,7 @@ static XenoResult xeno_execute(XenoVM *vm)
              * 5=kind 6=base 7=elementType */
             uint8_t fid = READ_BYTE();
             Value v = POP();
-            XenoType *t = v.type;
+            XenoType *t = val_as_type(v);
             if (!t)
                 RUNTIME_ERROR("Null Type dereference");
             switch (fid)
@@ -2496,7 +2666,7 @@ static XenoResult xeno_execute(XenoVM *vm)
              * which: 0=interfaces 1=fields 2=methods */
             uint8_t which = READ_BYTE();
             Value tv = POP();
-            XenoType *t = tv.type;
+            XenoType *t = val_as_type(tv);
             if (!t || !t->class_def)
             {
                 XenoArray *empty = xeno_vm_track(
@@ -2641,8 +2811,8 @@ static XenoResult xeno_execute(XenoVM *vm)
             /* ( Type, string -- Field? ) */
             Value namev = POP();
             Value tv = POP();
-            XenoType *t = tv.type;
-            const char *fname = namev.s;
+            XenoType *t = val_as_type(tv);
+            const char *fname = val_as_str(namev);
             if (!t || !t->class_def || !fname)
             {
                 PUSH(val_null());
@@ -2677,8 +2847,8 @@ static XenoResult xeno_execute(XenoVM *vm)
             /* ( Type, string -- Method? ) */
             Value namev = POP();
             Value tv = POP();
-            XenoType *t = tv.type;
-            const char *mname = namev.s;
+            XenoType *t = val_as_type(tv);
+            const char *mname = val_as_str(namev);
             if (!t || !t->class_def || !mname)
             {
                 PUSH(val_null());
@@ -2712,7 +2882,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             uint8_t id = READ_BYTE();
             Value fv = POP();
-            XenoField *f = fv.field;
+            XenoField *f = val_as_field(fv);
             if (!f || !f->def)
                 RUNTIME_ERROR("Null Field dereference");
             const FieldDef *d = f->def;
@@ -2758,7 +2928,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             uint8_t id = READ_BYTE();
             Value mv = POP();
-            XenoMethod *m = mv.method;
+            XenoMethod *m = val_as_method(mv);
             if (!m || !m->def)
                 RUNTIME_ERROR("Null Method dereference");
             const MethodDef *d = m->def;
@@ -2806,7 +2976,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             /* ( Method, int -- Parameter? ) */
             Value idxv = POP();
             Value mv = POP();
-            XenoMethod *m = mv.method;
+            XenoMethod *m = val_as_method(mv);
             int idx = (int)idxv.i;
             if (!m || !m->def || idx < 0 || idx >= m->def->param_count)
             {
@@ -2829,7 +2999,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             uint8_t id = READ_BYTE();
             Value pv = POP();
-            XenoParam *p = pv.param;
+            XenoParam *p = val_as_param(pv);
             if (!p)
                 RUNTIME_ERROR("Null Parameter dereference");
             switch (id)
@@ -2945,6 +3115,8 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             /* Pop exception object off value stack */
             Value ex = POP();
+            if (!is_val_null(ex) && !val_as_obj(ex))
+                RUNTIME_ERROR("THROW expects an exception object");
 
             /* Walk handler stack for a matching catch clause */
             while (vm->handler_count > 0)
@@ -3099,8 +3271,8 @@ static XenoResult xeno_execute(XenoVM *vm)
                 {
                     bool name_match = strcmp(vm->event_table[ei].handlers[hi].fn_name, hname) == 0;
                     bool recv_match = is_bound
-                                          ? (!is_val_null(vm->event_table[ei].handlers[hi].receiver) &&
-                                             vm->event_table[ei].handlers[hi].receiver.obj == receiver.obj)
+                                          ? (val_as_obj(vm->event_table[ei].handlers[hi].receiver) != NULL &&
+                                             val_as_obj(vm->event_table[ei].handlers[hi].receiver) == val_as_obj(receiver))
                                           : is_val_null(vm->event_table[ei].handlers[hi].receiver);
                     if (name_match && recv_match)
                     {
@@ -3123,8 +3295,8 @@ static XenoResult xeno_execute(XenoVM *vm)
                 {
                     bool name_match = strcmp(vm->event_table[ei].handlers[hi].fn_name, hname) == 0;
                     bool recv_match = is_bound
-                                          ? (!is_val_null(vm->event_table[ei].handlers[hi].receiver) &&
-                                             vm->event_table[ei].handlers[hi].receiver.obj == receiver.obj)
+                                          ? (val_as_obj(vm->event_table[ei].handlers[hi].receiver) != NULL &&
+                                             val_as_obj(vm->event_table[ei].handlers[hi].receiver) == val_as_obj(receiver))
                                           : is_val_null(vm->event_table[ei].handlers[hi].receiver);
                     if (name_match && recv_match)
                     {
@@ -3185,7 +3357,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 if (!is_val_null(recv))
                 {
                     /* Bound delegate — resolve method name on receiver's class */
-                    XenoObject *obj = recv.obj;
+                    XenoObject *obj = val_as_obj(recv);
                     if (obj && obj->class_def)
                     {
                         ClassDef *cd = obj->class_def;
@@ -3244,17 +3416,13 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
 
             /* Push first handler's frame */
-            if (vm->frame_count >= XENO_FRAME_MAX)
-                RUNTIME_ERROR("Call stack overflow in event fire");
             {
                 int fn_idx = vm->pending_fire_resolved[0];
                 Value recv0 = vm->pending_fire_receivers[0];
                 Chunk *hchunk = &vm->module->chunks[fn_idx];
-                CallFrame *hframe = &vm->frames[vm->frame_count++];
-                hframe->chunk = hchunk;
-                hframe->ip = hchunk->code;
-                memset(hframe->slots, 0, sizeof(hframe->slots));
-                hframe->type_arg_count = 0;
+                CallFrame *hframe = push_call_frame(vm, hchunk);
+                if (!hframe)
+                    RUNTIME_ERROR("Call stack overflow in event fire");
                 if (!is_val_null(recv0))
                 {
                     /* Bound: slot 0 = receiver (this), args start at slot 1 */
@@ -3274,9 +3442,10 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         case OP_ARRAY_LEN:
         {
-            XenoArray *arr = POP().arr;
+            Value av = POP();
+            XenoArray *arr = val_as_arr(av);
             if (!arr)
-                RUNTIME_ERROR("Null array dereference");
+                RUNTIME_ERROR("ARRAY_LEN: not an array");
             PUSH(val_int(arr->length));
             break;
         }
@@ -3355,6 +3524,41 @@ static XenoResult xeno_execute(XenoVM *vm)
             for (int i = argc - 1; i >= 0; i--)
                 argv[i] = POP();
 
+            /* Enforce registered param_type_kinds via reference tags.
+             * TYPE_ANY skips (host must still use val_as_*). */
+            for (int i = 0; i < argc && i < 16; i++)
+            {
+                int expect = entry->param_type_kinds[i];
+                if (expect <= 0 || expect == (int)TYPE_ANY || expect == (int)TYPE_UNKNOWN)
+                    continue;
+                Value a = argv[i];
+                switch ((TypeKind)expect)
+                {
+                case TYPE_BOOL:
+                case TYPE_INT: case TYPE_LONG: case TYPE_SBYTE: case TYPE_SHORT:
+                case TYPE_BYTE: case TYPE_USHORT: case TYPE_UINT: case TYPE_ULONG:
+                case TYPE_CHAR: case TYPE_ENUM:
+                case TYPE_FLOAT: case TYPE_DOUBLE:
+                    if (is_val_null(a) || a.kind != 0)
+                        RUNTIME_ERROR("Host '%s' arg %d expected scalar", entry->name, i);
+                    break;
+                case TYPE_STRING:
+                    if (!val_as_str(a))
+                        RUNTIME_ERROR("Host '%s' arg %d expected string", entry->name, i);
+                    break;
+                case TYPE_ARRAY:
+                    if (!val_as_arr(a))
+                        RUNTIME_ERROR("Host '%s' arg %d expected array", entry->name, i);
+                    break;
+                case TYPE_OBJECT:
+                    if (!val_as_obj(a))
+                        RUNTIME_ERROR("Host '%s' arg %d expected object", entry->name, i);
+                    break;
+                default:
+                    break;
+                }
+            }
+
             /* Call the host function */
             Value result = val_int(0); /* Default return value */
             XenoResult hr = entry->fn(vm, argc, argv, &result);
@@ -3417,19 +3621,21 @@ static XenoResult xeno_execute(XenoVM *vm)
                 for (int i = argc - 1; i >= 0; i--)
                     args[i] = POP();
 
-                if (vm->frame_count >= XENO_FRAME_MAX)
-                    RUNTIME_ERROR("Stack overflow in constructor");
-
                 Chunk *ctor_chunk = &vm->module->chunks[cls->constructor_index];
                 if (ctor_chunk->code == NULL || ctor_chunk->count == 0)
                 {
                     RUNTIME_ERROR("Constructor '%s' has no bytecode (external stub not resolved)",
                                   vm->module->names[cls->constructor_index]);
                 }
-                CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
-                ctor_frame->chunk = ctor_chunk;
-                ctor_frame->ip = ctor_chunk->code;
-                memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
+                /* Push the object first so it survives constructor RETURN
+                 * (base_sp is set after the push). */
+                if (stack_overflow(vm))
+                    RUNTIME_ERROR("Stack overflow pushing new object");
+                PUSH(val_obj(obj));
+
+                CallFrame *ctor_frame = push_call_frame(vm, ctor_chunk);
+                if (!ctor_frame)
+                    RUNTIME_ERROR("Stack overflow in constructor");
 
                 /* Slot 0 = this, slots 1..argc = args */
                 ctor_frame->slots[0] = val_obj(obj);
@@ -3448,10 +3654,8 @@ static XenoResult xeno_execute(XenoVM *vm)
                         ctor_frame->type_args[_i] = TYPE_ANY;
                 }
 
-                frame = &vm->frames[vm->frame_count - 1];
-
-                /* Constructor runs and will hit OP_RETURN_VOID.
-                 * That will pop the frame and push a dummy — we'll POP it. */
+                frame = ctor_frame;
+                break;
             }
             else
             {
@@ -3461,10 +3665,8 @@ static XenoResult xeno_execute(XenoVM *vm)
                     tac = XENO_MAX_TYPE_ARGS;
                 for (int _i = 0; _i < tac; _i++)
                     (void)READ_BYTE();
+                PUSH(val_obj(obj));
             }
-
-            /* Push the new object */
-            PUSH(val_obj(obj));
             break;
         }
 
@@ -3472,9 +3674,9 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             uint8_t field_idx = READ_BYTE();
             Value v = POP();
-            XenoObject *obj = v.obj;
+            XenoObject *obj = val_as_obj(v);
             if (!obj)
-                RUNTIME_ERROR("Null object dereference");
+                RUNTIME_ERROR("GET_FIELD: not an object");
             if (field_idx >= obj->class_def->field_count)
                 RUNTIME_ERROR("Field index %d out of range", field_idx);
             PUSH(obj->fields[field_idx]);
@@ -3486,9 +3688,9 @@ static XenoResult xeno_execute(XenoVM *vm)
             uint8_t field_idx = READ_BYTE();
             Value val = POP();
             Value v = POP();
-            XenoObject *obj = v.obj;
+            XenoObject *obj = val_as_obj(v);
             if (!obj)
-                RUNTIME_ERROR("Null object dereference");
+                RUNTIME_ERROR("SET_FIELD: not an object");
             if (field_idx >= obj->class_def->field_count)
                 RUNTIME_ERROR("Field index %d out of range", field_idx);
             obj->fields[field_idx] = val;
@@ -3588,21 +3790,15 @@ static XenoResult xeno_execute(XenoVM *vm)
             if (iface_fn_idx >= vm->module->count)
                 RUNTIME_ERROR("Invalid method function index %d (interface dispatch)", iface_fn_idx);
 
-            if (vm->frame_count >= XENO_FRAME_MAX)
-                RUNTIME_ERROR("Stack overflow in interface method call");
-
             Chunk *method_chunk = &vm->module->chunks[iface_fn_idx];
-            CallFrame *method_frame = &vm->frames[vm->frame_count++];
-            method_frame->chunk = method_chunk;
-            method_frame->ip = method_chunk->code;
-            memset(method_frame->slots, 0, sizeof(method_frame->slots));
-
-            method_frame->type_arg_count = 0;
+            CallFrame *method_frame = push_call_frame(vm, method_chunk);
+            if (!method_frame)
+                RUNTIME_ERROR("Stack overflow in interface method call");
             method_frame->slots[0] = obj_val;
             for (int i = 0; i < argc; i++)
                 method_frame->slots[i + 1] = args[i];
 
-            frame = &vm->frames[vm->frame_count - 1];
+            frame = method_frame;
             break;
         }
 
@@ -3617,7 +3813,7 @@ static XenoResult xeno_execute(XenoVM *vm)
                 args[i] = POP();
             Value obj_val = POP();
 
-            if (!obj_val.obj)
+            if (!val_as_obj(obj_val))
                 RUNTIME_ERROR("Null object dereference in method call");
 
             ClassDef *cls = obj_val.obj->class_def;
@@ -3635,24 +3831,19 @@ static XenoResult xeno_execute(XenoVM *vm)
                 RUNTIME_ERROR("Method slot %d has no bound chunk (fn_idx=%d)",
                               slot, fn_idx);
 
-            if (vm->frame_count >= XENO_FRAME_MAX)
-                RUNTIME_ERROR("Stack overflow in method call");
-
             Chunk *method_chunk = &vm->module->chunks[fn_idx];
             if (!method_chunk->code)
                 RUNTIME_ERROR("Method '%s' is an unresolved stub",
                               vm->module->names[fn_idx]);
 
-            CallFrame *method_frame = &vm->frames[vm->frame_count++];
-            method_frame->chunk = method_chunk;
-            method_frame->ip = method_chunk->code;
-            memset(method_frame->slots, 0, sizeof(method_frame->slots));
-            method_frame->type_arg_count = 0;
+            CallFrame *method_frame = push_call_frame(vm, method_chunk);
+            if (!method_frame)
+                RUNTIME_ERROR("Stack overflow: method call would exceed value stack");
             method_frame->slots[0] = obj_val;
             for (int i = 0; i < argc; i++)
                 method_frame->slots[i + 1] = args[i];
 
-            frame = &vm->frames[vm->frame_count - 1];
+            frame = method_frame;
             break;
         }
 
@@ -3677,20 +3868,15 @@ static XenoResult xeno_execute(XenoVM *vm)
             if (fn_idx < 0 || fn_idx >= vm->module->count)
                 RUNTIME_ERROR("Parent class has no constructor");
 
-            if (vm->frame_count >= XENO_FRAME_MAX)
-                RUNTIME_ERROR("Stack overflow in super() call");
-
             Chunk *ctor_chunk = &vm->module->chunks[fn_idx];
-            CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
-            ctor_frame->chunk = ctor_chunk;
-            ctor_frame->ip = ctor_chunk->code;
-            memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
-            ctor_frame->type_arg_count = 0;
+            CallFrame *ctor_frame = push_call_frame(vm, ctor_chunk);
+            if (!ctor_frame)
+                RUNTIME_ERROR("Stack overflow: super() would exceed value stack");
             ctor_frame->slots[0] = frame->slots[0];
             for (int i = 0; i < argc; i++)
                 ctor_frame->slots[i + 1] = args[i];
 
-            frame = &vm->frames[vm->frame_count - 1];
+            frame = ctor_frame;
             break;
         }
 
@@ -3709,6 +3895,7 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
     vm->had_error = false;
     vm->sp = vm->stack;
     vm->frame_count = 0;
+    vm->instr_count = 0; /* Phase 3: reset per-run instruction counter */
 
     /* ── Fill hollow ClassDef shells in place ─────────────────────────
      *
@@ -3716,16 +3903,65 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
      * at their compile-time indices. Merging stdlib/deps *into* this module
      * replaces those shells via module_merge (name match + hollow detect)
      * without shifting any class indices. Do NOT rebuild as [stdlib|user] —
-     * that would renumber user classes and break absolute indices. */
+     * that would renumber user classes and break absolute indices.
+     *
+     * If the module is already sealed (prior successful run), skip merge —
+     * the image is immutable. */
     Module *run_mod = module;
-    for (int i = 0; i < vm->stdlib_module_count; i++)
-        module_merge(module, vm->stdlib_modules[i]);
+    if (!module->sealed)
+    {
+        for (int i = 0; i < vm->stdlib_module_count; i++)
+        {
+            if (!module_merge(module, vm->stdlib_modules[i]))
+            {
+                fprintf(stderr, "xenovm: module_merge failed (module sealed or OOM)\n");
+                return XENO_RUNTIME_ERROR;
+            }
+        }
 
-    /* Re-apply embedded .xdbg onto the final module. module_merge skips
-     * chunks that already exist (e.g. compile-staged copies without names),
-     * so pool-side symbols would otherwise never reach the running chunks. */
-    for (int i = 0; i < vm->stdlib_module_count; i++)
-        apply_embedded_xdbg(run_mod, vm->stdlib_loaded_names[i]);
+        /* Phase 2: strict post-merge re-verification, then seal. */
+        {
+            XbcResult vr = xbc_verify_module(run_mod, XBC_VERIFY_POST_MERGE);
+            if (vr != XBC_OK)
+            {
+                fprintf(stderr, "xenovm: post-merge verification failed: %s\n",
+                        xbc_result_str(vr));
+                return XENO_RUNTIME_ERROR;
+            }
+            module_seal(run_mod);
+        }
+
+        /* Re-apply embedded .xdbg onto the final module. module_merge skips
+         * chunks that already exist (e.g. compile-staged copies without names),
+         * so pool-side symbols would otherwise never reach the running chunks. */
+        for (int i = 0; i < vm->stdlib_module_count; i++)
+            apply_embedded_xdbg(run_mod, vm->stdlib_loaded_names[i]);
+    }
+
+    /* Host-fn index + arity via the single verifier decoder (not a second walk). */
+    {
+        int param_counts[XENO_HOST_FN_MAX];
+        for (int i = 0; i < vm->host_fn_count && i < XENO_HOST_FN_MAX; i++)
+            param_counts[i] = vm->host_fns[i].param_count;
+        XbcVerifyHostCtx hctx = {
+            .host_fn_count = vm->host_fn_count,
+            .param_counts = param_counts,
+        };
+        XbcResult hr = xbc_verify_module_ex(run_mod, XBC_VERIFY_POST_MERGE, &hctx);
+        if (hr != XBC_OK)
+        {
+            fprintf(stderr, "xenovm: host-call verification failed: %s\n",
+                    xbc_result_str(hr));
+            return XENO_RUNTIME_ERROR;
+        }
+    }
+
+    /* Load policy: require modules that originated from xbc_read and are sealed. */
+    if (vm->require_sealed && !(run_mod->sealed && run_mod->from_load))
+    {
+        fprintf(stderr, "xenovm: load policy requires a sealed, loaded module\n");
+        return XENO_RUNTIME_ERROR;
+    }
 
     vm->module = run_mod;
 
@@ -3750,6 +3986,7 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
         frame->ip = sinit_chunk->code;
         memset(frame->slots, 0, sizeof(frame->slots));
         frame->type_arg_count = 0;
+        frame->base_sp = vm->sp;
         XenoResult r = xeno_execute(vm);
         if (r != XENO_OK)
         {
@@ -3790,23 +4027,17 @@ XenoResult xeno_vm_run(XenoVM *vm, Module *module)
         /* Run constructor if present */
         if (cls->constructor_index >= 0)
         {
-            if (vm->frame_count >= XENO_FRAME_MAX)
+            Chunk *ctor_chunk = &run_mod->chunks[cls->constructor_index];
+            CallFrame *ctor_frame = push_call_frame(vm, ctor_chunk);
+            if (!ctor_frame)
             {
                 xeno_vm_error(vm, "Stack overflow starting @Mod constructor");
                 return XENO_RUNTIME_ERROR;
             }
-            Chunk *ctor_chunk = &run_mod->chunks[cls->constructor_index];
-            CallFrame *ctor_frame = &vm->frames[vm->frame_count++];
-            ctor_frame->chunk = ctor_chunk;
-            ctor_frame->ip = ctor_chunk->code;
-            memset(ctor_frame->slots, 0, sizeof(ctor_frame->slots));
-            ctor_frame->type_arg_count = 0;
             ctor_frame->slots[0] = val_obj(obj);
             XenoResult r = xeno_execute(vm);
             if (r != XENO_OK)
-            {
-                    return r;
-            }
+                return r;
         }
 
         /* Constructor-only entry point for mods */

@@ -83,11 +83,27 @@ typedef struct XenoField  XenoField;
 typedef struct XenoMethod XenoMethod;
 typedef struct XenoParam  XenoParam;
 
-/* Value: tagged union representing any XenoScript runtime value.
- * is_null == 1 means this is the null value regardless of the union contents.
- * This gives us an unambiguous null distinct from 0, false, 0.0, etc. */
+/* Reference-only kind tag. Scalars leave kind == 0. Only val_str / val_arr /
+ * val_obj / val_type / val_field / val_method / val_param stamp a tag.
+ * Arithmetic never reads kind; the ~15 pointer-deref sites reject untagged
+ * values so forged int bit-patterns cannot be used as heap pointers. */
+typedef enum {
+    VAL_REF_NONE = 0,   /* scalar or unset — not a checked reference */
+    VAL_STR      = 1,
+    VAL_OBJ      = 2,
+    VAL_ARR      = 3,
+    VAL_TYPE     = 4,
+    VAL_FIELD    = 5,
+    VAL_METHOD   = 6,
+    VAL_PARAM    = 7,
+} ValueRefKind;
+
+/* Value: untyped scalar union + optional reference tag.
+ * is_null == 1 is the null literal. kind is NOT a full type discriminant —
+ * ints/floats/bools share kind 0; only heap references are tagged. */
 typedef struct Value {
     uint8_t      is_null;   /* 1 = null literal, 0 = real value */
+    uint8_t      kind;      /* ValueRefKind — 0 for scalars */
     union {
         __int128_t   i;
         double       f;
@@ -102,19 +118,57 @@ typedef struct Value {
     };
 } Value;
 
-static inline Value val_int  (__int128_t  v) { Value r; r.is_null=0; r.i   = v; return r; }
-static inline Value val_float(double      v) { Value r; r.is_null=0; r.f   = v; return r; }
-static inline Value val_bool (bool        v) { Value r; r.is_null=0; r.b   = v; return r; }
-static inline Value val_str  (char       *v) { Value r; r.is_null=0; r.s   = v; return r; }
-static inline Value val_obj  (XenoObject *v) { Value r; r.is_null=0; r.obj = v; return r; }
-static inline Value val_arr  (XenoArray  *v) { Value r; r.is_null=0; r.arr = v; return r; }
-static inline Value val_type (XenoType   *v) { Value r; r.is_null=0; r.type= v; return r; }
-static inline Value val_field(XenoField  *v) { Value r; r.is_null=0; r.field = v; return r; }
-static inline Value val_method(XenoMethod *v){ Value r; r.is_null=0; r.method= v; return r; }
-static inline Value val_param(XenoParam  *v) { Value r; r.is_null=0; r.param = v; return r; }
-/* Null: is_null flag set, union cleared */
-static inline Value val_null (void)          { Value r; r.is_null=1; r.i   = 0; return r; }
+static inline Value val_int  (__int128_t  v) { Value r; r.is_null=0; r.kind=0;           r.i   = v; return r; }
+static inline Value val_float(double      v) { Value r; r.is_null=0; r.kind=0;           r.f   = v; return r; }
+static inline Value val_bool (bool        v) { Value r; r.is_null=0; r.kind=0;           r.b   = v; return r; }
+static inline Value val_str  (char       *v) { Value r; r.is_null=0; r.kind=VAL_STR;     r.s   = v; return r; }
+static inline Value val_obj  (XenoObject *v) { Value r; r.is_null=0; r.kind=VAL_OBJ;     r.obj = v; return r; }
+static inline Value val_arr  (XenoArray  *v) { Value r; r.is_null=0; r.kind=VAL_ARR;     r.arr = v; return r; }
+static inline Value val_type (XenoType   *v) { Value r; r.is_null=0; r.kind=VAL_TYPE;    r.type= v; return r; }
+static inline Value val_field(XenoField  *v) { Value r; r.is_null=0; r.kind=VAL_FIELD;   r.field = v; return r; }
+static inline Value val_method(XenoMethod *v){ Value r; r.is_null=0; r.kind=VAL_METHOD;  r.method= v; return r; }
+static inline Value val_param(XenoParam  *v) { Value r; r.is_null=0; r.kind=VAL_PARAM;   r.param = v; return r; }
+static inline Value val_null (void)          { Value r; r.is_null=1; r.kind=0;           r.i   = 0; return r; }
 static inline bool  is_val_null(Value v)     { return v.is_null != 0; }
+
+/* Read a Value as a boolean truth value without ever performing an lvalue
+ * read of the `.b` (_Bool) union member directly. A forged/mutated Value
+ * can share storage with `.b` while holding a non-0/1 bit pattern (e.g. an
+ * int constant loaded where the compiler would only ever have emitted a
+ * bool), and reading such a pattern as `_Bool` is undefined behavior in C
+ * (a trap representation), independent of the reference-kind tag, which
+ * only covers pointer members. Reading through `.i` instead has no trap
+ * representation and gives a well-defined "nonzero is true" semantics even
+ * for bytecode the compiler would never have produced. Every opcode that
+ * needs a bool's truth value must go through this helper instead of `.b`. */
+static inline bool  val_truth(Value v)       { return v.i != 0; }
+static inline bool  val_is_kind(Value v, ValueRefKind k) {
+    return !v.is_null && v.kind == (uint8_t)k;
+}
+/* Return the heap pointer if v is a non-null reference of kind k, else NULL.
+ * Host and VM deref sites must go through this (or val_is_kind) — never
+ * read .s/.obj/.arr/.type from an untagged Value. */
+static inline void *val_ref(Value v, ValueRefKind k) {
+    if (v.is_null || v.kind != (uint8_t)k)
+        return NULL;
+    switch (k) {
+    case VAL_STR:    return (void *)v.s;
+    case VAL_OBJ:    return (void *)v.obj;
+    case VAL_ARR:    return (void *)v.arr;
+    case VAL_TYPE:   return (void *)v.type;
+    case VAL_FIELD:  return (void *)v.field;
+    case VAL_METHOD: return (void *)v.method;
+    case VAL_PARAM:  return (void *)v.param;
+    default:         return NULL;
+    }
+}
+static inline char       *val_as_str   (Value v) { return (char *)val_ref(v, VAL_STR); }
+static inline XenoObject *val_as_obj   (Value v) { return (XenoObject *)val_ref(v, VAL_OBJ); }
+static inline XenoArray  *val_as_arr   (Value v) { return (XenoArray *)val_ref(v, VAL_ARR); }
+static inline XenoType   *val_as_type  (Value v) { return (XenoType *)val_ref(v, VAL_TYPE); }
+static inline XenoField  *val_as_field (Value v) { return (XenoField *)val_ref(v, VAL_FIELD); }
+static inline XenoMethod *val_as_method(Value v) { return (XenoMethod *)val_ref(v, VAL_METHOD); }
+static inline XenoParam  *val_as_param (Value v) { return (XenoParam *)val_ref(v, VAL_PARAM); }
 
 /* XenoArray: heap-allocated homogeneous array.
  * Defined after Value so the flexible elements[] member works. */
@@ -599,6 +653,7 @@ typedef struct {
     /* Frame info — set by the compiler, used by the VM */
     int  local_count;     /* Number of local variable slots needed          */
     int  param_count;     /* Number of parameters (occupy first N slots)    */
+    int  max_stack;       /* Peak value-stack depth (set by verifier)       */
     bool is_constructor;  /* True if this chunk is a class constructor.
                            * RETURN_VOID from a constructor does not push a
                            * dummy value — the object was already pushed by

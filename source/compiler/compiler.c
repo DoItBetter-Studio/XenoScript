@@ -64,9 +64,17 @@ void module_init(Module *m)
 	m->class_count = 0;
 	m->sinit_index = -1;
 	m->uses_stdlib = false;
+	m->sealed = false;
+	m->from_load = false;
 	memset(m->names, 0, sizeof(m->names));
 	memset(m->classes, 0, sizeof(m->classes));
 	memset(&m->metadata, 0, sizeof(m->metadata));
+}
+
+void module_seal(Module *m)
+{
+	if (m)
+		m->sealed = true;
 }
 
 static void attr_arg_free(AttrArg *a); /* forward declaration */
@@ -130,10 +138,18 @@ void module_free(Module *m)
 /* Grow the module's chunk array if needed, returns index of new slot */
 int module_add_chunk(Module *m)
 {
+	/* names[] is fixed at MODULE_MAX_FUNCTIONS — never exceed it. */
+	if (m->count >= MODULE_MAX_FUNCTIONS)
+		return -1;
 	if (m->count >= m->capacity)
 	{
 		int new_cap = m->capacity < 8 ? 8 : m->capacity * 2;
-		m->chunks = realloc(m->chunks, new_cap * sizeof(Chunk));
+		if (new_cap > MODULE_MAX_FUNCTIONS)
+			new_cap = MODULE_MAX_FUNCTIONS;
+		Chunk *grown = realloc(m->chunks, (size_t)new_cap * sizeof(Chunk));
+		if (!grown)
+			return -1;
+		m->chunks = grown;
 		m->capacity = new_cap;
 	}
 	int idx = m->count++;
@@ -659,17 +675,85 @@ static void chunk_remap_indices(Chunk *chunk,
 		case OP_LOAD_THIS:
 		case OP_I2F:
 		case OP_F2I:
+		case OP_PUSH_NULL:
+		case OP_IS_NULL:
+		case OP_THROW:
+		case OP_TRY_END:
+		case OP_LOAD_EXCEPTION:
+		case OP_TYPE_IS_INSTANCE:
+		case OP_TYPE_IS_ASSIGNABLE:
 			break; /* pc already advanced past opcode byte */
 
-		default:
-			pc++; /* safety: unknown/future opcode — skip one byte */
+		/* ── TRY_BEGIN: [int16 offset] ─────────────────────────────── */
+		case OP_TRY_BEGIN:
+			pc += 2;
 			break;
+
+		/* ── EXCEPTION_IS_TYPE: [u8 nlen][name] ───────────────────── */
+		case OP_EXCEPTION_IS_TYPE:
+		{
+			if (pc < n)
+			{
+				uint8_t nlen = code[pc++];
+				pc += nlen;
+			}
+			break;
+		}
+
+		/* ── TYPE_HAS_ATTR / TYPE_GET_ATTR_ARG / TYPE_GET_* ───────── */
+		case OP_TYPE_HAS_ATTR:
+		case OP_TYPE_GET_ATTR_ARG:
+		case OP_TYPE_GET_FIELD:
+		case OP_TYPE_GET_METHOD:
+		case OP_METHOD_PARAM_AT:
+			break; /* stack operands only */
+
+		/* ── EVENT family: variable-length names ─────────────────── */
+		case OP_EVENT_SUBSCRIBE:
+		case OP_EVENT_UNSUBSCRIBE:
+		case OP_EVENT_SUBSCRIBE_BOUND:
+		case OP_EVENT_UNSUBSCRIBE_BOUND:
+		case OP_EVENT_SUBSCRIBE_MEMBER:
+		case OP_EVENT_UNSUBSCRIBE_MEMBER:
+		{
+			if (pc < n)
+			{
+				uint8_t nlen = code[pc++];
+				pc += nlen;
+				if (pc < n)
+				{
+					uint8_t hnlen = code[pc++];
+					pc += hnlen;
+				}
+			}
+			break;
+		}
+		case OP_EVENT_FIRE:
+		case OP_EVENT_FIRE_MEMBER:
+		{
+			if (pc < n)
+			{
+				uint8_t nlen = code[pc++];
+				pc += nlen;
+				if (pc < n)
+					pc += 1; /* argc */
+			}
+			break;
+		}
+
+		default:
+			/* Unknown opcode: stop rather than desync the stream. */
+			return;
 		}
 	}
 }
 
 bool module_merge(Module *dst, const Module *src)
 {
+	/* Sealed images are immutable — refuse further grafting. */
+	if (dst && dst->sealed)
+		return false;
+
 	/* ── Add missing chunks from src into dst ────────────────────────── */
 	/* First pass: place all src chunks not already in dst.
 	 * User-owned chunks already in dst are left untouched.
@@ -680,6 +764,24 @@ bool module_merge(Module *dst, const Module *src)
 		return false;
 	for (int i = 0; i < src->count; i++)
 		sinit_dst[i] = -1;
+
+	/* Count only chunks that would actually be added (skip name dups). */
+	{
+		int add = 0;
+		for (int i = 0; i < src->count; i++)
+		{
+			const char *name = src->names[i];
+			if (strcmp(name, "__sinit__") == 0)
+				add++; /* always renamed unique */
+			else if (module_find(dst, name, (int)strlen(name)) < 0)
+				add++;
+		}
+		if (dst->count + add > MODULE_MAX_FUNCTIONS)
+		{
+			free(sinit_dst);
+			return false;
+		}
+	}
 
 	for (int i = 0; i < src->count; i++)
 	{
@@ -693,6 +795,11 @@ bool module_merge(Module *dst, const Module *src)
 		else if (module_find(dst, name, (int)strlen(name)) >= 0)
 			continue;
 		int idx = module_add_chunk(dst);
+		if (idx < 0)
+		{
+			free(sinit_dst);
+			return false;
+		}
 		if (!chunk_deep_copy(&dst->chunks[idx], &src->chunks[i]))
 		{
 			free(sinit_dst);
@@ -2023,7 +2130,8 @@ static void compile_expr(Compiler *c, const Expr *expr)
 			}
 		}
 		emit_op(c, OP_GET_FIELD, line);
-		emit_u16(c, (uint16_t)fslot, line);
+		/* OP_GET_FIELD operand is uint8 field index (matches VM / all other emits). */
+		emit_byte(c, (uint8_t)fslot, line);
 		int jmp_end = CURRENT_CHUNK(c)->count;
 		emit_op(c, OP_JUMP, line);
 		emit_u16(c, 0, line);
@@ -4462,6 +4570,11 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				break;
 			}
 			int fn_idx = module_add_chunk(c->module);
+			if (fn_idx < 0)
+			{
+				compile_error(c, s->line, "Too many functions");
+				break;
+			}
 			int namelen = s->fn_decl.length < 63 ? s->fn_decl.length : 63;
 			memcpy(c->module->names[fn_idx], s->fn_decl.name, namelen);
 			c->module->names[fn_idx][namelen] = '\0';
@@ -4720,6 +4833,11 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 				}
 
 				int fn_idx = module_add_chunk(c->module);
+				if (fn_idx < 0)
+				{
+					compile_error(c, s->line, "Too many functions (in class methods)");
+					break;
+				}
 
 				/* Build a unique mangled name: "ClassName.methodName" */
 				char mangled[128];
@@ -5046,6 +5164,13 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 	 * ──────────────────────────────────────────────────────────────────────────*/
 	{
 		int sinit_idx = module_add_chunk(c->module);
+		if (sinit_idx < 0)
+		{
+			compile_error(c, 0, "Too many functions (static init)");
+			c->module->sinit_index = -1;
+		}
+		else
+		{
 		memcpy(c->module->names[sinit_idx], "__sinit__", 9);
 		c->module->names[sinit_idx][9] = '\0';
 		c->module->sinit_index = sinit_idx;
@@ -5101,6 +5226,7 @@ bool compiler_compile_staged(Compiler *c, const Program *program, Module *module
 		c->current_class_ast = NULL;
 		CURRENT_CHUNK(c)->local_count = c->next_slot;
 		emit_op(c, OP_RETURN_VOID, 0);
+		} /* sinit_idx >= 0 */
 	}
 
 	for (StmtNode *n = program->stmts; n; n = n->next)

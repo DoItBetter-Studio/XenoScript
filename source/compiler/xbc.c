@@ -156,7 +156,12 @@ static uint64_t rb_u64(ReadBuf *rb) {
 static char *rb_str(ReadBuf *rb) {
     uint32_t len = rb_u32(rb);
     if (rb->error) return NULL;
-    char *s = malloc(len + 1);
+    /* Reject before allocating — a forged 4GB length must not malloc. */
+    if ((size_t)len > rb->size - rb->pos) {
+        rb->error = true;
+        return NULL;
+    }
+    char *s = malloc((size_t)len + 1);
     if (!s) { rb->error = true; return NULL; }
     if (len > 0 && !rb_read(rb, s, len)) { free(s); return NULL; }
     s[len] = '\0';
@@ -427,8 +432,10 @@ static bool serialize_module(WriteBuf *wb, const Module *module) {
  * DESERIALIZATION — ReadBuf -> Module
  * ───────────────────────────────────────────────────────────────────────────*/
 
-/* ── Read one AttrArg from the buffer ───────────────────────────────────── */
-static XbcResult rb_attr_arg(ReadBuf *rb, AttrArg *a) {
+/* ── Read one AttrArg from the buffer (depth-limited for nested arrays) ── */
+#define ATTR_ARG_MAX_DEPTH 8
+static XbcResult rb_attr_arg_depth(ReadBuf *rb, AttrArg *a, int depth) {
+    if (depth > ATTR_ARG_MAX_DEPTH) return XBC_ERR_CORRUPT;
     memset(a, 0, sizeof(AttrArg));
     a->kind = (AttrArgKind)rb_u8(rb);
     if (rb->error) return XBC_ERR_IO;
@@ -444,19 +451,23 @@ static XbcResult rb_attr_arg(ReadBuf *rb, AttrArg *a) {
         case ATTR_ARG_ARRAY: {
             uint8_t ecnt = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
+            if (ecnt > ATTR_MAX_ARGS) return XBC_ERR_CORRUPT;
             a->arr.count = (int)ecnt;
             if (ecnt == 0) { a->arr.elems = NULL; break; }
             a->arr.elems = calloc(ecnt, sizeof(AttrArg));
             if (!a->arr.elems) return XBC_ERR_OOM;
             for (int ei = 0; ei < (int)ecnt; ei++) {
-                XbcResult er = rb_attr_arg(rb, &a->arr.elems[ei]);
+                XbcResult er = rb_attr_arg_depth(rb, &a->arr.elems[ei], depth + 1);
                 if (er != XBC_OK) return er;
             }
             break;
         }
-        default: break;
+        default: return XBC_ERR_CORRUPT;
     }
     return XBC_OK;
+}
+static XbcResult rb_attr_arg(ReadBuf *rb, AttrArg *a) {
+    return rb_attr_arg_depth(rb, a, 0);
 }
 
 static XbcResult rb_attribute_instances(ReadBuf *rb,
@@ -691,6 +702,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
                         free(aname);
                         uint8_t argc = rb_u8(rb);
                         if (rb->error) return XBC_ERR_IO;
+                        if (argc > ATTR_MAX_ARGS) return XBC_ERR_CORRUPT;
                         inst->arg_count = (int)argc;
                         for (int ki = 0; ki < inst->arg_count; ki++) {
                             XbcResult er = rb_attr_arg(rb, &inst->args[ki]);
@@ -798,6 +810,8 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
         if (module->count >= MODULE_MAX_FUNCTIONS) return XBC_ERR_CORRUPT;
 
         int fn_idx = module_add_chunk(module);
+        if (fn_idx < 0)
+            return XBC_ERR_OOM;
         Chunk *chunk = &module->chunks[fn_idx];
 
         /* Name */
@@ -831,12 +845,16 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
                 char *s = rb_str(rb);
                 if (rb->error || !s) return XBC_ERR_OOM;
                 chunk_add_constant_str(chunk, s);
+            } else if (kind == CONST_FLOAT) {
+                int64_t raw = (int64_t)rb_u64(rb);
+                if (rb->error) return XBC_ERR_IO;
+                double d;
+                memcpy(&d, &raw, sizeof(d));
+                chunk_add_constant(chunk, val_float(d));
             } else {
                 int64_t raw = (int64_t)rb_u64(rb);
                 if (rb->error) return XBC_ERR_IO;
-				Value v; memset(&v, 0, sizeof(Value));
-                v.i = (__int128_t)raw;    /* sign-extend into __int128 */
-				chunk_add_constant(chunk, v);
+                chunk_add_constant(chunk, val_int((__int128_t)raw));
             }
         }
 
@@ -848,8 +866,11 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
         for (uint32_t i = 0; i < code_len; i++) {
             uint8_t byte = rb_u8(rb);
             if (rb->error) return XBC_ERR_IO;
-            chunk_write(chunk, byte, 0); /* line filled from table below */
+            if (chunk_write(chunk, byte, 0) < 0)
+                return XBC_ERR_OOM;
         }
+        if ((uint32_t)chunk->count != code_len)
+            return XBC_ERR_OOM;
 
         /* Source line table — RLE expand into chunk->lines[] */
         {
@@ -860,7 +881,8 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
                 uint32_t len  = rb_u32(rb);
                 uint32_t line = rb_u32(rb);
                 if (rb->error) return XBC_ERR_IO;
-                if (filled + len > code_len) return XBC_ERR_CORRUPT;
+                /* Avoid uint32 wrap: len > remaining is the safe form. */
+                if (len > code_len - filled) return XBC_ERR_CORRUPT;
                 if (chunk->lines) {
                     for (uint32_t k = 0; k < len; k++)
                         chunk->lines[filled + k] = (int)line;
@@ -891,13 +913,1172 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
  * PUBLIC INTERFACE
  * ───────────────────────────────────────────────────────────────────────────*/
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * BYTECODE VERIFIER
+ *
+ * Phase 1 (PRE_MERGE): structural + instruction boundaries after deserialize.
+ * Phase 2 (POST_MERGE): strict name resolution, arity, no hollow methods.
+ * Phase 3 (both modes): fall-off-the-end, constant kinds, stack-depth sim.
+ *
+ * Goal: reject hostile / hand-edited .xbc that would cause out-of-bounds
+ * reads, bad jumps, stack corruption, or invalid table indices.
+ *
+ * What we check:
+ *   1. Module table limits and cross-references (class/method/fn indices)
+ *   2. Every instruction decodes to a known opcode with complete operands
+ *   3. Jump / try / null-coalesce targets land on instruction starts
+ *   4. Const / local / function indices stay in range for this module
+ *   5. Non-empty chunks end in an unconditional terminator
+ *   6. LOAD_CONST_STR vs non-string pool entries (is_str)
+ *   7. Stack depth never goes negative or above XENO_STACK_MAX
+ *
+ * Still deferred:
+ *   - Host-fn index validity (host table is process-global)
+ * ───────────────────────────────────────────────────────────────────────────*/
+
+#include <stdio.h>
+#include <stdarg.h>
+
+static char g_xbc_ver_err[256];
+
+/* Must match XENO_STACK_MAX in vm.h — kept local so the verifier does not
+ * depend on the VM header. */
+#define VER_STACK_MAX 256
+
+static void ver_fail(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_xbc_ver_err, sizeof(g_xbc_ver_err), fmt, ap);
+    va_end(ap);
+}
+
+static bool ver_need(const Chunk *ch, int pos, int n)
+{
+    return n >= 0 && pos >= 0 && (size_t)pos + (size_t)n <= (size_t)ch->count;
+}
+
+static uint8_t ver_u8(const Chunk *ch, int *pos)
+{
+    return ch->code[(*pos)++];
+}
+
+static uint16_t ver_u16(const Chunk *ch, int *pos)
+{
+    uint16_t v = (uint16_t)ch->code[*pos] << 8 | ch->code[*pos + 1];
+    *pos += 2;
+    return v;
+}
+
+static int16_t ver_i16(const Chunk *ch, int *pos)
+{
+    return (int16_t)ver_u16(ch, pos);
+}
+
+static void ver_bit_set(uint8_t *bits, int i)
+{
+    bits[i >> 3] |= (uint8_t)(1u << (i & 7));
+}
+
+static bool ver_bit_test(const uint8_t *bits, int i)
+{
+    return (bits[i >> 3] >> (i & 7)) & 1;
+}
+
+/* Decode one instruction at *pos. On success advances *pos past operands
+ * and returns true. On failure leaves *pos undefined and returns false.
+ * If starts is non-NULL, records the instruction start for jump validation.
+ * mode selects pre-merge (hollow-tolerant) vs post-merge (strict) rules. */
+static bool ver_decode_one(const Module *module, const Chunk *ch,
+                           int *pos, uint8_t *starts, XbcVerifyMode mode,
+                           const XbcVerifyHostCtx *host)
+{
+    int start = *pos;
+    if (!ver_need(ch, start, 1))
+        return false;
+    if (starts)
+        ver_bit_set(starts, start);
+
+    uint8_t op = ver_u8(ch, pos);
+    bool strict = (mode == XBC_VERIFY_POST_MERGE);
+
+    switch ((OpCode)op)
+    {
+    /* ── zero operand ─────────────────────────────────────────────── */
+    case OP_ADD_INT: case OP_SUB_INT: case OP_MUL_INT: case OP_DIV_INT:
+    case OP_MOD_INT: case OP_NEGATE_INT:
+    case OP_ADD_FLOAT: case OP_SUB_FLOAT: case OP_MUL_FLOAT: case OP_DIV_FLOAT:
+    case OP_MOD_FLOAT: case OP_NEGATE_FLOAT:
+    case OP_CONCAT_STR:
+    case OP_NOT_BOOL: case OP_AND_BOOL: case OP_OR_BOOL:
+    case OP_CMP_EQ_INT: case OP_CMP_NEQ_INT: case OP_CMP_LT_INT:
+    case OP_CMP_LTE_INT: case OP_CMP_GT_INT: case OP_CMP_GTE_INT:
+    case OP_CMP_EQ_FLOAT: case OP_CMP_NEQ_FLOAT: case OP_CMP_LT_FLOAT:
+    case OP_CMP_LTE_FLOAT: case OP_CMP_GT_FLOAT: case OP_CMP_GTE_FLOAT:
+    case OP_CMP_EQ_BOOL: case OP_CMP_NEQ_BOOL:
+    case OP_CMP_EQ_STR: case OP_CMP_NEQ_STR:
+    case OP_CMP_EQ_VAL: case OP_CMP_NEQ_VAL:
+    case OP_POP:
+    case OP_RETURN: case OP_RETURN_VOID: case OP_MATCH_FAIL:
+    case OP_TRUNC_I8: case OP_TRUNC_U8: case OP_TRUNC_I16: case OP_TRUNC_U16:
+    case OP_TRUNC_I32: case OP_TRUNC_U32: case OP_TRUNC_U64: case OP_TRUNC_CHAR:
+    case OP_ARRAY_GET: case OP_ARRAY_SET: case OP_ARRAY_LEN:
+    case OP_LOAD_THIS: case OP_I2F: case OP_F2I:
+    case OP_PUSH_NULL: case OP_IS_NULL:
+    case OP_THROW: case OP_TRY_END: case OP_LOAD_EXCEPTION:
+    case OP_TYPE_IS_ASSIGNABLE: case OP_TYPE_IS_INSTANCE:
+    case OP_TYPE_GET_FIELD: case OP_TYPE_GET_METHOD:
+    case OP_TYPE_HAS_ATTR: case OP_TYPE_GET_ATTR_ARG:
+    case OP_METHOD_PARAM_AT:
+        return true;
+
+    /* ── u8 ───────────────────────────────────────────────────────── */
+    case OP_LOAD_CONST_BOOL:
+    case OP_LOAD_LOCAL:
+    case OP_STORE_LOCAL:
+    case OP_NEW_ARRAY:
+    case OP_GET_FIELD:
+    case OP_SET_FIELD:
+    case OP_TYPE_FIELD:
+    case OP_TYPE_NAMES:
+    case OP_FIELD_PROP:
+    case OP_METHOD_PROP:
+    case OP_PARAM_PROP:
+    {
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t a = ver_u8(ch, pos);
+        /* Frame slots are uint8; hard cap matches MAX_LOCALS / VM layout. */
+        if ((op == OP_LOAD_LOCAL || op == OP_STORE_LOCAL) && a >= 64)
+            return false;
+        return true;
+    }
+
+    /* ── u16 (const / host / jump-style) ──────────────────────────── */
+    case OP_LOAD_CONST_INT:
+    case OP_LOAD_CONST_FLOAT:
+    case OP_LOAD_CONST_STR:
+    {
+        if (!ver_need(ch, *pos, 2)) return false;
+        uint16_t idx = ver_u16(ch, pos);
+        if ((int)idx >= ch->constants.count) return false;
+        /* Constant kind tags required whenever the pool is non-empty. */
+        if (ch->constants.count > 0 && !ch->constants.is_str)
+        {
+            ver_fail("const pool missing is_str tags");
+            return false;
+        }
+        if (ch->constants.is_str)
+        {
+            int is_str = ch->constants.is_str[idx] != 0;
+            if (op == OP_LOAD_CONST_STR && !is_str)
+            {
+                ver_fail("LOAD_CONST_STR idx=%u is not a string constant",
+                         (unsigned)idx);
+                return false;
+            }
+            if ((op == OP_LOAD_CONST_INT || op == OP_LOAD_CONST_FLOAT) && is_str)
+            {
+                ver_fail("LOAD_CONST numeric idx=%u is a string constant",
+                         (unsigned)idx);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    case OP_JUMP:
+    case OP_JUMP_IF_FALSE:
+    case OP_JUMP_IF_TRUE:
+    case OP_NULL_COALESCE:
+    case OP_NULL_ASSERT:   /* [uint16 line] — width matches jumps; not a target */
+    case OP_TRY_BEGIN:
+    {
+        if (!ver_need(ch, *pos, 2)) return false;
+        (void)ver_u16(ch, pos); /* jump targets checked in second pass */
+        return true;
+    }
+
+    /* ── CALL family: u16 + u8 argc ───────────────────────────────── */
+    case OP_CALL:
+    {
+        /* [u16 fn_idx][u8 argc] — non-virtual; post-merge arity is exact */
+        if (!ver_need(ch, *pos, 3)) return false;
+        uint16_t fn = ver_u16(ch, pos);
+        uint8_t argc = ver_u8(ch, pos);
+        if ((int)fn >= module->count) return false;
+        if (strict)
+        {
+            const Chunk *callee = &module->chunks[fn];
+            if (callee->count <= 0)
+            {
+                ver_fail("OP_CALL fn=%u has no code", (unsigned)fn);
+                return false;
+            }
+            if ((int)argc != callee->param_count)
+            {
+                ver_fail("OP_CALL fn=%u argc=%u != param_count=%d",
+                         (unsigned)fn, (unsigned)argc, callee->param_count);
+                return false;
+            }
+        }
+        return true;
+    }
+    case OP_CALL_METHOD:
+    {
+        /* [u16 method_slot][u8 argc] — ClassDef.methods[] slot, not fn table */
+        if (!ver_need(ch, *pos, 3)) return false;
+        uint16_t slot = ver_u16(ch, pos);
+        (void)ver_u8(ch, pos);
+        if (slot >= CLASS_MAX_METHODS) return false;
+        return true;
+    }
+    case OP_CALL_SUPER:
+    {
+        /* [u16 parent_class_idx][u8 argc] */
+        if (!ver_need(ch, *pos, 3)) return false;
+        uint16_t par_ci = ver_u16(ch, pos);
+        (void)ver_u8(ch, pos);
+        if ((int)par_ci >= module->class_count) return false;
+        return true;
+    }
+    case OP_CALL_IFACE:
+    {
+        /* [u16 name_const_idx][u8 argc] */
+        if (!ver_need(ch, *pos, 3)) return false;
+        uint16_t name_idx = ver_u16(ch, pos);
+        (void)ver_u8(ch, pos);
+        if ((int)name_idx >= ch->constants.count) return false;
+        return true;
+    }
+
+    case OP_CALL_HOST:
+    {
+        if (!ver_need(ch, *pos, 3)) return false;
+        uint16_t host_idx = ver_u16(ch, pos);
+        uint8_t argc = ver_u8(ch, pos);
+        if (host)
+        {
+            if ((int)host_idx >= host->host_fn_count)
+            {
+                ver_fail("OP_CALL_HOST index %u >= host_fn_count %d",
+                         (unsigned)host_idx, host->host_fn_count);
+                return false;
+            }
+            if (host->param_counts)
+            {
+                int pc = host->param_counts[host_idx];
+                if (pc >= 0 && (int)argc != pc)
+                {
+                    ver_fail("OP_CALL_HOST idx=%u argc=%u != param_count=%d",
+                             (unsigned)host_idx, (unsigned)argc, pc);
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /* ── TO_STR: kind [+ optional class byte] ─────────────────────── */
+    case OP_TO_STR:
+    {
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t kind = ver_u8(ch, pos);
+        if (kind == 4)
+        {
+            if (!ver_need(ch, *pos, 1)) return false;
+            (void)ver_u8(ch, pos);
+        }
+        return true;
+    }
+
+    case OP_ARRAY_LIT:
+    {
+        if (!ver_need(ch, *pos, 2)) return false;
+        (void)ver_u8(ch, pos); /* count */
+        (void)ver_u8(ch, pos); /* elem_kind */
+        return true;
+    }
+
+    case OP_LOAD_STATIC:
+    case OP_STORE_STATIC:
+    {
+        /* [u8 class_idx][u8 field_idx]
+         * PRE: hollow shells may have field_count == 0 — table caps only.
+         * POST: class_idx in range and field_idx < real field_count. */
+        if (!ver_need(ch, *pos, 2)) return false;
+        uint8_t ci = ver_u8(ch, pos);
+        uint8_t fi = ver_u8(ch, pos);
+        if ((int)ci >= MODULE_MAX_CLASSES) return false;
+        if ((int)fi >= CLASS_MAX_FIELDS) return false;
+        if (strict)
+        {
+            if (!module || (int)ci >= module->class_count)
+            {
+                ver_fail("static access class_idx=%u out of range", (unsigned)ci);
+                return false;
+            }
+            int fc = module->classes[ci].field_count;
+            if ((int)fi >= fc)
+            {
+                ver_fail("static access class=%u field=%u >= field_count=%d",
+                         (unsigned)ci, (unsigned)fi, fc);
+                return false;
+            }
+        }
+        else if (module && (int)ci < module->class_count)
+        {
+            int fc = module->classes[ci].field_count;
+            if (fc > 0 && (int)fi >= fc)
+                return false;
+        }
+        return true;
+    }
+
+    /* ── length-prefixed name encodings ───────────────────────────── */
+    case OP_IS_TYPE:
+    case OP_AS_TYPE:
+    {
+        if (!ver_need(ch, *pos, 2)) return false;
+        (void)ver_u8(ch, pos); /* tag */
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen)) return false;
+        *pos += nlen;
+        return true;
+    }
+
+    case OP_TYPEOF:
+    {
+        if (!ver_need(ch, *pos, 3)) return false;
+        (void)ver_u8(ch, pos); /* tag */
+        (void)ver_u8(ch, pos); /* flags */
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen)) return false;
+        *pos += nlen;
+        return true;
+    }
+
+    case OP_EXCEPTION_IS_TYPE:
+    {
+        /* [u8 name_len][name bytes] */
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen)) return false;
+        *pos += nlen;
+        return true;
+    }
+
+    case OP_NEW:
+    {
+        /* [u8 nlen][name][u8 argc][u8 tac][tac kinds...]
+         * POST: class name must resolve in the module. */
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen + 2)) return false;
+        const uint8_t *name_bytes = &ch->code[*pos];
+        *pos += nlen;
+        (void)ver_u8(ch, pos); /* argc */
+        uint8_t tac = ver_u8(ch, pos);
+        if (tac > 8) tac = 8;
+        if (!ver_need(ch, *pos, tac)) return false;
+        *pos += tac;
+        if (strict && module)
+        {
+            char cname[CLASS_NAME_MAX];
+            if (nlen >= CLASS_NAME_MAX) nlen = CLASS_NAME_MAX - 1;
+            memcpy(cname, name_bytes, nlen);
+            cname[nlen] = '\0';
+            if (module_find_class(module, cname) < 0)
+            {
+                ver_fail("OP_NEW class '%s' not found", cname);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    case OP_CALL_STATIC:
+    {
+        /* [u8 nlen][name][u8 method_slot][u8 argc]
+         * PRE: only reject impossible slots (hollow shells ok).
+         * POST: class name must resolve and method_slot < method_count. */
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen + 2)) return false;
+        const uint8_t *name_bytes = &ch->code[*pos];
+        *pos += nlen;
+        uint8_t method_slot = ver_u8(ch, pos);
+        (void)ver_u8(ch, pos); /* argc */
+        if (method_slot >= CLASS_MAX_METHODS) return false;
+        if (strict && module)
+        {
+            char cname[CLASS_NAME_MAX];
+            if (nlen >= CLASS_NAME_MAX) nlen = CLASS_NAME_MAX - 1;
+            memcpy(cname, name_bytes, nlen);
+            cname[nlen] = '\0';
+            int ci = module_find_class(module, cname);
+            if (ci < 0)
+            {
+                ver_fail("OP_CALL_STATIC class '%s' not found", cname);
+                return false;
+            }
+            if ((int)method_slot >= module->classes[ci].method_count)
+            {
+                ver_fail("OP_CALL_STATIC '%s' method_slot=%u >= method_count=%d",
+                         cname, (unsigned)method_slot,
+                         module->classes[ci].method_count);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    case OP_EVENT_SUBSCRIBE:
+    case OP_EVENT_UNSUBSCRIBE:
+    case OP_EVENT_SUBSCRIBE_BOUND:
+    case OP_EVENT_UNSUBSCRIBE_BOUND:
+    case OP_EVENT_SUBSCRIBE_MEMBER:
+    case OP_EVENT_UNSUBSCRIBE_MEMBER:
+    {
+        /* [u8 ename_len][ename][u8 hname_len][hname] */
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen + 1)) return false;
+        *pos += nlen;
+        uint8_t hnlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, hnlen)) return false;
+        *pos += hnlen;
+        return true;
+    }
+
+    case OP_EVENT_FIRE:
+    case OP_EVENT_FIRE_MEMBER:
+    {
+        if (!ver_need(ch, *pos, 1)) return false;
+        uint8_t nlen = ver_u8(ch, pos);
+        if (!ver_need(ch, *pos, nlen + 1)) return false;
+        *pos += nlen;
+        (void)ver_u8(ch, pos); /* argc */
+        return true;
+    }
+
+    default:
+        ver_fail("unknown opcode %u", (unsigned)op);
+        return false;
+    }
+}
+
+static bool ver_chunk(const Module *module, const Chunk *ch, const char *name,
+                      XbcVerifyMode mode, const XbcVerifyHostCtx *host)
+{
+    if (!ch || ch->count < 0)
+    {
+        ver_fail("chunk '%s': invalid header", name ? name : "?");
+        return false;
+    }
+    /* Empty chunks are hollow external stubs pre-merge. Post-merge, emptiness
+     * is only accepted for chunks that nothing references (checked later). */
+    if (ch->count == 0)
+        return true;
+
+    if (ch->param_count < 0 || ch->local_count < 0)
+    {
+        ver_fail("chunk '%s': negative param/local count", name ? name : "?");
+        return false;
+    }
+    if (ch->param_count > 64 || ch->local_count > 64)
+    {
+        ver_fail("chunk '%s': param/local count > 64", name ? name : "?");
+        return false;
+    }
+
+    size_t bits_bytes = ((size_t)ch->count + 7) / 8;
+    uint8_t *starts = calloc(1, bits_bytes ? bits_bytes : 1);
+    if (!starts)
+    {
+        ver_fail("chunk '%s': out of memory", name ? name : "?");
+        return false;
+    }
+
+    /* Pass 1: decode every instruction, record starts. */
+    int pos = 0;
+    while (pos < ch->count)
+    {
+        int at = pos;
+        g_xbc_ver_err[0] = '\0';
+        if (!ver_decode_one(module, ch, &pos, starts, mode, host))
+        {
+            if (!g_xbc_ver_err[0])
+            {
+                /* Dump a few preceding bytes so operand-size desyncs are obvious. */
+                char hex[64] = {0};
+                int hpos = 0;
+                int from = at > 8 ? at - 8 : 0;
+                for (int i = from; i < at && i < ch->count && hpos < 50; i++)
+                    hpos += snprintf(hex + hpos, sizeof(hex) - (size_t)hpos,
+                                     "%02x ", ch->code[i]);
+                ver_fail("chunk '%s': decode failed at offset %d (op=%u) prev=[%s]",
+                         name ? name : "?", at,
+                         at < ch->count ? (unsigned)ch->code[at] : 0, hex);
+            }
+            else
+            {
+                /* prepend chunk context */
+                char buf[256];
+                snprintf(buf, sizeof(buf), "chunk '%s' @%d: %s",
+                         name ? name : "?", at, g_xbc_ver_err);
+                snprintf(g_xbc_ver_err, sizeof(g_xbc_ver_err), "%s", buf);
+            }
+            free(starts);
+            return false;
+        }
+    }
+    if (pos != ch->count)
+    {
+        ver_fail("chunk '%s': decode ended at %d, expected %d",
+                 name ? name : "?", pos, ch->count);
+        free(starts);
+        return false;
+    }
+
+    /* Pass 2: jump / try / coalesce targets must land on instruction starts. */
+    pos = 0;
+    while (pos < ch->count)
+    {
+        int start = pos;
+        uint8_t op = ch->code[pos++];
+        switch ((OpCode)op)
+        {
+        case OP_JUMP:
+        case OP_JUMP_IF_FALSE:
+        case OP_JUMP_IF_TRUE:
+        case OP_TRY_BEGIN:
+        {
+            /* Signed relative offset (matches VM READ_I16). */
+            int16_t off = (int16_t)((uint16_t)ch->code[pos] << 8 | ch->code[pos + 1]);
+            pos += 2;
+            int target = pos + (int)off;
+            /* target == count is a valid "jump past end" (fall off chunk). */
+            if (target < 0 || target >= ch->count)
+            {
+                ver_fail("chunk '%s': bad jump target %d from %d",
+                         name ? name : "?", target, start);
+                free(starts);
+                return false;
+            }
+            if (target < ch->count && !ver_bit_test(starts, target))
+            {
+                ver_fail("chunk '%s': jump from %d lands mid-instruction at %d",
+                         name ? name : "?", start, target);
+                free(starts);
+                return false;
+            }
+            break;
+        }
+        case OP_NULL_COALESCE:
+        {
+            /* VM uses unsigned READ_U16 — do not sign-extend. */
+            uint16_t uoff = (uint16_t)ch->code[pos] << 8 | ch->code[pos + 1];
+            pos += 2;
+            /* target = pos + uoff; reject wrap past end */
+            if ((size_t)pos + (size_t)uoff >= (size_t)ch->count)
+            {
+                ver_fail("chunk '%s': NULL_COALESCE target out of range from %d",
+                         name ? name : "?", start);
+                free(starts);
+                return false;
+            }
+            int target = pos + (int)uoff;
+            if (target < ch->count && !ver_bit_test(starts, target))
+            {
+                ver_fail("chunk '%s': NULL_COALESCE lands mid-instruction at %d",
+                         name ? name : "?", target);
+                free(starts);
+                return false;
+            }
+            break;
+        }
+        case OP_NULL_ASSERT:
+            /* u16 line number — not a control-flow target */
+            pos += 2;
+            break;
+        default:
+            /* Re-decode to advance pos without re-checking (already valid). */
+            pos = start;
+            if (!ver_decode_one(module, ch, &pos, NULL, mode, host))
+            {
+                ver_fail("chunk '%s': re-decode failed at %d",
+                         name ? name : "?", start);
+                free(starts);
+                return false;
+            }
+            break;
+        }
+    }
+
+    /* ── Pass 3: fall-off-the-end + stack-depth simulation ─────────────
+     * Walk instruction starts; compute net stack delta; propagate max
+     * depth along fall-through and jump edges. Reject negative depth or
+     * depth > VER_STACK_MAX. Require last instruction to be a terminator. */
+    {
+        int last_start = -1;
+        uint8_t last_op = 0;
+        pos = 0;
+        while (pos < ch->count)
+        {
+            last_start = pos;
+            last_op = ch->code[pos];
+            if (!ver_decode_one(module, ch, &pos, NULL, mode, host))
+            {
+                ver_fail("chunk '%s': stack-pass re-decode failed at %d",
+                         name ? name : "?", last_start);
+                free(starts);
+                return false;
+            }
+        }
+        if (last_start >= 0)
+        {
+            switch ((OpCode)last_op)
+            {
+            case OP_RETURN:
+            case OP_RETURN_VOID:
+            case OP_THROW:
+            case OP_JUMP:
+            case OP_MATCH_FAIL:
+                break; /* ok */
+            default:
+                ver_fail("chunk '%s': falls off end (last op=%u at %d)",
+                         name ? name : "?", (unsigned)last_op, last_start);
+                free(starts);
+                return false;
+            }
+        }
+
+        /* Stack-depth propagation with [min,max] per instruction.
+         * Underflow checked against min; overflow against max.
+         * -1 means unreachable. */
+        int16_t *dmin = (int16_t *)malloc((size_t)ch->count * sizeof(int16_t));
+        int16_t *dmax = (int16_t *)malloc((size_t)ch->count * sizeof(int16_t));
+        if (!dmin || !dmax)
+        {
+            ver_fail("chunk '%s': out of memory (stack sim)", name ? name : "?");
+            free(dmin); free(dmax);
+            free(starts);
+            return false;
+        }
+        for (int i = 0; i < ch->count; i++)
+            dmin[i] = dmax[i] = -1;
+        dmin[0] = dmax[0] = 0;
+
+        bool changed = true;
+        int guard = 0;
+        const int guard_max = ch->count + 4;
+        while (changed && guard < guard_max)
+        {
+            guard++;
+            changed = false;
+            pos = 0;
+            while (pos < ch->count)
+            {
+                int start = pos;
+                if (!ver_bit_test(starts, start) || dmin[start] < 0)
+                {
+                    /* Skip to next instruction start by decoding. */
+                    if (!ver_decode_one(module, ch, &pos, NULL, mode, host))
+                        break;
+                    continue;
+                }
+                uint8_t op = ch->code[start];
+                int next = start;
+                if (!ver_decode_one(module, ch, &next, NULL, mode, host))
+                    break;
+
+                /* Net stack delta for this opcode (post-instruction depth
+                 * relative to depth[start]). argc-bearing ops read operands. */
+                int delta = 0;
+                int argc = 0;
+                switch ((OpCode)op)
+                {
+                case OP_LOAD_CONST_INT: case OP_LOAD_CONST_FLOAT:
+                case OP_LOAD_CONST_BOOL: case OP_LOAD_CONST_STR:
+                case OP_LOAD_LOCAL: case OP_LOAD_THIS: case OP_LOAD_EXCEPTION:
+                case OP_PUSH_NULL: case OP_LOAD_STATIC:
+                case OP_TYPEOF: /* -- Type */
+                case OP_EXCEPTION_IS_TYPE: /* -- bool (reads caught_exception) */
+                    delta = +1;
+                    break;
+                case OP_NEW_ARRAY: /* pop length, push array */
+                    delta = 0;
+                    break;
+                case OP_ARRAY_LIT:
+                {
+                    uint8_t cnt = ch->code[start + 1];
+                    delta = 1 - (int)cnt; /* pop count elems, push array */
+                    break;
+                }
+                case OP_STORE_LOCAL: case OP_STORE_STATIC: case OP_POP:
+                case OP_JUMP_IF_FALSE: case OP_JUMP_IF_TRUE:
+                    delta = -1;
+                    break;
+                case OP_SET_FIELD: /* obj val -- */
+                    delta = -2;
+                    break;
+                case OP_GET_FIELD: /* obj -- val */
+                case OP_ARRAY_LEN: /* arr -- int */
+                case OP_TYPE_FIELD: case OP_TYPE_NAMES:
+                case OP_FIELD_PROP: case OP_METHOD_PROP: case OP_PARAM_PROP:
+                case OP_IS_NULL: case OP_NOT_BOOL: case OP_NEGATE_INT:
+                case OP_NEGATE_FLOAT: case OP_TO_STR: case OP_I2F: case OP_F2I:
+                case OP_TRUNC_I8: case OP_TRUNC_U8: case OP_TRUNC_I16:
+                case OP_TRUNC_U16: case OP_TRUNC_I32: case OP_TRUNC_U32:
+                case OP_TRUNC_U64: case OP_TRUNC_CHAR:
+                case OP_NULL_ASSERT: case OP_IS_TYPE: case OP_AS_TYPE:
+                case OP_TYPE_GET_FIELD: case OP_TYPE_GET_METHOD:
+                case OP_METHOD_PARAM_AT:
+                    delta = 0; /* pop 1 push 1, or assert keeps value */
+                    break;
+                case OP_ADD_INT: case OP_SUB_INT: case OP_MUL_INT: case OP_DIV_INT:
+                case OP_MOD_INT:
+                case OP_ADD_FLOAT: case OP_SUB_FLOAT: case OP_MUL_FLOAT:
+                case OP_DIV_FLOAT: case OP_MOD_FLOAT:
+                case OP_CONCAT_STR:
+                case OP_AND_BOOL: case OP_OR_BOOL:
+                case OP_CMP_EQ_INT: case OP_CMP_NEQ_INT: case OP_CMP_LT_INT:
+                case OP_CMP_LTE_INT: case OP_CMP_GT_INT: case OP_CMP_GTE_INT:
+                case OP_CMP_EQ_FLOAT: case OP_CMP_NEQ_FLOAT: case OP_CMP_LT_FLOAT:
+                case OP_CMP_LTE_FLOAT: case OP_CMP_GT_FLOAT: case OP_CMP_GTE_FLOAT:
+                case OP_CMP_EQ_BOOL: case OP_CMP_NEQ_BOOL:
+                case OP_CMP_EQ_STR: case OP_CMP_NEQ_STR:
+                case OP_CMP_EQ_VAL: case OP_CMP_NEQ_VAL:
+                case OP_ARRAY_GET: /* arr idx -- val */
+                case OP_TYPE_IS_INSTANCE: /* val Type -- bool */
+                case OP_TYPE_IS_ASSIGNABLE:
+                case OP_TYPE_HAS_ATTR: /* name Type -- bool */
+                    delta = -1; /* pop 2 push 1 */
+                    break;
+                case OP_TYPE_GET_ATTR_ARG: /* idx name Type -- str? */
+                    delta = -2; /* pop 3 push 1 */
+                    break;
+                case OP_ARRAY_SET: /* arr idx val -- */
+                    delta = -3;
+                    break;
+                case OP_JUMP: case OP_TRY_BEGIN: case OP_TRY_END:
+                case OP_MATCH_FAIL:
+                    delta = 0;
+                    break;
+                case OP_NULL_COALESCE:
+                    /* Fall-through pops null (delta -1); jump keeps value.
+                     * Use pops=1; per-edge join adjusts below. */
+                    delta = 0;
+                    break;
+                case OP_CALL: /* [u16 fn][u8 argc] — pop argc, push 1 */
+                    argc = ch->code[start + 3];
+                    delta = -argc + 1;
+                    break;
+                case OP_CALL_METHOD: /* this + args */
+                case OP_CALL_IFACE:
+                    argc = ch->code[start + 3];
+                    delta = -(argc + 1) + 1;
+                    break;
+                case OP_CALL_SUPER: /* args only; this is frame slot 0 */
+                    argc = ch->code[start + 3];
+                    delta = -argc; /* void constructor */
+                    break;
+                case OP_CALL_HOST:
+                    argc = ch->code[start + 3];
+                    delta = -argc + 1;
+                    break;
+                case OP_CALL_STATIC:
+                {
+                    /* [u8 nlen][name][u8 slot][u8 argc] */
+                    uint8_t nlen = ch->code[start + 1];
+                    argc = ch->code[start + 1 + 1 + nlen + 1];
+                    delta = -argc + 1;
+                    break;
+                }
+                case OP_NEW:
+                {
+                    uint8_t nlen = ch->code[start + 1];
+                    argc = ch->code[start + 1 + 1 + nlen];
+                    delta = -argc + 1;
+                    break;
+                }
+                case OP_RETURN: /* pops return value */
+                    delta = -1;
+                    break;
+                case OP_RETURN_VOID:
+                    delta = 0;
+                    break;
+                case OP_THROW: /* pops exception object */
+                    delta = -1;
+                    break;
+                case OP_EVENT_SUBSCRIBE: case OP_EVENT_UNSUBSCRIBE:
+                    delta = 0; /* names in operands */
+                    break;
+                case OP_EVENT_SUBSCRIBE_BOUND: case OP_EVENT_UNSUBSCRIBE_BOUND:
+                    delta = -1; /* pop receiver */
+                    break;
+                case OP_EVENT_SUBSCRIBE_MEMBER: case OP_EVENT_UNSUBSCRIBE_MEMBER:
+                    delta = -1; /* pop receiver object */
+                    break;
+                case OP_EVENT_FIRE: case OP_EVENT_FIRE_MEMBER:
+                {
+                    /* [u8 nlen][name][u8 argc] — pop argc args (+ receiver for MEMBER) */
+                    uint8_t nlen = ch->code[start + 1];
+                    uint8_t fac = ch->code[start + 2 + nlen];
+                    delta = (op == OP_EVENT_FIRE_MEMBER) ? -(int)fac - 1 : -(int)fac;
+                    break;
+                }
+                default:
+                    ver_fail("chunk '%s': unknown stack effect for op=%u at %d",
+                             name ? name : "?", (unsigned)op, start);
+                    free(dmin); free(dmax);
+                    free(starts);
+                    return false;
+                }
+
+                /* Minimum operands required on stack before this op. */
+                int pops = 0;
+                if (delta < 0)
+                    pops = -delta; /* lower bound; refined below */
+                switch ((OpCode)op)
+                {
+                case OP_ADD_INT: case OP_SUB_INT: case OP_MUL_INT: case OP_DIV_INT:
+                case OP_MOD_INT: case OP_ADD_FLOAT: case OP_SUB_FLOAT:
+                case OP_MUL_FLOAT: case OP_DIV_FLOAT: case OP_MOD_FLOAT:
+                case OP_CONCAT_STR: case OP_AND_BOOL: case OP_OR_BOOL:
+                case OP_CMP_EQ_INT: case OP_CMP_NEQ_INT: case OP_CMP_LT_INT:
+                case OP_CMP_LTE_INT: case OP_CMP_GT_INT: case OP_CMP_GTE_INT:
+                case OP_CMP_EQ_FLOAT: case OP_CMP_NEQ_FLOAT: case OP_CMP_LT_FLOAT:
+                case OP_CMP_LTE_FLOAT: case OP_CMP_GT_FLOAT: case OP_CMP_GTE_FLOAT:
+                case OP_CMP_EQ_BOOL: case OP_CMP_NEQ_BOOL:
+                case OP_CMP_EQ_STR: case OP_CMP_NEQ_STR:
+                case OP_CMP_EQ_VAL: case OP_CMP_NEQ_VAL:
+                case OP_ARRAY_GET: case OP_TYPE_IS_INSTANCE:
+                case OP_TYPE_IS_ASSIGNABLE: case OP_TYPE_HAS_ATTR:
+                case OP_SET_FIELD:
+                    pops = 2; break;
+                case OP_ARRAY_SET: case OP_TYPE_GET_ATTR_ARG:
+                    pops = 3; break;
+                case OP_GET_FIELD: case OP_ARRAY_LEN: case OP_TYPE_FIELD:
+                case OP_TYPE_NAMES: case OP_FIELD_PROP: case OP_METHOD_PROP:
+                case OP_PARAM_PROP: case OP_IS_NULL: case OP_NOT_BOOL:
+                case OP_NEGATE_INT: case OP_NEGATE_FLOAT: case OP_TO_STR:
+                case OP_I2F: case OP_F2I: case OP_NULL_ASSERT:
+                case OP_IS_TYPE: case OP_AS_TYPE: case OP_STORE_LOCAL:
+                case OP_STORE_STATIC: case OP_POP: case OP_JUMP_IF_FALSE:
+                case OP_JUMP_IF_TRUE: case OP_RETURN: case OP_THROW:
+                case OP_NEW_ARRAY: case OP_NULL_COALESCE:
+                case OP_TRUNC_I8: case OP_TRUNC_U8: case OP_TRUNC_I16:
+                case OP_TRUNC_U16: case OP_TRUNC_I32: case OP_TRUNC_U32:
+                case OP_TRUNC_U64: case OP_TRUNC_CHAR:
+                case OP_TYPE_GET_FIELD: case OP_TYPE_GET_METHOD:
+                case OP_METHOD_PARAM_AT:
+                    pops = 1; break;
+                case OP_ARRAY_LIT:
+                    pops = (int)ch->code[start + 1]; break;
+                case OP_CALL: case OP_CALL_HOST: case OP_CALL_STATIC:
+                    pops = argc; break;
+                case OP_CALL_METHOD: case OP_CALL_IFACE:
+                    pops = argc + 1; break;
+                case OP_CALL_SUPER:
+                    pops = argc; break;
+                case OP_NEW:
+                    pops = argc; break;
+                case OP_EVENT_SUBSCRIBE: case OP_EVENT_UNSUBSCRIBE:
+                    pops = 0; break;
+                case OP_EVENT_SUBSCRIBE_BOUND: case OP_EVENT_UNSUBSCRIBE_BOUND:
+                case OP_EVENT_SUBSCRIBE_MEMBER: case OP_EVENT_UNSUBSCRIBE_MEMBER:
+                    pops = 1; break;
+                case OP_EVENT_FIRE: case OP_EVENT_FIRE_MEMBER:
+                {
+                    uint8_t nlen = ch->code[start + 1];
+                    uint8_t fac = ch->code[start + 2 + nlen];
+                    pops = (op == OP_EVENT_FIRE_MEMBER) ? (int)fac + 1 : (int)fac;
+                    break;
+                }
+                default:
+                    break;
+                }
+                if ((int)dmin[start] < pops)
+                {
+                    ver_fail("chunk '%s': stack underflow at %d (op=%u need %d have %d)",
+                             name ? name : "?", start, (unsigned)op,
+                             pops, (int)dmin[start]);
+                    free(dmin); free(dmax);
+                    free(starts);
+                    return false;
+                }
+
+                int after_min = (int)dmin[start] + delta;
+                int after_max = (int)dmax[start] + delta;
+                /* NULL_COALESCE fall-through: pop null → after_min uses -1 */
+                if (op == OP_NULL_COALESCE)
+                    after_min = (int)dmin[start] - 1;
+                if (after_min < 0)
+                {
+                    ver_fail("chunk '%s': stack underflow at %d (op=%u min_depth=%d delta=%d)",
+                             name ? name : "?", start, (unsigned)op,
+                             (int)dmin[start], delta);
+                    free(dmin); free(dmax);
+                    free(starts);
+                    return false;
+                }
+                if (after_max > VER_STACK_MAX)
+                {
+                    ver_fail("chunk '%s': stack overflow at %d (max_depth %d > %d)",
+                             name ? name : "?", start, after_max, VER_STACK_MAX);
+                    free(dmin); free(dmax);
+                    free(starts);
+                    return false;
+                }
+
+                /* Propagate to successors. */
+                int is_term = (op == OP_RETURN || op == OP_RETURN_VOID ||
+                               op == OP_THROW || op == OP_MATCH_FAIL);
+                int is_uncond_jump = (op == OP_JUMP);
+
+                /* [min,max] join: min of mins, max of maxes. */
+                #define VER_JOIN_RANGE(tgt, amin, amax)                           \
+                    do {                                                          \
+                        int _t = (tgt);                                           \
+                        if (_t >= 0 && _t < ch->count)                            \
+                        {                                                         \
+                            if (dmin[_t] < 0)                                     \
+                            {                                                     \
+                                dmin[_t] = (int16_t)(amin);                       \
+                                dmax[_t] = (int16_t)(amax);                       \
+                                changed = true;                                   \
+                            }                                                     \
+                            else                                                  \
+                            {                                                     \
+                                if ((int)dmin[_t] > (amin))                       \
+                                { dmin[_t] = (int16_t)(amin); changed = true; }   \
+                                if ((int)dmax[_t] < (amax))                       \
+                                { dmax[_t] = (int16_t)(amax); changed = true; }   \
+                            }                                                     \
+                        }                                                         \
+                    } while (0)
+
+                if (!is_term && !is_uncond_jump && next < ch->count)
+                    VER_JOIN_RANGE(next, after_min, after_max);
+                if (op == OP_JUMP || op == OP_JUMP_IF_FALSE ||
+                    op == OP_JUMP_IF_TRUE || op == OP_TRY_BEGIN)
+                {
+                    int16_t off = (int16_t)((uint16_t)ch->code[start + 1] << 8 |
+                                            ch->code[start + 2]);
+                    int target = start + 3 + (int)off;
+                    VER_JOIN_RANGE(target, after_min, after_max);
+                }
+                else if (op == OP_NULL_COALESCE)
+                {
+                    /* non-null: keep value (depth unchanged relative to start)
+                     * null: pop then RHS pushes — still net 0 at join */
+                    uint16_t uoff = (uint16_t)ch->code[start + 1] << 8 |
+                                    ch->code[start + 2];
+                    int target = start + 3 + (int)uoff;
+                    VER_JOIN_RANGE(target, (int)dmin[start], (int)dmax[start]);
+                }
+                #undef VER_JOIN_RANGE
+
+                pos = next;
+            }
+        }
+        if (changed)
+        {
+            ver_fail("chunk '%s': stack-depth analysis did not converge",
+                     name ? name : "?");
+            free(dmin); free(dmax);
+            free(starts);
+            return false;
+        }
+        {
+            int peak = 0;
+            for (int i = 0; i < ch->count; i++)
+                if (dmax[i] > peak) peak = dmax[i];
+            /* Drop const to record peak — Module is not sealed yet. */
+            ((Chunk *)ch)->max_stack = peak;
+        }
+        free(dmin); free(dmax);
+    }
+
+    free(starts);
+    return true;
+}
+
+XbcResult xbc_verify_module(const Module *module, XbcVerifyMode mode)
+{
+    return xbc_verify_module_ex(module, mode, NULL);
+}
+
+XbcResult xbc_verify_module_ex(const Module *module, XbcVerifyMode mode,
+                               const XbcVerifyHostCtx *host)
+{
+    g_xbc_ver_err[0] = '\0';
+    if (!module)
+    {
+        ver_fail("null module");
+        return XBC_ERR_CORRUPT;
+    }
+
+    bool strict = (mode == XBC_VERIFY_POST_MERGE);
+
+    if (module->count < 0 || module->count > MODULE_MAX_FUNCTIONS)
+    {
+        ver_fail("bad function count %d", module->count);
+        return XBC_ERR_CORRUPT;
+    }
+    if (module->class_count < 0 || module->class_count > MODULE_MAX_CLASSES)
+    {
+        ver_fail("bad class count %d", module->class_count);
+        return XBC_ERR_CORRUPT;
+    }
+    if (module->sinit_index < -1 || module->sinit_index >= module->count)
+    {
+        ver_fail("bad sinit_index %d", module->sinit_index);
+        return XBC_ERR_CORRUPT;
+    }
+
+    for (int ci = 0; ci < module->class_count; ci++)
+    {
+        const ClassDef *cls = &module->classes[ci];
+        if (cls->field_count < 0 || cls->field_count > CLASS_MAX_FIELDS)
+        {
+            ver_fail("class '%s': bad field_count %d", cls->name, cls->field_count);
+            return XBC_ERR_CORRUPT;
+        }
+        if (cls->method_count < 0 || cls->method_count > CLASS_MAX_METHODS)
+        {
+            ver_fail("class '%s': bad method_count %d", cls->name, cls->method_count);
+            return XBC_ERR_CORRUPT;
+        }
+        if (cls->event_count < 0 || cls->event_count > CLASS_MAX_EVENTS)
+        {
+            ver_fail("class '%s': bad event_count %d", cls->name, cls->event_count);
+            return XBC_ERR_CORRUPT;
+        }
+
+        /* parent_index: -1 = none; otherwise must be in range. */
+        if (cls->parent_index < -1 ||
+            (cls->parent_index >= module->class_count && cls->parent_index != -1))
+        {
+            ver_fail("class '%s': bad parent_index %d (class_count=%d)",
+                     cls->name, cls->parent_index, module->class_count);
+            return XBC_ERR_CORRUPT;
+        }
+
+        /* constructor_index: -1 ok for interfaces; concrete classes post-merge
+         * must point at a chunk with code when a constructor is declared. */
+        if (cls->constructor_index < -1 ||
+            cls->constructor_index >= module->count)
+        {
+            ver_fail("class '%s': bad constructor_index %d",
+                     cls->name, cls->constructor_index);
+            return XBC_ERR_CORRUPT;
+        }
+        if (strict && !cls->is_interface && cls->constructor_index >= 0)
+        {
+            if (module->chunks[cls->constructor_index].count <= 0)
+            {
+                ver_fail("class '%s': constructor chunk has no code", cls->name);
+                return XBC_ERR_CORRUPT;
+            }
+        }
+
+        for (int mi = 0; mi < cls->method_count; mi++)
+        {
+            int fn = cls->methods[mi].fn_index;
+            /* PRE: hollow external methods may use -1 until merge resolves them.
+             * POST: concrete methods must resolve to a real chunk with code.
+             *       Interface methods are intentionally abstract (fn_index=-1). */
+            if (strict)
+            {
+                if (cls->is_interface)
+                {
+                    if (fn < -1 || fn >= module->count)
+                    {
+                        ver_fail("class '%s' method '%s': bad fn_index %d",
+                                 cls->name, cls->methods[mi].name, fn);
+                        return XBC_ERR_CORRUPT;
+                    }
+                }
+                else
+                {
+                    if (fn < 0 || fn >= module->count)
+                    {
+                        ver_fail("class '%s' method '%s': unresolved fn_index %d",
+                                 cls->name, cls->methods[mi].name, fn);
+                        return XBC_ERR_CORRUPT;
+                    }
+                    if (module->chunks[fn].count <= 0)
+                    {
+                        ver_fail("class '%s' method '%s': chunk has no code",
+                                 cls->name, cls->methods[mi].name);
+                        return XBC_ERR_CORRUPT;
+                    }
+                }
+            }
+            else if (fn < -1 || fn >= module->count)
+            {
+                ver_fail("class '%s' method '%s': bad fn_index %d",
+                         cls->name, cls->methods[mi].name, fn);
+                return XBC_ERR_CORRUPT;
+            }
+            if (cls->methods[mi].param_count < 0 ||
+                cls->methods[mi].param_count > METHOD_MAX_PARAMS)
+            {
+                ver_fail("class '%s' method '%s': bad param_count %d",
+                         cls->name, cls->methods[mi].name,
+                         cls->methods[mi].param_count);
+                return XBC_ERR_CORRUPT;
+            }
+        }
+    }
+
+    /* Parent-chain cycle detection (post-merge meaningful; cheap always). */
+    for (int ci = 0; ci < module->class_count; ci++)
+    {
+        int seen[MODULE_MAX_CLASSES];
+        int nseen = 0;
+        int cur = ci;
+        while (cur >= 0)
+        {
+            for (int s = 0; s < nseen; s++)
+            {
+                if (seen[s] == cur)
+                {
+                    ver_fail("class '%s': parent_index cycle",
+                             module->classes[ci].name);
+                    return XBC_ERR_CORRUPT;
+                }
+            }
+            if (nseen >= MODULE_MAX_CLASSES) break;
+            seen[nseen++] = cur;
+            cur = module->classes[cur].parent_index;
+            if (cur < -1 || cur >= module->class_count)
+                break; /* range already checked */
+        }
+    }
+
+    for (int i = 0; i < module->count; i++)
+    {
+        const char *name = (module->names[i][0]) ? module->names[i] : "?";
+        if (!ver_chunk(module, &module->chunks[i], name, mode, host))
+            return XBC_ERR_CORRUPT;
+    }
+
+    return XBC_OK;
+}
+
 const char *xbc_result_str(XbcResult r) {
     switch (r) {
         case XBC_OK:              return "OK";
         case XBC_ERR_IO:          return "I/O error";
         case XBC_ERR_BAD_MAGIC:   return "Not a valid .xbc file";
         case XBC_ERR_BAD_VERSION: return "Unsupported .xbc version";
-        case XBC_ERR_CORRUPT:     return "File appears corrupt";
+        case XBC_ERR_CORRUPT:
+            if (g_xbc_ver_err[0])
+                return g_xbc_ver_err;
+            return "File appears corrupt or failed verification";
         case XBC_ERR_OOM:         return "Out of memory";
         default:                  return "Unknown error";
     }
@@ -921,7 +2102,19 @@ XbcResult xbc_write_mem(const Module *module, uint8_t **buf, size_t *size) {
 XbcResult xbc_read_mem(Module *module, const uint8_t *buf, size_t size) {
     ReadBuf rb;
     rb_init(&rb, buf, size);
-    return deserialize_module(module, &rb);
+    XbcResult r = deserialize_module(module, &rb);
+    if (r != XBC_OK)
+        return r;
+    /* Reject hostile / malformed bytecode before the Module escapes.
+     * PRE_MERGE: hollow stubs (empty code, fn_index=-1) are still allowed. */
+    r = xbc_verify_module(module, XBC_VERIFY_PRE_MERGE);
+    if (r != XBC_OK) {
+        module_free(module);
+        memset(module, 0, sizeof(*module));
+    } else {
+        module->from_load = true;
+    }
+    return r;
 }
 
 XbcResult xbc_write(const Module *module, const char *path) {

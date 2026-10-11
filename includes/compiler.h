@@ -70,6 +70,14 @@ typedef struct {
      * is merged so class indices match compile-time layout. */
     bool        uses_stdlib;
 
+    /* True after successful XBC_VERIFY_POST_MERGE. Sealed modules reject
+     * further module_merge / bytecode mutation; the image is trusted. */
+    bool        sealed;
+
+    /* Set by xbc_read / xbc_read_mem. Distinguishes loaded bytecode from
+     * in-process compilation (vm_run_source). Load policy can require this. */
+    bool        from_load;
+
     /* Mod metadata — only populated if @Mod annotation was present */
     ModMetadata metadata;
 } Module;
@@ -80,6 +88,10 @@ int    module_find(const Module *m, const char *name, int len); /* returns index
 int    module_find_class(const Module *m, const char *name);    /* returns index or -1 */
 void   module_disassemble(const Module *m);   /* disassemble all chunks */
 int    module_add_chunk(Module *m);           /* add and init a new chunk slot */
+
+/* Mark module sealed after post-merge verification. Further module_merge
+ * into a sealed module fails. */
+void   module_seal(Module *m);
 
 /* Scan ClassDef.attributes for an @Mod instance and populate module->metadata.
  * Must be called after compilation and before writing the XBC/XAR manifest.

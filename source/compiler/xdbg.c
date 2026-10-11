@@ -99,6 +99,42 @@ static bool wb_str(FILE *f, const char *s)
 	return n == 0 || fwrite(s, 1, n, f) == n;
 }
 
+static bool rb_u8(FILE *f, uint8_t *v)  { return fread(v, 1, 1, f) == 1; }
+static bool rb_u16(FILE *f, uint16_t *v)
+{
+	uint8_t b[2];
+	if (fread(b, 1, 2, f) != 2) return false;
+	*v = (uint16_t)b[0] | ((uint16_t)b[1] << 8);
+	return true;
+}
+static bool rb_u32(FILE *f, uint32_t *v)
+{
+	uint8_t b[4];
+	if (fread(b, 1, 4, f) != 4) return false;
+	*v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+		 ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+	return true;
+}
+static bool rb_str(FILE *f, char *buf, size_t cap)
+{
+	uint16_t n = 0;
+	if (!rb_u16(f, &n)) return false;
+	if (n >= cap)
+	{
+		/* skip overflow */
+		if (cap > 0) buf[0] = '\0';
+		while (n--)
+		{
+			uint8_t c;
+			if (!rb_u8(f, &c)) return false;
+		}
+		return true;
+	}
+	if (n > 0 && fread(buf, 1, n, f) != n) return false;
+	buf[n] = '\0';
+	return true;
+}
+
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 bool xdbg_write(const Module *module, const char *path)
@@ -234,9 +270,10 @@ bool xdbg_load_mem(Module *module, const void *data, size_t size)
 			if (sfile[0] && !ch->source_file[0])
 				xeno_copy_str(ch->source_file, sizeof(ch->source_file), sfile);
 
-			if ((int)lc > 0 && chunk_ensure_local_names(ch, ch->local_count > 0
-															? ch->local_count
-															: (int)lc))
+			/* Use the wider of bytecode local_count and symbol width so names
+			 * still apply when XBC local_count is smaller than the .xdbg table. */
+			int nslots = ch->local_count > (int)lc ? ch->local_count : (int)lc;
+			if ((int)lc > 0 && chunk_ensure_local_names(ch, nslots > 0 ? nslots : (int)lc))
 			{
 				for (int s = 0; s < (int)lc; s++)
 				{
@@ -246,7 +283,7 @@ bool xdbg_load_mem(Module *module, const void *data, size_t size)
 					uint8_t tk = 0;
 					if (ver >= 2 && !xr_u8(&r, &tk))
 						return true;
-					if (s < ch->local_count)
+					if (s < ch->local_name_count)
 					{
 						if (nbuf[0])
 							xeno_copy_str(ch->local_names[s], 64, nbuf);

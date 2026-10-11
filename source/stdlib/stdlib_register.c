@@ -127,7 +127,7 @@ static XenoResult fn_assert(XenoVM *vm, int argc, Value *argv, Value *out) {
 
 static XenoResult fn_array_grow(XenoVM *vm, int argc, Value *argv, Value *out) {
     (void)argc;
-    XenoArray *arr     = argv[0].arr;
+    XenoArray *arr     = val_as_arr(argv[0]); /* TYPE_ANY host still checks tag */
     int        new_cap = (int)argv[1].i;
     if (new_cap <= 0) new_cap = 8;
     if (arr && new_cap <= arr->length) { *out = argv[0]; return XENO_OK; }
@@ -142,9 +142,9 @@ static XenoResult fn_array_grow(XenoVM *vm, int argc, Value *argv, Value *out) {
         memcpy(grown->elements, arr->elements, (size_t)old_len * sizeof(Value));
     grown->length = new_cap;
     for (int i = old_len; i < new_cap; i++)
-        grown->elements[i].i = 0;
+        grown->elements[i] = val_null();
 
-    out->arr = grown;
+    *out = val_arr(grown);
     return XENO_OK;
 }
 

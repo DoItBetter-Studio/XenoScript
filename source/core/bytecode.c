@@ -23,6 +23,7 @@ void chunk_init(Chunk *chunk)
     chunk->capacity = 0;
     chunk->local_count = 0;
     chunk->param_count = 0;
+    chunk->max_stack = 0;
     chunk->is_constructor = false;
     chunk->return_type_kind = 0;
     memset(chunk->param_type_kinds, 0, sizeof(chunk->param_type_kinds));
@@ -81,8 +82,14 @@ int chunk_write(Chunk *chunk, uint8_t byte, int line)
         int new_cap = chunk->capacity < CHUNK_INIT_CAPACITY
                           ? CHUNK_INIT_CAPACITY
                           : chunk->capacity * 2;
-        chunk->code = realloc(chunk->code, new_cap * sizeof(uint8_t));
-        chunk->lines = realloc(chunk->lines, new_cap * sizeof(int));
+        uint8_t *new_code = realloc(chunk->code, (size_t)new_cap * sizeof(uint8_t));
+        if (!new_code)
+            return -1; /* original code buffer unchanged */
+        chunk->code = new_code;
+        int *new_lines = realloc(chunk->lines, (size_t)new_cap * sizeof(int));
+        if (!new_lines)
+            return -1; /* code grown; lines still old capacity — count not advanced */
+        chunk->lines = new_lines;
         chunk->capacity = new_cap;
     }
 
@@ -121,10 +128,7 @@ int chunk_add_constant(Chunk *chunk, Value value)
 
 int chunk_add_constant_str(Chunk *chunk, char *heap_str)
 {
-	Value v;
-	memset(&v, 0, sizeof(Value));
-	v.is_null = 0;
-	v.s = heap_str;
+	Value v = val_str(heap_str);
 	int idx = const_pool_push(&chunk->constants, v, 1);
 	if (idx < 0) free(heap_str);
 	return idx;

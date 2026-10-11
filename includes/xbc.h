@@ -85,4 +85,33 @@ XbcResult xbc_read(Module *module, const char *path);
 XbcResult xbc_write_mem(const Module *module, uint8_t **buf, size_t *size);
 XbcResult xbc_read_mem(Module *module, const uint8_t *buf, size_t size);
 
+/*
+ * Verification mode.
+ *   PRE_MERGE  — single .xbc / chunk load. Hollow stubs (empty code,
+ *                fn_index == -1, field_count == 0) are allowed.
+ *   POST_MERGE — after module_merge has filled shells and remapped indices.
+ *                Strict: no unresolved methods, name operands must resolve,
+ *                OP_CALL argc must match callee param_count, static field
+ *                indices must be in range with no hollow escape.
+ */
+typedef enum {
+    XBC_VERIFY_PRE_MERGE  = 0,
+    XBC_VERIFY_POST_MERGE = 1,
+} XbcVerifyMode;
+
+/* Optional host-function table for OP_CALL_HOST checks (NULL to skip). */
+typedef struct {
+    int        host_fn_count;
+    const int *param_counts; /* length host_fn_count; -1 = variadic; may be NULL */
+} XbcVerifyHostCtx;
+
+/*
+ * Structural + instruction-boundary verification of an already-deserialized
+ * Module. xbc_read / xbc_read_mem call PRE_MERGE. VM post-merge sites call
+ * POST_MERGE, optionally with host context for OP_CALL_HOST checks.
+ */
+XbcResult xbc_verify_module(const Module *module, XbcVerifyMode mode);
+XbcResult xbc_verify_module_ex(const Module *module, XbcVerifyMode mode,
+                               const XbcVerifyHostCtx *host);
+
 #endif /* XBC_H */
