@@ -99,42 +99,6 @@ static bool wb_str(FILE *f, const char *s)
 	return n == 0 || fwrite(s, 1, n, f) == n;
 }
 
-static bool rb_u8(FILE *f, uint8_t *v)  { return fread(v, 1, 1, f) == 1; }
-static bool rb_u16(FILE *f, uint16_t *v)
-{
-	uint8_t b[2];
-	if (fread(b, 1, 2, f) != 2) return false;
-	*v = (uint16_t)b[0] | ((uint16_t)b[1] << 8);
-	return true;
-}
-static bool rb_u32(FILE *f, uint32_t *v)
-{
-	uint8_t b[4];
-	if (fread(b, 1, 4, f) != 4) return false;
-	*v = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
-		 ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-	return true;
-}
-static bool rb_str(FILE *f, char *buf, size_t cap)
-{
-	uint16_t n = 0;
-	if (!rb_u16(f, &n)) return false;
-	if (n >= cap)
-	{
-		/* skip overflow */
-		if (cap > 0) buf[0] = '\0';
-		while (n--)
-		{
-			uint8_t c;
-			if (!rb_u8(f, &c)) return false;
-		}
-		return true;
-	}
-	if (n > 0 && fread(buf, 1, n, f) != n) return false;
-	buf[n] = '\0';
-	return true;
-}
-
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 bool xdbg_write(const Module *module, const char *path)

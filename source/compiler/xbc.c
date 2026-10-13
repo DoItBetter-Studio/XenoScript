@@ -970,11 +970,6 @@ static uint16_t ver_u16(const Chunk *ch, int *pos)
     return v;
 }
 
-static int16_t ver_i16(const Chunk *ch, int *pos)
-{
-    return (int16_t)ver_u16(ch, pos);
-}
-
 static void ver_bit_set(uint8_t *bits, int i)
 {
     bits[i >> 3] |= (uint8_t)(1u << (i & 7));
