@@ -3377,14 +3377,14 @@ static Type check_expr(Checker *c, Expr *expr)
 			if (flen == 8 && memcmp(fname, "MaxValue", 8) == 0)
 			{
 				expr->kind = EXPR_INT_LIT;
-				expr->int_lit.value = (__int128_t)UINT64_MAX;
+				expr->int_lit.value = (XenoInt)(uint64_t)UINT64_MAX;
 				return resolve(expr, type_ulong());
 			}
 
 			if (flen == 8 && memcmp(fname, "MinValue", 8) == 0)
 			{
 				expr->kind = EXPR_INT_LIT;
-				expr->int_lit.value = (__int128_t)0;
+				expr->int_lit.value = (XenoInt)0;
 				return resolve(expr, type_ulong());
 			}
 
@@ -3401,14 +3401,14 @@ static Type check_expr(Checker *c, Expr *expr)
 			if (flen == 8 && memcmp(fname, "MaxValue", 8) == 0)
 			{
 				expr->kind = EXPR_INT_LIT;
-				expr->int_lit.value = (__int128_t)INT32_MAX;
+				expr->int_lit.value = (XenoInt)INT32_MAX;
 				return resolve(expr, type_int());
 			}
 
 			if (flen == 8 && memcmp(fname, "MinValue", 8) == 0)
 			{
 				expr->kind = EXPR_INT_LIT;
-				expr->int_lit.value = (__int128_t)INT32_MIN;
+				expr->int_lit.value = (XenoInt)INT32_MIN;
 				return resolve(expr, type_int());
 			}
 

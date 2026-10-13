@@ -34,6 +34,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifndef XENO_INT_DEFINED
+#define XENO_INT_DEFINED
+typedef int64_t XenoInt;
+#endif
+
 /* Forward declaration — Expr and Stmt reference each other */
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
@@ -262,7 +267,7 @@ struct Expr {
     union {
         /* EXPR_INT_LIT */
         struct {
-            __int128_t value;
+            XenoInt    value;
         } int_lit;
 
         /* EXPR_CHAR_LIT -- Unicode codepoint, stored as uint32_t */
@@ -992,7 +997,7 @@ typedef struct {
 #include "arena.h"
 
 /* Expressions */
-Expr *expr_int_lit   (Arena *a, __int128_t value,        int line, int col);
+Expr *expr_int_lit   (Arena *a, XenoInt value,           int line, int col);
 Expr *expr_char_lit  (Arena *a, uint32_t value,          int line, int col);
 Expr *expr_float_lit (Arena *a, double value,            int line, int col);
 Expr *expr_bool_lit  (Arena *a, bool value,              int line, int col);

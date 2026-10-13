@@ -1318,44 +1318,53 @@ static bool xeno_object_is_named(Value v, const Module *mod, const char *name)
     return class_matches_name(mod, obj->class_def, name);
 }
 
-static char *int128_to_string(__int128_t v) {
+static char *xeno_int_to_string(XenoInt v) {
     char buf[64];
     int i = 63;
     buf[i] = '\0';
 
-    int negative = v < 0;
-    if (negative) v = -v;
+    /* Handle INT64_MIN without overflow on negation */
+    uint64_t uv;
+    int negative = 0;
+    if (v < 0) {
+        negative = 1;
+        uv = (uint64_t)(-(v + 1)) + 1; /* abs without UB */
+    } else {
+        uv = (uint64_t)v;
+    }
 
     do {
-        buf[--i] = '0' + (v % 10);
-        v /= 10;
-    } while (v);
+        buf[--i] = (char)('0' + (uv % 10));
+        uv /= 10;
+    } while (uv);
 
     if (negative)
         buf[--i] = '-';
 
-    char *s = malloc(64 - i);
+    char *s = malloc((size_t)(64 - i));
+    if (!s) return NULL;
     strcpy(s, &buf[i]);
     return s;
 }
 
-static char *uint128_to_string(__int128_t v) {
+static char *xeno_uint_to_string(XenoInt v) {
     char buf[64];
     int i = 63;
     buf[i] = '\0';
 
-    __int128_t uv = (__int128_t)v;
+    uint64_t uv = (uint64_t)v;
 
     if (uv == 0) {
         buf[--i] = '0';
     } else {
         do {
-            buf[--i] = '0' + (uv % 10);
+            buf[--i] = (char)('0' + (uv % 10));
             uv /= 10;
         } while (uv);
     }
 
-    char *s = malloc(64 - i);
+    char *s = malloc((size_t)(64 - i));
+    if (!s) return NULL;
     strcpy(s, &buf[i]);
     return s;
 }
@@ -1746,19 +1755,21 @@ static XenoResult xeno_execute(XenoVM *vm)
                 break;
             }
             case 0: /* int */
-                s = int128_to_string(v.i);
+                s = xeno_int_to_string(v.i);
                 break;
             case 1: /* float */
                 s = float_to_string(v.f);
                 break;
             case 2: /* bool */
             {
+                const unsigned char *representation =
+                    (const unsigned char *)&v.b;
                 s = malloc(6);
-                strcpy(s, val_truth(v) ? "true" : "false");
+                strcpy(s, representation[0] ? "true" : "false");
                 break;
             }
             case 5: /* unsigned int */
-                s = uint128_to_string(v.i);
+                s = xeno_uint_to_string(v.i);
                 break;
             case 3:
             { /* char -- encode codepoint as UTF-8 */
@@ -1808,23 +1819,15 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_NOT_BOOL:
         {
             Value a = POP();
-            PUSH(val_bool(!val_truth(a)));
+            PUSH(val_bool(!a.b));
             break;
         }
         case OP_AND_BOOL:
-        {
-            Value b = POP();
-            Value a = POP();
-            PUSH(val_bool(val_truth(a) && val_truth(b)));
+            BINARY_OP(b, &&, val_bool);
             break;
-        }
         case OP_OR_BOOL:
-        {
-            Value b = POP();
-            Value a = POP();
-            PUSH(val_bool(val_truth(a) || val_truth(b)));
+            BINARY_OP(b, ||, val_bool);
             break;
-        }
 
         /* ── Integer comparisons ────────────────────────────────── */
         case OP_CMP_EQ_INT:
@@ -1868,19 +1871,11 @@ static XenoResult xeno_execute(XenoVM *vm)
 
         /* ── Bool/string equality ───────────────────────────────── */
         case OP_CMP_EQ_BOOL:
-        {
-            Value b = POP();
-            Value a = POP();
-            PUSH(val_bool(val_truth(a) == val_truth(b)));
+            BINARY_OP(b, ==, val_bool);
             break;
-        }
         case OP_CMP_NEQ_BOOL:
-        {
-            Value b = POP();
-            Value a = POP();
-            PUSH(val_bool(val_truth(a) != val_truth(b)));
+            BINARY_OP(b, !=, val_bool);
             break;
-        }
         case OP_CMP_EQ_STR:
         {
             Value b = POP();
@@ -1930,7 +1925,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
             else if (vm->elem_kind_reg == TYPE_BOOL)
             {
-                eq = (val_truth(a) == val_truth(b));
+                eq = (a.b == b.b);
             }
             else
             {
@@ -1960,7 +1955,7 @@ static XenoResult xeno_execute(XenoVM *vm)
             }
             else if (vm->elem_kind_reg == TYPE_BOOL)
             {
-                eq = (val_truth(a) == val_truth(b));
+                eq = (a.b == b.b);
             }
             else
             {
@@ -1987,7 +1982,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             int16_t offset = READ_I16();
             Value cond = POP();
-            if (!val_truth(cond))
+            if (!cond.b)
                 frame->ip += offset;
             break;
         }
@@ -1996,7 +1991,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         {
             int16_t offset = READ_I16();
             Value cond = POP();
-            if (val_truth(cond))
+            if (cond.b)
                 frame->ip += offset;
             break;
         }
@@ -2337,7 +2332,7 @@ static XenoResult xeno_execute(XenoVM *vm)
 		case OP_F2I:
 		{
 			Value v = POP();
-			v.i = (__int128_t)v.f;
+			v.i = (XenoInt)v.f;
 			PUSH(v);
 			break;
 		}
@@ -3490,7 +3485,7 @@ static XenoResult xeno_execute(XenoVM *vm)
         case OP_TRUNC_U64:
         {
             uint64_t v = (uint64_t)POP().i;
-            PUSH(val_int((__int128_t)v));
+            PUSH(val_int((XenoInt)v));
             break;
         }
         case OP_TRUNC_CHAR:

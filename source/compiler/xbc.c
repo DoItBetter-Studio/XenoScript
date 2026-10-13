@@ -854,7 +854,7 @@ static XbcResult deserialize_module(Module *module, ReadBuf *rb) {
             } else {
                 int64_t raw = (int64_t)rb_u64(rb);
                 if (rb->error) return XBC_ERR_IO;
-                chunk_add_constant(chunk, val_int((__int128_t)raw));
+                chunk_add_constant(chunk, val_int((XenoInt)raw));
             }
         }
 

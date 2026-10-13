@@ -187,7 +187,7 @@ bool type_is_unsigned(Type t) {
  * type checker to fill in.
  * ───────────────────────────────────────────────────────────────────────────*/
 
-Expr *expr_int_lit(Arena *a, __int128_t value, int line, int col) {
+Expr *expr_int_lit(Arena *a, XenoInt value, int line, int col) {
     Expr *e         = arena_alloc(a, sizeof(Expr));
     e->kind         = EXPR_INT_LIT;
     e->line         = line;

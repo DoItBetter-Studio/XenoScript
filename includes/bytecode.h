@@ -18,6 +18,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Portable integer payload for Value / int literals.
+ * Language ints are at most 64-bit; ulong uses the same slot as a bit pattern. */
+#ifndef XENO_INT_DEFINED
+#define XENO_INT_DEFINED
+typedef int64_t XenoInt;
+#endif
+
 /* ═════════════════════════════════════════════════════════════════════════════
  * CLASS DEFINITION (compile-time metadata, lives at runtime too)
  *
@@ -56,7 +63,7 @@ struct AttrArg {
     AttrArgKind kind;
     union {
         char   *s;            /* ATTR_ARG_STRING — heap-allocated            */
-        __int128_t i;         /* ATTR_ARG_INT (includes enum values)         */
+        XenoInt   i;         /* ATTR_ARG_INT (includes enum values)         */
         double  f;            /* ATTR_ARG_FLOAT                              */
         bool    b;            /* ATTR_ARG_BOOL                               */
         struct {
@@ -105,7 +112,7 @@ typedef struct Value {
     uint8_t      is_null;   /* 1 = null literal, 0 = real value */
     uint8_t      kind;      /* ValueRefKind — 0 for scalars */
     union {
-        __int128_t   i;
+        XenoInt      i;
         double       f;
         bool         b;
         char        *s;
@@ -118,7 +125,7 @@ typedef struct Value {
     };
 } Value;
 
-static inline Value val_int  (__int128_t  v) { Value r; r.is_null=0; r.kind=0;           r.i   = v; return r; }
+static inline Value val_int  (XenoInt      v) { Value r; r.is_null=0; r.kind=0;           r.i   = v; return r; }
 static inline Value val_float(double      v) { Value r; r.is_null=0; r.kind=0;           r.f   = v; return r; }
 static inline Value val_bool (bool        v) { Value r; r.is_null=0; r.kind=0;           r.b   = v; return r; }
 static inline Value val_str  (char       *v) { Value r; r.is_null=0; r.kind=VAL_STR;     r.s   = v; return r; }
@@ -130,18 +137,6 @@ static inline Value val_method(XenoMethod *v){ Value r; r.is_null=0; r.kind=VAL_
 static inline Value val_param(XenoParam  *v) { Value r; r.is_null=0; r.kind=VAL_PARAM;   r.param = v; return r; }
 static inline Value val_null (void)          { Value r; r.is_null=1; r.kind=0;           r.i   = 0; return r; }
 static inline bool  is_val_null(Value v)     { return v.is_null != 0; }
-
-/* Read a Value as a boolean truth value without ever performing an lvalue
- * read of the `.b` (_Bool) union member directly. A forged/mutated Value
- * can share storage with `.b` while holding a non-0/1 bit pattern (e.g. an
- * int constant loaded where the compiler would only ever have emitted a
- * bool), and reading such a pattern as `_Bool` is undefined behavior in C
- * (a trap representation), independent of the reference-kind tag, which
- * only covers pointer members. Reading through `.i` instead has no trap
- * representation and gives a well-defined "nonzero is true" semantics even
- * for bytecode the compiler would never have produced. Every opcode that
- * needs a bool's truth value must go through this helper instead of `.b`. */
-static inline bool  val_truth(Value v)       { return v.i != 0; }
 static inline bool  val_is_kind(Value v, ValueRefKind k) {
     return !v.is_null && v.kind == (uint8_t)k;
 }

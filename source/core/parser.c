@@ -379,10 +379,13 @@ typedef enum {
  * indirectly through parse_stmt -> parse_expr */
 static Expr *parse_expr(Parser *p, int min_bp);
 
-static __int128_t parse_int128(const char *s)
+/* Parse a decimal integer into XenoInt (int64_t bit pattern).
+ * Full uint64 range is accepted; values above INT64_MAX are stored as the
+ * equivalent two's-complement bit pattern (for ulong literals). */
+static XenoInt parse_xeno_int(const char *s)
 {
     int negative = 0;
-    __int128_t result = 0;
+    uint64_t result = 0;
 
     if (*s == '-') {
         negative = 1;
@@ -392,11 +395,19 @@ static __int128_t parse_int128(const char *s)
     }
 
     while (*s >= '0' && *s <= '9') {
-        result = result * 10 + (*s - '0');
+        unsigned dig = (unsigned)(*s - '0');
+        if (result > (UINT64_MAX - dig) / 10)
+            result = UINT64_MAX; /* saturate on overflow */
+        else
+            result = result * 10 + dig;
         s++;
     }
 
-    return negative ? -result : result;
+    if (negative) {
+        /* negate in two's complement; INT64_MIN is representable as bit pattern */
+        return (XenoInt)(0 - result);
+    }
+    return (XenoInt)result;
 }
 
 /*
@@ -422,7 +433,7 @@ static Expr *parse_prefix(Parser *p) {
             int  len = t.length < 63 ? t.length : 63;
             memcpy(buf, t.start, len);
             buf[len] = '\0';
-            __int128_t value = parse_int128(buf);
+            XenoInt value = parse_xeno_int(buf);
             return expr_int_lit(&p->arena, value, t.line, t.col);
         }
 

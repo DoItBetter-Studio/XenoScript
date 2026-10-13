@@ -1343,7 +1343,7 @@ static void emit_loop(Compiler *c, int loop_start, int line)
 }
 
 /* Add a constant to the current chunk's pool and emit a load instruction. */
-static void emit_const_int(Compiler *c, __int128_t value, int line)
+static void emit_const_int(Compiler *c, XenoInt value, int line)
 {
 	int idx = chunk_add_constant(CURRENT_CHUNK(c), val_int(value));
 	emit_op(c, OP_LOAD_CONST_INT, line);
