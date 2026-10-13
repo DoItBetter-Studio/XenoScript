@@ -1,0 +1,7 @@
+@Mod("embed_smoke", "1.0.0", "EmbedSmoke")
+class EmbedSmoke {
+    public:
+        EmbedSmoke() {
+            print("embedded VM host callback passed");
+        }
+}
